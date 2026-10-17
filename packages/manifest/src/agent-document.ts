@@ -65,6 +65,10 @@ export interface AgentDocumentRules {
   readonly cssForbiddenAtRules: readonly string[];
   /** Old browser-only code hooks in CSS: forbidden too. */
   readonly cssForbiddenLegacy: readonly string[];
+  /** Text slots: an element with this attribute is kept, and the attribute is kept when its value matches `textSlotPattern`
+   *  (else the attribute is removed). The app fills the slot with ESCAPED text AFTER sanitising (`fillTextSlots`). */
+  readonly textSlotAttribute: string;
+  readonly textSlotPattern: string;
   /** Largest tree depth the sanitiser walks; deeper: fail closed. */
   readonly maxDepth: number;
   /** Most attributes one tag may carry in the input; more: fail closed. (An HTML5 parser takes time quadratic in the
@@ -111,6 +115,8 @@ export const AGENT_DOCUMENT_RULES: AgentDocumentRules = deepFreeze({
   cssForbiddenFunctions: ["cross-fade", "element", "image", "image-set", "src", "url"],
   cssForbiddenAtRules: ["import"],
   cssForbiddenLegacy: ["-moz-binding", "expression"],
+  textSlotAttribute: "data-tb-text",
+  textSlotPattern: "^[a-z][a-z0-9_]*(\\.[a-z0-9_]+)*$",
   maxDepth: 600,
   maxAttributesPerTag: 1000,
 });

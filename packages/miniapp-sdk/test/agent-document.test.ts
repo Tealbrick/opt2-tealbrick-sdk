@@ -9,9 +9,9 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { describe, test } from "node:test";
-import { AGENT_DOCUMENT_MARKER, AGENT_DOCUMENT_MAX_BYTES, AGENT_DOCUMENT_UNAVAILABLE_TEXT, AGENT_DOCUMENT_RULES as R } from "@opt2-tealbrick/manifest";
+import { AGENT_DOCUMENT_MARKER, AGENT_DOCUMENT_MAX_BYTES, AGENT_DOCUMENT_UNAVAILABLE_TEXT, AGENT_DOCUMENT_RULES as R, viewerDocumentCspOk } from "@opt2-tealbrick/manifest";
 import { parse, serialize, type DefaultTreeAdapterTypes as T } from "parse5";
-import { AGENT_DOCUMENT_UNAVAILABLE_HTML, type SanitizeAgentDocumentResult, sanitizeAgentDocument } from "../src/server/index.ts";
+import { AGENT_DOCUMENT_UNAVAILABLE_HTML, fillTextSlots, NO_SCRIPT_CSP, type SanitizeAgentDocumentResult, sanitizeAgentDocument } from "../src/server/index.ts";
 
 const DIR = new URL("./vectors/agent-documents/", import.meta.url);
 interface Case {
@@ -98,9 +98,25 @@ function hits(html: string, allowScripts: boolean, prefix: string): string[] {
   return [...found].sort();
 }
 
+/** Independent reading of "can this page run script": a script element (any type, any namespace) or an on* attribute. */
+function scriptsIn(html: string): boolean {
+  let found = false;
+  const visit = (node: T.ParentNode): void => {
+    for (const child of node.childNodes) {
+      if (!("tagName" in child)) continue;
+      if (child.tagName.toLowerCase() === "script" || child.attrs.some((a) => a.name.toLowerCase().startsWith("on"))) found = true;
+      visit(child);
+      const content = (child as T.Template).content;
+      if (content) visit(content);
+    }
+  };
+  for (const scripting of [true, false]) visit(parse(html, { scriptingEnabled: scripting }));
+  return found;
+}
+
 /** What a sanitiser that does nothing would return (parse, serialise, add the marker). */
 function identity(html: string): SanitizeAgentDocumentResult {
-  return { ok: true, html: AGENT_DOCUMENT_MARKER + serialize(parse(html, { scriptingEnabled: true })), removed: [] };
+  return { ok: true, html: AGENT_DOCUMENT_MARKER + serialize(parse(html, { scriptingEnabled: true })), runsScripts: false, removed: [] };
 }
 
 function verify(c: Case, input: string, res: SanitizeAgentDocumentResult, again: (html: string) => SanitizeAgentDocumentResult): void {
@@ -111,6 +127,8 @@ function verify(c: Case, input: string, res: SanitizeAgentDocumentResult, again:
   assert.ok(res.html.startsWith(AGENT_DOCUMENT_MARKER), `${c.file}: marker first`);
   assert.equal(res.html.split(AGENT_DOCUMENT_MARKER).length, 2, `${c.file}: marker exactly once`);
   assert.deepEqual(hits(res.html, c.allowScripts, PREFIX), [], `${c.file}: constructs left in the output`);
+  assert.equal(res.runsScripts, scriptsIn(res.html), `${c.file}: runsScripts matches the sanitised output`);
+  if (!c.allowScripts) assert.equal(res.runsScripts, false, `${c.file}: no-scripts mode never runs scripts`);
   const low = res.html.toLowerCase();
   for (const a of c.absent) assert.ok(!low.includes(a.toLowerCase()), `${c.file}: output still has ${JSON.stringify(a)}`);
   for (const p of c.present) assert.ok(res.html.includes(p), `${c.file}: output lost ${JSON.stringify(p)}`);
@@ -375,6 +393,93 @@ describe("rules and details", () => {
   });
 });
 
+describe("runsScripts, NO_SCRIPT_CSP, text slots (Live Artifacts S7)", () => {
+  const page = (b: string) => `<!DOCTYPE html><html><head></head><body>${b}</body></html>`;
+  const on = { allowScripts: true, assetPrefix: PREFIX };
+  const off = { allowScripts: false, assetPrefix: PREFIX };
+
+  test("runsScripts: false for a script-free page, true for any script element or inline handler", () => {
+    const free = '<h1>t</h1><a href="#x">x</a><svg><rect fill="red"></rect></svg><style>p{color:red}</style><template><p>x</p></template>';
+    for (const o of [on, off]) {
+      const r = sanitizeAgentDocument(page(free), o);
+      assert.equal(r.ok, true);
+      assert.equal(r.runsScripts, false);
+    }
+    assert.equal(sanitizeAgentDocument(page('<script type="application/json">{"a":1}</script>'), on).runsScripts, true);
+    assert.equal(sanitizeAgentDocument(page('<script type="application/ld+json">{}</script>'), on).runsScripts, true);
+    assert.equal(sanitizeAgentDocument(page("<script>1</script>"), on).runsScripts, true);
+    assert.equal(sanitizeAgentDocument(page('<button onclick="go()">b</button>'), on).runsScripts, true);
+    assert.equal(sanitizeAgentDocument(page('<svg><script href="#x"></script></svg>'), on).runsScripts, true);
+    assert.equal(sanitizeAgentDocument(page('<template><p onclick="x()">t</p></template>'), on).runsScripts, true);
+    // a script that the sanitiser removes does not count
+    assert.equal(sanitizeAgentDocument(page('<noscript><script>1</script></noscript>'), on).runsScripts, false);
+  });
+
+  test("no-scripts mode removes every script element (JSON too) and every on* attribute: runsScripts is always false", () => {
+    const r = sanitizeAgentDocument(page('<script type="application/json">{"a":1}</script><script>1</script><p onclick="a()" ONMOUSEOVER="b()">t</p><svg onload="c()"><script>2</script></svg>'), off);
+    assert.equal(r.ok, true);
+    assert.equal(r.runsScripts, false);
+    assert.ok(!/<script|onclick|onmouseover|onload/i.test(r.html), r.html);
+    assert.equal(sanitizeAgentDocument("<p>x</p>".repeat(3) + "x".repeat(R.maxDepth * 1000), off).runsScripts, false);
+    assert.equal(sanitizeAgentDocument(page("<div>".repeat(R.maxDepth + 5)), off).runsScripts, false, "the inert page runs nothing");
+  });
+
+  test("NO_SCRIPT_CSP: forbids script, passes the manifest _d gate, with or without frame-ancestors", () => {
+    assert.equal(NO_SCRIPT_CSP, "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data: 'self'; sandbox");
+    assert.equal(viewerDocumentCspOk([NO_SCRIPT_CSP]), true);
+    assert.equal(viewerDocumentCspOk([`${NO_SCRIPT_CSP}; frame-ancestors https://v.example https://b.example`]), true);
+    assert.ok(!/allow-/.test(NO_SCRIPT_CSP) && NO_SCRIPT_CSP.includes("script-src 'none'"));
+    assert.ok(!NO_SCRIPT_CSP.includes("unsafe-eval") && !/script-src[^;]*unsafe-inline/.test(NO_SCRIPT_CSP));
+  });
+
+  test("data-tb-text: a valid key keeps attribute and element, an invalid one drops only the attribute", () => {
+    for (const key of ["title", "a.b", "a_1.b_2.c3", "x9"]) {
+      const r = sanitizeAgentDocument(page(`<h1 data-tb-text="${key}" class="k">placeholder</h1>`), off);
+      assert.ok(r.html.includes(`<h1 data-tb-text="${key}" class="k">placeholder</h1>`), r.html);
+      assert.deepEqual(r.removed, []);
+    }
+    for (const key of ["", "A", "a.B", "1a", "a..b", "a.", ".a", "a-b", "a b", "a.b\n", "a\nb", "k\u00e9y", "a.b/c", "<x>"]) {
+      const r = sanitizeAgentDocument(page(`<h1 data-tb-text="${key.replace(/</g, "&lt;")}">placeholder</h1>`), off);
+      assert.ok(r.html.includes("<h1>placeholder</h1>"), `${JSON.stringify(key)} -> ${r.html}`);
+      assert.deepEqual(r.removed, [{ kind: "attribute:data-tb-text", count: 1 }], JSON.stringify(key));
+    }
+    assert.ok(sanitizeAgentDocument(page('<p DATA-TB-TEXT="a.b">x</p>'), off).html.includes('<p data-tb-text="a.b">x</p>'));
+  });
+
+  test("fillTextSlots: a hostile value is text, never markup; the page stays sanitised", () => {
+    const sane = sanitizeAgentDocument(page('<h1 data-tb-text="t">x</h1><p data-tb-text="a.b"><b>old</b></p><span data-tb-text="missing">keep</span><img data-tb-text="t" src="#x">'), off);
+    const hostile = `</p><img src=x onerror=alert(1)><script>alert(2)</script><link rel=prerender href=//h.invalid/> & "q" 'a' <!-- c --> </title></style>`;
+    const out = fillTextSlots(sane.html, { t: hostile, "a.b": "<b>x</b>" });
+    assert.ok(out.startsWith(AGENT_DOCUMENT_MARKER));
+    assert.ok(out.includes("<h1 data-tb-text=\"t\">&lt;/p&gt;&lt;img src=x onerror=alert(1)&gt;&lt;script&gt;alert(2)&lt;/script&gt;"), out);
+    assert.ok(out.includes('<p data-tb-text="a.b">&lt;b&gt;x&lt;/b&gt;</p>'));
+    assert.ok(out.includes('<span data-tb-text="missing">keep</span>'), "a key without a value is left alone");
+    assert.ok(out.includes('<img data-tb-text="t" src="#x">'), "a void element takes no text");
+    // re-parse: still no construct, no script, and it equals what a second sanitiser pass gives
+    assert.deepEqual(hits(out, false, PREFIX), []);
+    assert.equal(scriptsIn(out), false);
+    assert.equal(sanitizeAgentDocument(out, off).html, out);
+    // the text comes back out of the DOM as the exact value
+    const h1 = ((parse(out).childNodes.find((n) => "tagName" in n) as T.Element).childNodes[1] as T.Element).childNodes[0] as T.Element;
+    assert.equal(h1.tagName, "h1");
+    assert.equal(h1.childNodes.length, 1);
+    assert.equal((h1.childNodes[0] as T.TextNode).value, hostile);
+  });
+
+  test("fillTextSlots: code and raw-text elements are never filled; values other than strings are written as text", () => {
+    const sane = sanitizeAgentDocument(page('<style data-tb-text="s">p{color:red}</style><svg><style data-tb-text="s"></style><text data-tb-text="n">0</text></svg><template data-tb-text="s"><i data-tb-text="n">0</i></template><textarea data-tb-text="s"></textarea><title data-tb-text="s"></title>'), off);
+    const out = fillTextSlots(sane.html, { s: "</textarea></title></style><img src=//h.invalid/x>", n: 42 });
+    assert.ok(out.includes("<style data-tb-text=\"s\">p{color:red}</style>"), out);
+    assert.ok(out.includes("<text data-tb-text=\"n\">42</text>"));
+    assert.ok(out.includes("<i data-tb-text=\"n\">42</i>"), "template content is filled");
+    assert.ok(out.includes('<textarea data-tb-text="s">&lt;/textarea&gt;&lt;/title&gt;&lt;/style&gt;&lt;img src=//h.invalid/x&gt;</textarea>'));
+    assert.deepEqual(hits(out, false, PREFIX), []);
+    assert.equal(sanitizeAgentDocument(out, off).html, out);
+    // keys that are inherited object members or not valid keys are not looked up
+    assert.equal(fillTextSlots(sanitizeAgentDocument(page('<p data-tb-text="constructor">x</p>'), off).html, {}).includes(">x</p>"), true);
+  });
+});
+
 describe("package boundary", () => {
   test("server entry exports it; the browser client entry never touches the sanitiser or parse5", () => {
     const walk = (dir: URL): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(new URL(`${e.name}/`, dir)) : [new URL(e.name, dir).pathname]));
@@ -426,6 +531,8 @@ describe("property: sanitising twice equals sanitising once; the output is alway
         assert.equal(second.ok, true);
         assert.deepEqual(second.removed, []);
         assert.deepEqual(hits(res.html, allowScripts, PREFIX), [], `input #${n} left a construct: ${res.html.slice(0, 300)}`);
+        assert.equal(res.runsScripts, scriptsIn(res.html), `input #${n}: runsScripts`);
+        if (!allowScripts) assert.equal(res.runsScripts, false);
         if (res.ok) ok++;
       }
       assert.ok(ok >= 540, `fail-closed must stay rare on realistic input (ok ${ok} of 600)`);

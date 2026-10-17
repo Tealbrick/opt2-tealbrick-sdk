@@ -58,4 +58,9 @@ test("AGENT_DOCUMENT_RULES: the agreed removals are in the list (Creative S3 / L
   // A4: CSS image functions and at-rules
   for (const f of ["url", "image", "image-set", "cross-fade", "element", "src"]) assert.ok(R.cssForbiddenFunctions.includes(f), f);
   assert.deepEqual([...R.cssForbiddenAtRules], ["import"]);
+  // text slots (Live Artifacts S7)
+  assert.equal(R.textSlotAttribute, "data-tb-text");
+  const slot = new RegExp(R.textSlotPattern);
+  for (const ok of ["a", "a.b", "a_1.b2"]) assert.ok(slot.test(ok), ok);
+  for (const bad of ["", "A", "1a", "a..b", "a.", "a-b", "a\n"]) assert.ok(!slot.test(bad), JSON.stringify(bad));
 });

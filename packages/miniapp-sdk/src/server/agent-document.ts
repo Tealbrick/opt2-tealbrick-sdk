@@ -26,6 +26,10 @@ export interface SanitizeAgentDocumentResult {
   /** True: `html` is the sanitised document. False: the sanitiser failed closed and `html` is AGENT_DOCUMENT_UNAVAILABLE_HTML. */
   ok: boolean;
   html: string;
+  /** True when the sanitised page can run script: a `<script>` element of any type (JSON types too) or an inline `on*` handler
+   *  is left in it. Always false with `allowScripts: false`, and false for the inert page. Read from the sanitised tree, so an
+   *  app can choose the CSP from it (`NO_SCRIPT_CSP` when false). */
+  runsScripts: boolean;
   /** What the rules removed: kind and count, sorted by kind. Never the removed content. */
   removed: { kind: string; count: number }[];
 }
@@ -34,7 +38,21 @@ export interface SanitizeAgentDocumentResult {
  *  the sanitiser. */
 export const AGENT_DOCUMENT_UNAVAILABLE_HTML = `${AGENT_DOCUMENT_MARKER}<!DOCTYPE html><html><head><meta charset="utf-8"><title>${AGENT_DOCUMENT_UNAVAILABLE_TEXT}</title></head><body><p>${AGENT_DOCUMENT_UNAVAILABLE_TEXT}</p></body></html>`;
 
-const failed = (): SanitizeAgentDocumentResult => ({ ok: false, html: AGENT_DOCUMENT_UNAVAILABLE_HTML, removed: [] });
+const failed = (): SanitizeAgentDocumentResult => ({ ok: false, html: AGENT_DOCUMENT_UNAVAILABLE_HTML, runsScripts: false, removed: [] });
+
+/**
+ * The Content-Security-Policy for a page that came back with `runsScripts: false`: no script at all (not even a JSON one
+ * can be read by a script, there is none), inline style allowed (`style` attributes and `<style>` are sanitised), images only
+ * from `data:` and the page's own origin (the app's `assetPrefix` paths; CSP cannot name a path without a host), nothing
+ * else (`default-src 'none'`: no fonts, media, frames, connections), and a sandbox WITHOUT any allow-* token. The app adds
+ * its own `frame-ancestors <viewUrl> <publicUrl>` to it. It passes `viewerDocumentCspOk` (@opt2-tealbrick/manifest).
+ */
+export const NO_SCRIPT_CSP = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data: 'self'; sandbox";
+
+const TEXT_SLOT_ATTRIBUTE = R.textSlotAttribute;
+const TEXT_SLOT_RE = new RegExp(R.textSlotPattern);
+/** Elements whose text is not text for the parser (or is code): a slot there is never filled. */
+const NO_FILL_ELEMENTS = new Set(["area", "base", "br", "col", "embed", "hr", "iframe", "img", "input", "link", "meta", "noembed", "noframes", "noscript", "param", "plaintext", "script", "source", "style", "template", "track", "wbr", "xmp"]);
 
 const MARKER_COMMENT = AGENT_DOCUMENT_MARKER.slice("<!--".length, -"-->".length);
 
@@ -363,6 +381,7 @@ interface Ctx {
   allowScripts: boolean;
   assetPrefix: string;
   counts: Counts;
+  runsScripts: boolean;
 }
 
 function fullName(a: { name: string; prefix?: string | undefined }): string {
@@ -400,8 +419,15 @@ function sanitizeAttributes(el: Element, tag: string, ctx: Ctx): void {
       continue;
     }
     if (full.startsWith(R.eventHandlerPrefix) || local.startsWith(R.eventHandlerPrefix)) {
-      if (ctx.allowScripts) kept.push(a);
-      else drop("attribute:event-handler");
+      if (ctx.allowScripts) {
+        ctx.runsScripts = true;
+        kept.push(a);
+      } else drop("attribute:event-handler");
+      continue;
+    }
+    if (full === TEXT_SLOT_ATTRIBUTE) {
+      if (TEXT_SLOT_RE.test(a.value)) kept.push(a);
+      else drop("attribute:data-tb-text");
       continue;
     }
     if (DENIED_ATTRIBUTES.has(full) || DENIED_ATTRIBUTES.has(local)) {
@@ -459,6 +485,7 @@ function walk(parent: ParentNode, ctx: Ctx, depth: number): void {
       ctx.counts.add(reason);
       continue;
     }
+    if (SCRIPT_ELEMENTS.has(tag)) ctx.runsScripts = true;
     sanitizeAttributes(child, tag, ctx);
     if (tag === "style") {
       const text = child.childNodes.filter(isText);
@@ -477,10 +504,11 @@ function walk(parent: ParentNode, ctx: Ctx, depth: number): void {
   parent.childNodes = kept;
 }
 
-function runPass(input: string, opts: SanitizeAgentDocumentOptions, scripting: boolean): { html: string; removed: { kind: string; count: number }[] } {
+function runPass(input: string, opts: SanitizeAgentDocumentOptions, scripting: boolean): { html: string; runsScripts: boolean; removed: { kind: string; count: number }[] } {
   const doc = parse(input, { scriptingEnabled: scripting });
   const counts = new Counts();
-  walk(doc, { allowScripts: opts.allowScripts, assetPrefix: opts.assetPrefix, counts }, 0);
+  const ctx: Ctx = { allowScripts: opts.allowScripts, assetPrefix: opts.assetPrefix, counts, runsScripts: false };
+  walk(doc, ctx, 0);
   // a frameset document loses its frameset above; a document always has a body when it is parsed again, so add it now
   const root = doc.childNodes.find((n): n is Element => isElement(n) && n.tagName === "html");
   if (root && !root.childNodes.some((n) => isElement(n) && n.tagName === "body")) {
@@ -494,7 +522,7 @@ function runPass(input: string, opts: SanitizeAgentDocumentOptions, scripting: b
   doc.childNodes.unshift(marker);
   const html = serialize(doc);
   if (!html.startsWith(AGENT_DOCUMENT_MARKER)) throw new Error("marker lost");
-  return { html, removed: counts.list() };
+  return { html, runsScripts: ctx.runsScripts, removed: counts.list() };
 }
 
 /**
@@ -514,10 +542,38 @@ export function sanitizeAgentDocument(html: string, opts: SanitizeAgentDocumentO
     // a second pass, parsed with scripting on AND off, must find nothing to remove and change nothing
     for (const scripting of [true, false]) {
       const again = runPass(first.html, o, scripting);
-      if (again.removed.length > 0 || again.html !== first.html) return failed();
+      if (again.removed.length > 0 || again.html !== first.html || again.runsScripts !== first.runsScripts) return failed();
     }
-    return { ok: true, html: first.html, removed: first.removed };
+    return { ok: true, html: first.html, runsScripts: first.runsScripts, removed: first.removed };
   } catch {
     return failed();
   }
+}
+
+/**
+ * Fills the text slots (`data-tb-text="key.path"`) of a SANITISED page: each slot element whose key is in `values` gets that
+ * value as its only child, as a text node. The value is text, never markup: the serialiser escapes it (`<`, `&`, ...), so
+ * `<img src=x onerror=...>` comes out as visible text. A slot on a raw-text or code element (`script`, `style`, `template`,
+ * `noscript`, `iframe`, `xmp`, ...) or on a void element (`img`, `br`, ...) is left alone; so is a slot whose key is not in `values` or is not a
+ * valid key. Values that are not strings are written with `String()`. Run it AFTER `sanitizeAgentDocument`, on its `html`.
+ */
+export function fillTextSlots(html: string, values: Readonly<Record<string, string | number | boolean>>): string {
+  const doc = parse(html, { scriptingEnabled: true });
+  const fill = (parent: ParentNode): void => {
+    for (const child of parent.childNodes) {
+      if (!isElement(child)) continue;
+      const tag = child.tagName.toLowerCase();
+      const key = child.attrs.find((a) => fullName(a) === TEXT_SLOT_ATTRIBUTE)?.value;
+      if (key !== undefined && TEXT_SLOT_RE.test(key) && Object.hasOwn(values, key) && !NO_FILL_ELEMENTS.has(tag)) {
+        child.childNodes = [];
+        defaultTreeAdapter.insertText(child, String(values[key]));
+        continue;
+      }
+      fill(child);
+      const content = (child as T.Template).content;
+      if (tag === "template" && content) fill(content);
+    }
+  };
+  fill(doc);
+  return serialize(doc);
 }
