@@ -3,6 +3,12 @@
 The Teal Brick opt2 conformance suite: checks, a fake bridge and a fake Portal, generated from `@opt2-tealbrick/spec`.
 Targets: `app`, `manifest`, `bridge`, `relay`, `core` (`tb-conformance --help`).
 
+## 0.1.21 (spec 0.1.46)
+
+- App target, GRANT-PRD: `A12.grant_prd_first` (a companion grant with `prd`, caller not yet in the slice: the receipt reports that product), `A12.grant_prd_mismatch` (grant `prd` differs from the slice product: refused 403 `grant_invalid`; a sabotaged SDK that prefers the slice fails), `A12.grant_prd_absent` (no `prd`: the slice product).
+- Bridge target, HOOK-CALLER-PRODUCT (spec 0.1.45): `B28.hook_caller_product` in group `spine013`. Bridges older than 0.2.2 (version read from the EnrolRequest) report it `not_applicable` by version.
+- Setup fixtures: `"as": "capsAgent"` and `${tb.capsAgent}` (see "Setup as the caps agent" below).
+
 ## Real peer apps behind the fake bridge (`--peers`, since 0.1.20)
 
 By default the app under test talks to FAKE companion apps. With `--peers` the suite also starts REAL SDK apps at pinned
@@ -71,3 +77,29 @@ events only, not on every push to main. The peer cache is per pipeline workspace
 source are injected, no network): quiet on good; fires on a peer that ignores the grant, on a peer that finds the caller's
 product by name, on an output that violates the contract; reports a peer that cannot start. `test/peer-source.test.ts`
 covers the signed index, the archive, the loader and the CLI flags.
+
+## Setup as the caps agent (`as: "capsAgent"`, since 0.1.21)
+
+A3.caps_count creates a fresh agent for each capped op and calls the op twice with a cap of one more run. An op that acts
+on data the caller owns (Connect: `buzz_schedule_cancel` on a post the caps agent created) cannot run with a generated
+input, because the fresh agent owns nothing yet. A `setup` entry of `tealbrick-conformance.json` may therefore name
+`"as": "capsAgent"`:
+
+```json
+{
+  "setup": [
+    { "id": "caps_post", "as": "capsAgent", "op": "buzz_post_create", "input": { "text": "caps probe" }, "capture": { "capsPost": "/id" } }
+  ],
+  "inputs": { "buzz_schedule_cancel": { "post": "${capsPost}" } }
+}
+```
+
+- A `capsAgent` step is deferred: it does not run with the other setup steps. For each fresh caps agent the suite runs the
+  `capsAgent` steps in order, AS that agent, after the agent exists in the slice and has seen its instance (first sight)
+  and before the capped calls. They run again for the next fresh agent, so every capped op gets its own data.
+- `${tb.capsAgent}` is the id of that agent, usable in `capsAgent` steps, `inputs` and `inputsAs`. An ordinary setup step
+  that names it is a usage error. A capture of a `capsAgent` step holds the value of the agent of the latest pick, so use
+  it in the inputs of the capped ops only.
+- A step runs with `held: []` and takes a cap slot like any run of its effect. Every successful `capsAgent` step whose op
+  has the same effect as the capped op raises the probe's cap by one, so the check still asserts "first call runs, second is held".
+- A failing step blocks its captures: A3.caps_count reports `not_run` naming the step and its answer (never a silent pass).

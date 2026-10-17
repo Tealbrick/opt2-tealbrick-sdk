@@ -66,8 +66,21 @@ export function resolvePlaceholders(v: Json, r: Pick<SetupResult, "values" | "bl
 }
 
 /** Runs `steps` in order through `call`; `builtins` seed the placeholder values (`tb.agentA`, …). */
-export async function runSetup(steps: readonly SetupStep[], builtins: Record<string, Json>, call: (as: SetupCaller, op: string, input: Json) => Promise<SetupAnswer>): Promise<SetupResult> {
-  const r: SetupResult = { values: new Map(Object.entries(builtins)), blocked: new Map(), notes: [] };
+export async function runSetup(
+  steps: readonly SetupStep[],
+  builtins: Record<string, Json>,
+  call: (as: SetupCaller, op: string, input: Json) => Promise<SetupAnswer>,
+  /** continue an earlier result (the deferred `capsAgent` steps): the captures of `steps` are cleared first, `builtins` are added */
+  into?: SetupResult,
+): Promise<SetupResult> {
+  const r: SetupResult = into ?? { values: new Map(), blocked: new Map(), notes: [] };
+  for (const [k, v] of Object.entries(builtins)) r.values.set(k, v);
+  if (into)
+    for (const step of steps)
+      for (const name of Object.keys(step.capture)) {
+        r.values.delete(name);
+        r.blocked.delete(name);
+      }
   const block = (step: SetupStep, why: string) => {
     for (const name of Object.keys(step.capture)) r.blocked.set(name, why);
     r.notes.push(`setup: ${why}`);

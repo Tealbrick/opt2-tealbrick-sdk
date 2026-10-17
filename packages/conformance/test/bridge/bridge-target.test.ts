@@ -101,6 +101,18 @@ describe("bridge target", () => {
     assert.equal(status(r, "B6.order"), "not_run", "an older bridge deselects spine013 the same way");
   });
 
+  it("spec 0.1.45 (HOOK-CALLER-PRODUCT, B28): a bridge reporting 0.2.2 passes; one older than 0.2.2 is not_applicable by version, whatever it sends", async () => {
+    const good = await run({ version: "0.2.2" }, ["spine013"]);
+    assert.equal(status(good, "B28.hook_caller_product"), "pass", good.checks.find((c) => c.id === "B28.hook_caller_product")?.asserted);
+    assert.match(good.checks.find((c) => c.id === "B28.hook_caller_product")?.asserted ?? "", /carry product/);
+    for (const flags of [{}, { version: "0.2.1", noHookCallerProduct: true }, { version: "0.1.99" }]) {
+      const r = await run(flags, ["spine013"]);
+      const c = r.checks.find((x) => x.id === "B28.hook_caller_product");
+      assert.equal(c?.status, "not_applicable", `${JSON.stringify(flags)}: ${c?.asserted}`);
+      assert.match(c?.asserted ?? "", /predates 0\.2\.2.*not applicable by version/);
+    }
+  });
+
   it("real SDK app behind the bridge (C91, group real_app): a correct bridge passes every B25 check against @opt2-tealbrick/miniapp-sdk", async () => {
     const r = await run({}, ["real_app"]);
     for (const id of REAL_APP_IDS) assert.equal(status(r, id), "pass", `${id}: ${r.checks.find((c) => c.id === id)?.asserted}`);
@@ -180,6 +192,10 @@ describe("bridge target", () => {
     ["lets a context hook write tb.* keys", { allowTbContext: true }, ["spine013"], ["B23.reserved_tb_namespace"]],
     ["skips the hooks for app-initiated calls", { appCallsSkipHooks: true }, ["spine013"], ["B24.app_initiated"]],
     ["does not gate companion calls by the grant's workflow", { companionNoWfCheck: true }, ["spine013"], ["B24.no_grant"]],
+    // spec 0.1.45 (HOOK-CALLER-PRODUCT, bridge 0.2.2): the version-gated check fires on a bridge that claims 0.2.2 and omits / forges it
+    ["(0.2.2) omits call.caller.product from its hook requests", { version: "0.2.2", noHookCallerProduct: true }, ["spine013"], ["B28.hook_caller_product"]],
+    ["(0.2.2) takes call.caller.product from the call input", { version: "0.2.2", hookCallerProductFromInput: true }, ["spine013"], ["B28.hook_caller_product"]],
+    ["(0.2.2) gives agent callers a product", { version: "0.2.2", hookCallerProductForAgents: true }, ["spine013"], ["B28.hook_caller_product"]],
     // C85 + v0.1.14 A2A-10 (group real_app, B26)
     ["shows app-initiated calls to hooks as caller type system", { appInitiatedAsSystem: true }, ["real_app"], ["B26.app_initiated_real"]],
     ["does not rate-limit app-initiated calls", { noAppRateLimit: true }, ["real_app"], ["B26.app_initiated_rate"]],

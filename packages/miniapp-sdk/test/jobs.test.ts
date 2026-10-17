@@ -494,6 +494,40 @@ describe("scheduled ops: authorize() again at fire time (SDK-2, CON-01)", () => 
     }
   });
 
+  test("GRANT-PRD: a scheduled op fires with the stored grant's prd (slice has no entry); a slice that later disagrees refuses the fire grant_invalid", async () => {
+    const { signGrant, ulid } = await import("@opt2-tealbrick/manifest");
+    const mk = async (ins: never, prd: string) =>
+      signGrant(
+        { iss: "tb:portal", sub: `tb:ins:${ins}`, aud: `tb:ins:${b.w.ins}`, iat: Math.floor(Date.now() / 1000), ws: b.w.ws, cnf: { brg: b.w.brg }, crud: ["read", "delete"], mode: "bound", held: [], caps: {}, wf: ["note_get", "note_delete"], polrev: 1, prd } as never,
+        b.w.portal,
+      );
+    const { DatabaseSync } = await import("node:sqlite");
+    const row = (ins: string) => {
+      const db = new DatabaseSync(`${b.dir}/app.db`, { readOnly: true });
+      try {
+        return db.prepare("SELECT caller_product, status, meta FROM tb_receipts WHERE op = 'note_delete' AND caller_id = ?").get(ins) as Record<string, string> | undefined;
+      } finally {
+        db.close();
+      }
+    };
+    // (1) prd only: the caller is in the slice (a fire needs it, `grant_revoked` otherwise) under the SAME product -> ok, product from the grant
+    const ins1 = `ins_${ulid()}` as never;
+    await b.push({ companionCallers: [{ product: "from-grant", ins: ins1, name: "Lagging" }] });
+    const j1 = await settled(await schedule("prd-1", 300, await mk(ins1, "from-grant")));
+    assert.equal(j1.status, "done", j1.lastError ?? "");
+    assert.deepEqual({ ...row(ins1) }, { caller_product: "from-grant", status: "run", meta: row(ins1)?.meta });
+    // (2) the slice moves to another product before the fire: grant prd != slice product -> refused grant_invalid, never runs
+    const ins2 = `ins_${ulid()}` as never;
+    await b.push({ companionCallers: [{ product: "from-grant", ins: ins2, name: "Differ" }] });
+    const id2 = await schedule("prd-2", 600, await mk(ins2, "from-grant"));
+    await b.push({ companionCallers: [{ product: "slice-now-says", ins: ins2, name: "Differ" }] });
+    const j2 = await settled(id2);
+    assert.equal(j2.status, "refused", j2.lastError ?? "");
+    assert.equal(row(ins2)?.status, "refused");
+    assert.match(String(row(ins2)?.meta), /grant_invalid/);
+    assert.ok(!b.ran.note_delete.includes("prd-2"), "the op never ran");
+  });
+
   test("fires: the agent is paused before fire time → refused `paused`, never runs, refused receipt", async () => {
     const id = await schedule("paused-1", 400);
     await b.push({ pause: { workspace: false, agents: [b.w.agents.a], instances: [] } });

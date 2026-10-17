@@ -69,14 +69,16 @@ const USAGE = `usage:
                                    app / manifest: also ${WAIVER_FILE} next to the manifest {"waivers": [{"id", "until", "reason"}]}.
                                    Unknown check ids are a usage error.
   app: ${WAIVER_FILE} next to the manifest may also hold setup fixtures (v0.1.18; malformed → usage error):
-      "setup": [{"id", "as": "owner"|"agentA"|"agentB"|"app", "op", "input", "capture": {"<name>": "<JSON pointer into output>"}}]
-        run once after the first status push, before the checks, in order; "app" = the suite's companion app caller (A12.*)
+      "setup": [{"id", "as": "owner"|"agentA"|"agentB"|"app"|"capsAgent", "op", "input", "capture": {"<name>": "<JSON pointer into output>"}}]
+        run once after the first status push, before the checks, in order; "app" = the suite's companion app caller (A12.*);
+        "capsAgent" (0.1.21) = the fresh agent A3.caps_count creates per capped op: those steps run as that agent once it
+        exists, just before its capped calls (see README "Setup as the caps agent")
       "inputs": {"<opId>": input}  merged over --inputs (the file wins per key)
       "inputsAs": {"agentA"|"agentB"|"app": {"<opId>": input}}  overrides "inputs" for that caller
       "dynamic": {"<dynamicOpId>": {"resolveTools": ["<tool>"]}}  A11.resolve_family resolves these instead of the catalog
       "narrowing": {"op": "<tag-filtered agent read op>", "input"?: input, "tag"?: "<tag of a setup item>"}  A11.narrowing_empty_anyof
         (C115) sends that read with context rules.narrowing memoryTags {anyOf: []} (no items, or narrowing_unsupported), {anyOf: [tag]}, none
-      "\${name}" (whole string values) = a captured value, or \${tb.agentA} \${tb.agentB} \${tb.app} \${tb.instance};
+      "\${name}" (whole string values) = a captured value, or \${tb.agentA} \${tb.agentB} \${tb.app} \${tb.instance} (\${tb.capsAgent} in capsAgent steps and inputs);
       a check that needs a capture of a failed step reports not_run naming the step and its answer`;
 
 const readJson = (p: string): unknown => JSON.parse(readFileSync(p, "utf8"));

@@ -17,6 +17,7 @@ import { createLogger, SecretRegistry } from "../src/server/log.ts";
 import { Receipts } from "../src/server/receipts.ts";
 import { AttentionReader, PendingCounter, StatusPusher } from "../src/server/status.ts";
 import { openStore, SDK_MIGRATIONS } from "../src/server/store.ts";
+import { resolveCallerProduct } from "../src/server/trust.ts";
 import { fixtureManifest } from "./fixtures/manifest.ts";
 import { callProof, FakeBridge, freePort, grant, migrationsDir, nowS, slice, tempDir, testRoots, ticket, until, type World, world } from "./helpers.ts";
 
@@ -786,5 +787,124 @@ describe("SDK-CALLER-PRODUCT: Caller.product is verified, never derived from the
     const old = await b.running.receipts.get("rcp_01OLDROW00000000000000000");
     assert.equal(old?.caller.name, "Observer");
     assert.equal("product" in (old?.caller ?? {}), false);
+  });
+});
+
+// ── spec 0.1.46 (GRANT-PRD): Caller.product = the verified grant's `prd` FIRST, the slice entry only when `prd` is absent ──
+describe("GRANT-PRD: the grant's prd wins, the slice is the fallback, a disagreement is refused", () => {
+  let b: Booted;
+  const insLagging = `ins_${ulid()}` as InstanceId; // grant prd, NOT yet in the slice
+  const insSliceOnly = `ins_${ulid()}` as InstanceId; // old Core: no prd, slice entry
+  const insBoth = `ins_${ulid()}` as InstanceId; // prd and slice agree
+  const insDiffer = `ins_${ulid()}` as InstanceId; // prd and slice disagree
+  const companionGrant = (ins: InstanceId, prd: unknown, over: { held?: ("destructive" | "money")[] } = {}) =>
+    signGrant(
+      {
+        iss: "tb:portal",
+        sub: `tb:ins:${ins}`,
+        aud: `tb:ins:${b.w.ins}`,
+        iat: nowS(),
+        ws: b.w.ws,
+        cnf: { brg: b.w.brg },
+        crud: ["read", "delete"],
+        mode: "bound",
+        held: over.held ?? [],
+        caps: {},
+        wf: ["note_get", "note_delete"],
+        polrev: 1,
+        ...(prd === undefined ? {} : { prd }),
+      } as never,
+      b.w.portal,
+    );
+  before(async () => {
+    b = await boot();
+    b.bridge.push(
+      await slice(b.w, PRODUCT, {
+        companionCallers: [
+          { product: "from-slice", ins: insSliceOnly, name: "Old" },
+          { product: "both", ins: insBoth, name: "Both" },
+          { product: "slice-says", ins: insDiffer, name: "Differ" },
+        ],
+      }),
+    );
+    await until(async () => (await callOp(b, "note_get", { id: "probe" }, { grantToken: await companionGrant(insSliceOnly, undefined) })).body.output?.product === "from-slice");
+  });
+  after(async () => b.cleanup());
+
+  test("prd only (the slice lags): product from prd, in the op context and on the receipt (A12 variant)", async () => {
+    const ctx = await callOp(b, "note_get", { id: "g1" }, { grantToken: await companionGrant(insLagging, "from-grant") });
+    assert.deepEqual([ctx.status, ctx.body.output.product], [200, "from-grant"], JSON.stringify(ctx.body));
+    const del = await callOp(b, "note_delete", { id: "g2" }, { grantToken: await companionGrant(insLagging, "from-grant") });
+    assert.equal(del.status, 200, JSON.stringify(del.body));
+    assert.equal((await b.running.receipts.get(del.body.receiptId))?.caller.product, "from-grant");
+  });
+
+  test("slice only (a grant minted before Core sends prd): product from the slice", async () => {
+    const del = await callOp(b, "note_delete", { id: "g3" }, { grantToken: await companionGrant(insSliceOnly, undefined) });
+    assert.equal(del.status, 200, JSON.stringify(del.body));
+    assert.equal((await b.running.receipts.get(del.body.receiptId))?.caller.product, "from-slice");
+  });
+
+  test("both present and equal: ok", async () => {
+    const del = await callOp(b, "note_delete", { id: "g4" }, { grantToken: await companionGrant(insBoth, "both") });
+    assert.equal(del.status, 200, JSON.stringify(del.body));
+    assert.equal((await b.running.receipts.get(del.body.receiptId))?.caller.product, "both");
+  });
+
+  test("both present and different: refused grant_invalid (403), nothing runs, no receipt row", async () => {
+    const before = (await b.running.receipts.list({ caller: insDiffer })).items.length;
+    const del = await callOp(b, "note_delete", { id: "g5" }, { grantToken: await companionGrant(insDiffer, "grant-says") });
+    assert.equal(del.status, 403, JSON.stringify(del.body));
+    assert.equal(del.body.error?.code ?? del.body.code, "grant_invalid", JSON.stringify(del.body));
+    assert.equal((await b.running.receipts.list({ caller: insDiffer })).items.length, before);
+    const get = await callOp(b, "note_get", { id: "g6" }, { grantToken: await companionGrant(insDiffer, "grant-says") });
+    assert.equal(get.status, 403, "read ops are refused too");
+  });
+
+  test("a malformed prd cannot be signed with the shipped signer; a hand-signed one is an invalid grant (fail closed)", async () => {
+    for (const bad of [7, "", null, "Not-A-Product"]) await assert.rejects(companionGrant(insLagging, bad));
+  });
+
+  test("a hold of a prd-only caller records the product", async () => {
+    const held = await callOp(b, "note_delete", { id: "g8" }, { grantToken: await companionGrant(insLagging, "from-grant", { held: ["destructive"] }) });
+    assert.equal(held.status, 202, JSON.stringify(held.body));
+    assert.equal((await b.running.receipts.get(held.body.holdId))?.caller.product, "from-grant");
+  });
+
+  test("an agent grant is unaffected: no product, even when it carries a stray prd", async () => {
+    const agentGrant = (prd?: string) =>
+      signGrant(
+        { iss: "tb:portal", sub: `tb:agt:${b.w.agents.a}`, aud: `tb:ins:${b.w.ins}`, iat: nowS(), ws: b.w.ws, cnf: { brg: b.w.brg }, crud: ["read", "delete"], mode: "free", held: [], caps: {}, wf: [], polrev: 1, ...(prd ? { prd } : {}) } as never,
+        b.w.portal,
+      );
+    const plain = await callOp(b, "note_get", { id: "g9" }, { grantToken: await agentGrant() });
+    const stray = await callOp(b, "note_get", { id: "g10" }, { grantToken: await agentGrant("whatever") });
+    assert.deepEqual([plain.status, plain.body.output.product, stray.status, stray.body.output.product], [200, null, 200, null]);
+    const del = await callOp(b, "note_delete", { id: "g11" }, { grantToken: await agentGrant("whatever") });
+    assert.equal("product" in ((await b.running.receipts.get(del.body.receiptId))?.caller ?? {}), false);
+  });
+});
+
+describe("GRANT-PRD: resolveCallerProduct (the one helper)", () => {
+  const trust = (entries: Record<string, string>) => ({ companionProduct: (ins: string) => entries[ins] });
+  const logs: { msg: string; fields: Record<string, unknown> }[] = [];
+  const rt = (entries: Record<string, string>) => ({ trust: trust(entries), log: { warn: (msg: string, fields?: Record<string, unknown>) => void logs.push({ msg, fields: fields ?? {} }) } });
+  const app = { type: "app", id: "ins_x" };
+
+  test("order: prd, then slice, then nothing; agents and persons never get a product", () => {
+    assert.deepEqual(resolveCallerProduct(rt({}), app, { prd: "p" }), { ok: true, caller: { product: "p" } });
+    assert.deepEqual(resolveCallerProduct(rt({ ins_x: "s" }), app, {}), { ok: true, caller: { product: "s" } });
+    assert.deepEqual(resolveCallerProduct(rt({ ins_x: "s" }), app, null), { ok: true, caller: { product: "s" } });
+    assert.deepEqual(resolveCallerProduct(rt({ ins_x: "p" }), app, { prd: "p" }), { ok: true, caller: { product: "p" } });
+    assert.deepEqual(resolveCallerProduct(rt({}), app, {}), { ok: true, caller: {} });
+    for (const type of ["agent", "person"]) assert.deepEqual(resolveCallerProduct(rt({ ins_x: "s" }), { type, id: "ins_x" }, { prd: "p" }), { ok: true, caller: {} });
+  });
+
+  test("a disagreement returns the conflict and logs both products, never a token", () => {
+    logs.length = 0;
+    const r = resolveCallerProduct(rt({ ins_x: "slice-p" }), app, { prd: "grant-p", jti: "j", sub: "tb:ins:ins_x" });
+    assert.deepEqual(r, { ok: false, grantProduct: "grant-p", sliceProduct: "slice-p" });
+    assert.equal(logs.length, 1);
+    assert.deepEqual(logs[0]?.fields, { caller: "ins_x", grantProduct: "grant-p", sliceProduct: "slice-p" });
   });
 });

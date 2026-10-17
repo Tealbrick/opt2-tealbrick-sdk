@@ -99,6 +99,14 @@ export interface MiniFlags {
   wfOnlyBound?: boolean;
   /** C91 (QA S1): signs catalog bridge-op proofs with `in` (the SDK binds {bop, op} only; fails B25.real_catalog_search) */
   catalogWithIn?: boolean;
+  /** the bridge version reported at enrolment and in acks (default "0.0.0": predates 0.2.2, so B28 is not_applicable) */
+  version?: string;
+  /** spec 0.1.45 (bridge < 0.2.2): hook requests carry no call.caller.product (fails B28.hook_caller_product) */
+  noHookCallerProduct?: boolean;
+  /** spec 0.1.45 (security): takes call.caller.product from the call input when it names one (fails B28.hook_caller_product) */
+  hookCallerProductFromInput?: boolean;
+  /** spec 0.1.45: also gives AGENT callers a product (the first deployed app's; fails B28.hook_caller_product) */
+  hookCallerProductForAgents?: boolean;
   /** C85: hooks of an app-initiated call see caller type `system`, not `app` (fails B26.app_initiated_real) */
   appInitiatedAsSystem?: boolean;
   /** C85: no rate limit for app-initiated calls (fails B26.app_initiated_rate) */
@@ -181,7 +189,7 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
       await fetch(`${portal}/api/v1/bridge/enrol`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ code: env.TB_ENROL_CODE, publicKey: key.publicJwk, version: "0.0.0", sdkMajors: [1, 0], form: "deployed", publicOrigin: pub }),
+        body: JSON.stringify({ code: env.TB_ENROL_CODE, publicKey: key.publicJwk, version: flags.version ?? "0.0.0", sdkMajors: [1, 0], form: "deployed", publicOrigin: pub }),
       })
     ).json()) as EnrolResponse;
     const lax = flags.ignoreKeySet || (flags.acceptStrippedReenrol && !!state.enrol);
@@ -229,7 +237,7 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     portalCall("POST", enrol.ackPath, {
       rev: cfg.rev,
       appliedAt: new Date().toISOString(),
-      bridge: { id: enrol.bridgeId, version: "0.0.0", form: "deployed", boot, sdkMajors: [1, 0], mcpVersions: ["2025-06-18"] },
+      bridge: { id: enrol.bridgeId, version: flags.version ?? "0.0.0", form: "deployed", boot, sdkMajors: [1, 0], mcpVersions: ["2025-06-18"] },
       portalReachable: true,
       apps: cfg.apps.map((a) => ({ ins: a.ins, state: "ok", version: a.version, sdkVersion: null, manifestDigest: a.manifestDigest, lastSeen: null, pendingHolds: 0 })),
       keys: [],
@@ -560,7 +568,7 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
       if (obo) context["tb.onBehalfOf"] = obo as unknown as Json;
       else reject("on_behalf_of_invalid", "claim");
     }
-    const fwd = await pipeline({ caller: { type: "agent", id: agt, mode: g.claims.mode }, grant: g.jws, grantJti: g.claims.jti, ins: t.ins, m, op, input: args, context, ...(idem ? { idem } : {}), hooks: true });
+    const fwd = await pipeline({ caller: { type: "agent", id: agt, mode: g.claims.mode, ...(flags.hookCallerProductForAgents ? { product: [...manifests.values()][0]?.id } : {}) } as never, grant: g.jws, grantJti: g.claims.jti, ins: t.ins, m, op, input: args, context, ...(idem ? { idem } : {}), hooks: true });
     if ("error" in fwd) return toolError(fwd.error);
     const r = fwd;
     const body = r.body;
@@ -741,7 +749,12 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
         if (!flags.noAppInitiatedAudit) logLines.push(JSON.stringify({ ts: new Date().toISOString(), level: "info", evt: "call.app_initiated", ins, product: target.product, op: op.id, parentCall: null }));
       }
       const appInitiated = !valid && !(flags.parentTrusted && typeof env.parentCall === "string");
-      const caller = { type: appInitiated && flags.appInitiatedAsSystem ? ("system" as const) : ("app" as const), id: ins };
+      // spec 0.1.45 (HOOK-CALLER-PRODUCT, bridge 0.2.2): an app caller's product from the signed config's instance table
+      // (here: the deployed app's manifest), never from the input; the faults omit it or read it from the input
+      const asApp = !(appInitiated && flags.appInitiatedAsSystem);
+      const inputProduct = isObj(env.input) && typeof env.input.product === "string" ? env.input.product : undefined;
+      const product = !asApp || flags.noHookCallerProduct ? undefined : flags.hookCallerProductFromInput ? inputProduct : manifests.get(ins)?.id;
+      const caller = { type: asApp ? ("app" as const) : ("system" as const), id: ins, ...(product !== undefined ? { product } : {}) };
       const fwd = await pipeline({ caller, grant, grantJti: g.claims.jti, ins: target.ins, m, op, input: (env.input ?? null) as Json, context: {}, ...(env.idempotencyKey ? { idem: env.idempotencyKey } : {}), hooks: !flags.appCallsSkipHooks, depth });
       if ("error" in fwd) return err(fwd.error === "hook_denied" ? 403 : 502, fwd.error);
       return send(res, fwd.status, fwd.body);

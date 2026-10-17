@@ -47,8 +47,12 @@ export function loadWaiverFile(manifestPath: string): Waiver[] {
 // `{ waivers?, setup?, inputs?, inputsAs?, dynamic? }` (see CONFORMANCE "v0.1.18 — package 0.1.12"). Every malformed
 // part is a usage error (exit 2), like a malformed waiver: a fixture must never silently cover nothing.
 
-/** Who a setup step calls as: the person session, fake agent A / B, or the suite's companion app caller (A12.*). */
-export const SETUP_CALLERS = ["owner", "agentA", "agentB", "app"] as const;
+/**
+ * Who a setup step calls as: the person session, fake agent A / B, the suite's companion app caller (A12.*), or (package
+ * 0.1.21) `capsAgent`: the FRESH agent A3.caps_count creates for each capped op. A `capsAgent` step is deferred: it runs
+ * once that agent exists (after its first-sight call), before its capped calls, once per fresh agent.
+ */
+export const SETUP_CALLERS = ["owner", "agentA", "agentB", "app", "capsAgent"] as const;
 export type SetupCaller = (typeof SETUP_CALLERS)[number];
 /** Callers `inputsAs` may name (the owner calls person ops; their inputs are never generated). */
 export const INPUT_CALLERS = ["agentA", "agentB", "app"] as const;
@@ -58,7 +62,13 @@ export type InputCaller = (typeof INPUT_CALLERS)[number];
  * grants the app caller or an agent a scope needs their run-random ids): `${tb.agentA}`, `${tb.agentB}`, `${tb.app}`
  * (the companion app caller's instance id), `${tb.instance}` (the app under test).
  */
-export const BUILTIN_PLACEHOLDERS = ["tb.agentA", "tb.agentB", "tb.app", "tb.instance"] as const;
+export const BUILTIN_PLACEHOLDERS = ["tb.agentA", "tb.agentB", "tb.app", "tb.instance", "tb.capsAgent"] as const;
+/**
+ * `${tb.capsAgent}` (package 0.1.21): the id of the fresh agent A3.caps_count is about to call as. It has a value only in
+ * `capsAgent` setup steps and in `inputs` / `inputsAs` (resolved when a check needs them); an ordinary setup step that
+ * names it is a usage error.
+ */
+export const CAPS_AGENT_PLACEHOLDER = "tb.capsAgent";
 
 export interface SetupStep {
   id: string;
@@ -172,6 +182,7 @@ export function parseConformanceConfig(doc: unknown, where: string): Conformance
       if (typeof x.op !== "string" || x.op.length === 0) throw new WaiverError(`${where}: ${at}.op must be an operation id`);
       const input = (x.input ?? {}) as Json;
       known(placeholderNames(input), `${at}.input`, "an earlier setup step");
+      if (x.as !== "capsAgent" && placeholderNames(input).includes(CAPS_AGENT_PLACEHOLDER)) throw new WaiverError(`${where}: ${at}.input: \${${CAPS_AGENT_PLACEHOLDER}} has a value only in steps with "as": "capsAgent"`);
       const capture: Record<string, string> = {};
       if (x.capture !== undefined) {
         if (!isRecord(x.capture)) throw new WaiverError(`${where}: ${at}.capture must be an object {name: JSON pointer}`);

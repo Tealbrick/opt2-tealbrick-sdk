@@ -84,6 +84,14 @@ export interface MiniAppFaults {
   callerProductFromName?: boolean;
   /** pre-0.1.44: never sets caller.product (fails A12.caller_product_verified) */
   noCallerProduct?: boolean;
+  /** the SDK release the app reports in its claim (default `<sdkMajor>.0.0`); below 0.1.28 the GRANT-PRD checks are not_applicable */
+  reportedSdkVersion?: string;
+  /** pre-0.1.46 (GRANT-PRD): ignores the grant's `prd`, takes the product from the slice only (fails A12.grant_prd_first: a caller not yet in the slice has no product) */
+  callerProductIgnoresPrd?: boolean;
+  /** spec 0.1.46 (GRANT-PRD, security): prefers the slice entry over the grant's `prd` and never refuses a disagreement (fails A12.grant_prd_mismatch) */
+  callerProductPrefersSlice?: boolean;
+  /** spec 0.1.46 (GRANT-PRD): picks the grant's `prd` over a disagreeing slice entry instead of refusing the call (fails A12.grant_prd_mismatch) */
+  callerProductMismatchPicksGrant?: boolean;
   /** v0.1.15 (C105a): never holds an app caller (ignores the companion grant's held; fails A12.app_caller_held) */
   appCallerNoHold?: boolean;
   /** v0.1.16 (C107): resolve answers drop holdFamily (outward / money entries; fails A11.resolve_family) */
@@ -103,6 +111,12 @@ export interface MiniAppFaults {
    * `area_create` op in the manifest; A12.caller_name passes only with a setup step + inputsAs.app fixture.
    */
   areaPerAppCaller?: boolean;
+  /**
+   * package 0.1.21 (Connect-like, NOT a fault): an AGENT's `post_create` makes a post that agent owns (output {id}); a
+   * `post_cancel` {id} of a post the caller does not own answers 404 post_not_found (so A3.caps_count's capped op needs
+   * data the fresh caps agent owns: setup `as: "capsAgent"`). Needs `post_create` / `post_cancel` ops in the manifest.
+   */
+  postsPerAgent?: boolean;
   /**
    * v0.1.18 (NOT a fault): the dynamic catalog is empty (an engine that lists nothing without its backend) but resolve
    * still answers the known tools; an unknown tool resolves to null (200 null). A11.resolve_family needs
@@ -183,6 +197,8 @@ interface State {
   usedJti: string[];
   /** areaPerAppCaller: app caller instance id → its area ids */
   areas?: Record<string, string[]>;
+  /** postsPerAgent: post id → the agent that owns it */
+  posts?: Record<string, string>;
   audit: { id: string; at: number; actor: string; action: string; target: string | null }[];
 }
 
@@ -322,7 +338,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
 
   // claim (once; again only after a refused identity with a NEW enrolment code, SDK-API §13 v0.1.12)
   async function claim(reclaim: boolean): Promise<void> {
-    const r = await bridge("POST", "/tb/v1/claim", { code: env.TB_ENROL_CODE, instancePublicKey: key.publicJwk, manifestDigest: mDigest, version: manifest.version, sdkVersion: `${manifest.sdkMajor}.0.0` }, undefined, {}, false);
+    const r = await bridge("POST", "/tb/v1/claim", { code: env.TB_ENROL_CODE, instancePublicKey: key.publicJwk, manifestDigest: mDigest, version: manifest.version, sdkVersion: faults.reportedSdkVersion ?? `${manifest.sdkMajor}.0.0` }, undefined, {}, false);
     if (r.status !== 200 || !isObj(r.body) || r.body.ins !== ins) throw new Error(`claim failed: ${r.status}`);
     st.claimed = true;
     st.codeDigest = sha(env.TB_ENROL_CODE ?? "");
@@ -510,6 +526,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
       if (!named.some((v) => (areas[callerId] ?? []).includes(v))) throw new E(403, "area_required");
       ownArea = true;
     }
+    if (faults.postsPerAgent && op.id === "post_cancel" && st.posts?.[String((body.input as Record<string, unknown>)?.id)] !== callerId) throw new E(404, "post_not_found");
     ensureAgent(callerId);
     const inputDigest = digest(body.input);
     const idemKey = op.idempotency === "none" ? null : (body.idempotencyKey ?? null);
@@ -563,12 +580,19 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
     // spec 0.1.44 (SDK-CALLER-PRODUCT): app callers only; the product of the companionCallers entry whose `ins` is the verified
     // grant's caller instance. The fault looks it up by NAME instead (the impostor-by-name hole).
     const listed = slice?.companionCallers ?? [];
+    // spec 0.1.46 (GRANT-PRD): the verified grant's `prd` first, the slice entry only when `prd` is absent; both present and
+    // different = 403 grant_invalid. The faults: slice only (pre-0.1.46), slice preferred (no refusal), grant picked (no refusal).
+    const sliceProduct = listed.find((x) => x.ins === callerId)?.product;
+    const grantPrd = callerType === "app" && !faults.callerProductIgnoresPrd && typeof g0.prd === "string" ? g0.prd : undefined;
+    if (grantPrd !== undefined && sliceProduct !== undefined && grantPrd !== sliceProduct && !faults.callerProductPrefersSlice && !faults.callerProductMismatchPicksGrant) throw new E(403, "grant_invalid");
     const callerProduct =
       callerType !== "app" || faults.noCallerProduct
         ? undefined
         : faults.callerProductFromName
           ? listed.find((x) => x.name === callerName)?.product
-          : listed.find((x) => x.ins === callerId)?.product;
+          : faults.callerProductPrefersSlice
+            ? (sliceProduct ?? grantPrd)
+            : (grantPrd ?? sliceProduct);
     const base = {
       callId,
       caller: { type: callerType, id: callerId, name: callerName, ...(callerProduct !== undefined ? { product: callerProduct } : {}) },
@@ -612,6 +636,11 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
     // read ops also read the companion product (app→app through the bridge)
     const companion = op.crud.includes("read") ? await callCompanion(callId) : null;
     const output: Json = { ok: true, op: op.id, ...(companion ? { companion } : {}) };
+    if (faults.postsPerAgent && op.id === "post_create") {
+      const id = newId("post");
+      st.posts = { ...(st.posts ?? {}), [id]: callerId };
+      (output as Record<string, Json>).id = id;
+    }
     let receiptId: string | undefined;
     if (approved) {
       approved.status = "run";

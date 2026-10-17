@@ -30,7 +30,7 @@ import { header, readJson, requestId, sendError, sendJson } from "./http.ts";
 import { type ClaimedJob, jobsView, type OpFireOutcome, unsealGrant } from "./jobs.ts";
 import { HOLD_TTL_MS, type NewReceipt, type Receipts } from "./receipts.ts";
 import type { Runtime } from "./runtime.ts";
-import { appCallerProduct } from "./trust.ts";
+import { resolveCallerProduct } from "./trust.ts";
 
 export const OP_TIMEOUT_MS = 30_000;
 const SUMMARY_MAX = 280;
@@ -424,6 +424,10 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
     if (!proof.ok) throw new TbError("call_proof_invalid", "call proof missing or not valid", 401);
     const g = verifyGrant(grantToken, trust);
     if (!g.ok) throw new TbError(g.code, "grant not valid", grantFailStatus(g.code));
+    // v0.1.28 (GRANT-PRD, spec 0.1.46): Caller.product = the verified grant's `prd` first, the slice companionCallers entry only
+    // when `prd` is absent; both present and different = refused (403 grant_invalid), before the grant is stored for fires.
+    const cp = resolveCallerProduct(rt, g.caller, g.claims);
+    if (!cp.ok) throw new TbError("grant_invalid", "the grant and the instance slice disagree on the caller product", 403);
     // v0.1.21: the caller's newest verified grant replaces the stored one of its pending scheduled ops (owner narrowing,
     // revocation by jti and a re-minted grant all reach the fire-time authorize)
     rt.noteGrant(g.caller.id, grantToken, g.claims.iat);
@@ -438,9 +442,9 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       // v0.1.14 (C102): app callers are named from slice companionCallers (verified grant sub), fallback the instance id
       name: sliceAgent?.name ?? (g.caller.type === "app" ? (rt.trust.companionCallers().find((x) => x.ins === callerId)?.name ?? callerId) : callerId),
       mode: g.caller.type === "agent" ? (sliceAgent?.mode ?? g.claims.mode) : null,
-      // v0.1.27 (SDK-CALLER-PRODUCT, spec 0.1.44): app callers only, the VERIFIED product of the slice companionCallers entry
-      // whose `ins` is the verified grant's caller instance. Never derived from the name.
-      ...appCallerProduct(rt, g.caller.type, callerId),
+      // v0.1.28 (GRANT-PRD): app callers only; grant `prd` first, then the slice companionCallers entry of the verified `ins`
+      // (v0.1.27 SDK-CALLER-PRODUCT). Never derived from the name. One helper: resolveCallerProduct.
+      ...cp.caller,
     };
     const callId = proof.claims.call;
     // v0.1.22 (SDK-05, fail closed): an agent that is not in the verified slice is refused — no invented agent record,
@@ -676,7 +680,9 @@ export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: Abor
   const input = job.input;
   const inputDigest = digest(input) as Sha256Digest;
   const spec = handlerSpec(rt, op.id);
-  const caller: Caller = { type: who.type, id: who.id as Caller["id"], name: who.name, mode: (job.callerMode as Caller["mode"]) ?? null, ...appCallerProduct(rt, who.type, who.id) };
+  // product: the slice entry until the stored grant is verified below; then the grant's `prd` takes over (GRANT-PRD)
+  const initial = resolveCallerProduct(rt, who, null);
+  let caller: Caller = { type: who.type, id: who.id as Caller["id"], name: who.name, mode: (job.callerMode as Caller["mode"]) ?? null, ...(initial.ok ? initial.caller : {}) };
   const effect = op.effect;
 
   if (who.type === "person") {
@@ -708,6 +714,11 @@ export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: Abor
   const g = verifyGrant(token, at);
   if (!g.ok) return refuse(g.code);
   if (g.caller.id !== callerId) return refuse("grant_invalid");
+  // v0.1.28 (GRANT-PRD): the stored grant's `prd` first; a grant/slice disagreement refuses the fire like a live call
+  const cp = resolveCallerProduct(rt, who, g.claims);
+  if (!cp.ok) return refuse("grant_invalid");
+  caller = { type: caller.type, id: caller.id, name: caller.name, mode: caller.mode, ...cp.caller };
+  base.caller = receiptCallerOf(caller, callerId);
   if (!opInGrantWorkflow(g.claims, op.id)) return refuse(DECISION_REASON.notInWorkflow);
 
   let access: { level: string; crud: CrudAction[] } | null = null;

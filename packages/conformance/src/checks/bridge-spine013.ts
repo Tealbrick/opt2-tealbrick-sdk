@@ -9,13 +9,18 @@ import type { Json } from "@opt2-tealbrick/spec/sdk";
 import type { FakeApp, Received } from "../fake-app.ts";
 import { errorCode, type HttpAnswer } from "../http.ts";
 import type { ToolCallResult } from "../mcp-agent.ts";
-import { bad, verdict } from "../suite.ts";
+import { bad, na, verdict } from "../suite.ts";
+import { versionBelow } from "../version.ts";
+import { enrolRequests } from "./bridge.ts";
 import { type BridgeCtx, describeCall, isObj, toolRefused } from "./bridge-ctx.ts";
 
 type Chain = (HookEntry & { by: string })[];
 const b64 = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64url");
 const unb64 = (s: string) => JSON.parse(Buffer.from(s, "base64url").toString("utf8")) as Record<string, unknown>;
 const ON_BEHALF_OF_META = "tealbrick/onBehalfOf";
+
+/** First bridge release whose hook requests carry `call.caller.product` (spec 0.1.45, HOOK-CALLER-PRODUCT). */
+export const HOOK_CALLER_PRODUCT_SINCE = "0.2.2";
 
 /** Enabled hook entries of `phase` that match a call of `op` at `app`, in chain order (order, then product). */
 export function chainFor(c: BridgeCtx, app: FakeApp, op: Operation, phase: "before" | "context" | "after"): Chain {
@@ -265,4 +270,60 @@ export async function spine013Checks(c: BridgeCtx): Promise<void> {
     const refused = (x: HttpAnswer) => x.status >= 400 && x.status < 500;
     return verdict(refused(none) && refused(undeclared) && calls === 0, `no grant: ${status(none)}; undeclared ${outside.id}: ${status(undeclared)}; target op calls ${calls}`);
   });
+
+  // ── B28 hook caller product (spec 0.1.45, BRIDGE v0.1.45; bridge 0.2.2+): version-gated, older bridges are not_applicable ──
+  await c.run(
+    "B28.hook_caller_product",
+    "hook requests of an app-initiated call carry call.caller.product = the caller instance's product; an agent call carries none",
+    "app-initiated companion call (no parentCall) → every matching hook (before, context, after) sees call.caller {type: app, id: <caller instance>, product: <the caller's product from the signed config>}, also when the input names another product; an agent call's hooks see call.caller {type: agent} with no product key; bridges older than 0.2.2 are not_applicable by version",
+    async () => {
+      const version = enrolRequests(c)[0]?.version;
+      if (versionBelow(version, HOOK_CALLER_PRODUCT_SINCE)) return na(`bridge ${version} predates ${HOOK_CALLER_PRODUCT_SINCE} (HOOK-CALLER-PRODUCT, spec 0.1.45): not applicable by version`);
+      if (!peer || !edge || !pg) return bad("no companion edge between the primary and the peer app");
+      const opId = edge.operations[0] as string;
+      const op = c.op(peer, opId);
+      if (!op) return bad(`peer has no op ${opId}`);
+      const callerOf = (r: Received) => (JSON.parse(r.body) as { call?: { caller?: Record<string, unknown> } }).call?.caller;
+      const phases = (["before", "context", "after"] as const).map((ph) => ({ ph, hooks: chainFor(c, peer, op, ph) })).filter((x) => x.hooks.length > 0);
+      if (phases.length === 0) return bad(`no hook matches the companion op ${opId} of the peer`);
+      // a decoy: the input names another product (when the op's input admits extra properties); the bridge must not read it
+      const base = c.input(peer, opId) as Json;
+      const decoy = isObj(base) && (op.input as { additionalProperties?: unknown } | undefined)?.additionalProperties !== false && !("product" in base);
+      const input = decoy ? ({ ...(base as Record<string, Json>), product: "tbconf-forged-product" } as Json) : base;
+      try {
+        answer();
+        let s0 = c.w.seqNow();
+        const a = await p.companion({ target: peer.product, op: opId, input }, pg);
+        const seen = phases.map(({ ph, hooks }) => {
+          const calls = hooks.flatMap((h) => hookCalls(s0, h));
+          const withProduct = calls.filter((r) => {
+            const caller = callerOf(r);
+            return caller?.type === "app" && caller.id === p.ins && caller.product === p.product;
+          });
+          const products = [...new Set(calls.map((r) => JSON.stringify(callerOf(r)?.product ?? null)))].join("|");
+          return { ph, n: hooks.length, calls: calls.length, good: withProduct.length, products };
+        });
+        const appOk = a.status === 200 && seen.every((x) => x.calls === x.n && x.good === x.n);
+        // an agent call: the hooks see the agent and NO product key
+        const agentOp = c.readOp(peer) ?? c.agentOps(peer)[0];
+        let agentShown = "no agent op on the peer";
+        let agentOk = false;
+        if (agentOp) {
+          s0 = c.w.seqNow();
+          const r = await c.call("free", peer, agentOp.id);
+          const hooks = (["before", "context", "after"] as const).flatMap((ph) => chainFor(c, peer, agentOp, ph));
+          const calls = hooks.flatMap((h) => hookCalls(s0, h));
+          const clean = calls.filter((x) => callerOf(x)?.type === "agent" && !("product" in (callerOf(x) ?? {})));
+          agentOk = c.isOk(r) && calls.length > 0 && clean.length === calls.length;
+          agentShown = `${describeCall(r)}; ${clean.length}/${calls.length} hook calls see an agent without product`;
+        }
+        return verdict(
+          appOk && agentOk,
+          `app-initiated${decoy ? " (input names product tbconf-forged-product)" : ""}: ${status(a)}; hooks ${seen.map((x) => `${x.ph} ${x.good}/${x.n} carry product ${p.product}${x.good < x.n ? ` (saw ${x.products || "no calls"})` : ""}`).join(", ")}; agent call: ${agentShown}`,
+        );
+      } finally {
+        reset();
+      }
+    },
+  );
 }

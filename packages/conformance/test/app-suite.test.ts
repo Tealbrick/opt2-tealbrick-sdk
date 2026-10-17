@@ -39,7 +39,19 @@ describe("app target", () => {
     assert.equal(st("A11.narrowing_empty_anyof"), "not_applicable");
     assert.equal(st("A12.caller_name"), "pass");
     assert.equal(st("A12.caller_product_verified"), "pass");
+    for (const id of ["A12.grant_prd_first", "A12.grant_prd_mismatch", "A12.grant_prd_absent"]) assert.equal(st(id), "pass", id);
     assert.match(r.checks.find((c) => c.id === "C3.grant_held_unknown")?.asserted ?? "", /item_delete \(destructive\): 202 held/);
+  });
+
+  it("GRANT-PRD checks are SDK >= 0.1.28 rules: an SDK that reports an older release gets not_applicable by version, whatever it does", async () => {
+    const r = await run({ reportedSdkVersion: "0.1.27", callerProductIgnoresPrd: true });
+    for (const id of ["A12.grant_prd_first", "A12.grant_prd_mismatch", "A12.grant_prd_absent"]) {
+      const c = r.checks.find((x) => x.id === id);
+      assert.equal(c?.status, "not_applicable", `${id}: ${c?.asserted}`);
+      assert.match(c?.asserted ?? "", /predates 0\.1\.28.*not applicable by version/);
+    }
+    const ok = await run({ reportedSdkVersion: "0.1.28" });
+    assert.equal(ok.checks.find((x) => x.id === "A12.grant_prd_first")?.status, "pass");
   });
 
   const cases: [string, MiniAppFaults, string[], number?][] = [
@@ -71,7 +83,11 @@ describe("app target", () => {
     ["names app callers by their instance id although companionCallers lists them", { callerNameIgnoresSlice: true }, ["A12.caller_name"]],
     // v0.1.19 (spec 0.1.44, SDK-CALLER-PRODUCT): the product comes from the verified instance, never from the name
     ["finds the caller's product by its NAME (an impostor named like another product is taken for it)", { callerProductFromName: true }, ["A12.caller_product_verified"]],
-    ["never reports caller.product (pre-0.1.44)", { noCallerProduct: true }, ["A12.caller_product_verified"]],
+    ["never reports caller.product (pre-0.1.44)", { noCallerProduct: true }, ["A12.caller_product_verified", "A12.grant_prd_first", "A12.grant_prd_mismatch", "A12.grant_prd_absent"]],
+    // v0.1.21 (spec 0.1.46, GRANT-PRD): the grant's prd first, the slice as fallback, a disagreement refused
+    ["ignores the grant's prd (pre-0.1.46: slice only)", { callerProductIgnoresPrd: true }, ["A12.grant_prd_first", "A12.grant_prd_mismatch"]],
+    ["prefers the slice entry over the grant's prd and never refuses a disagreement", { callerProductPrefersSlice: true }, ["A12.grant_prd_mismatch"]],
+    ["picks the grant's prd over a disagreeing slice entry instead of refusing", { callerProductMismatchPicksGrant: true }, ["A12.grant_prd_mismatch"]],
     // v0.1.17 (C108)
     ["refuses a grant whose held names an unknown family (strict reader)", { strictHeld: true }, ["C3.grant_held_unknown"]],
     // v0.1.19 (C111a, conformance 0.1.12)
@@ -147,6 +163,59 @@ describe("app target", () => {
     const c = statusOf(r, "A3.caps_count");
     assert.equal(c?.status, "fail", c?.asserted);
     assert.match(c?.asserted ?? "", /item_touch \(receipt false\): first 200 ok, second 200 ok/);
+  });
+
+  // ── package 0.1.21 (Connect waiver): `as: "capsAgent"` setup steps run as the fresh caps agent of A3.caps_count ──
+  // Connect-like: post_cancel acts on a post the CALLER owns, so the fresh caps agent needs a post of its own first.
+  const pm = structuredClone(manifest) as Manifest;
+  pm.operations.push(
+    {
+      id: "post_create",
+      title: "Create post",
+      description: "Create a post owned by the caller.",
+      input: { type: "object", properties: { text: { type: "string" } } },
+      output: { type: "object" },
+      crud: ["create"],
+      effect: "write",
+      idempotency: "required",
+      receipt: true,
+      audience: "agent",
+    } as Manifest["operations"][number],
+    {
+      id: "post_cancel",
+      title: "Cancel post",
+      description: "Cancel a post the caller owns.",
+      input: { type: "object", required: ["id"], properties: { id: { type: "string" } } },
+      output: { type: "object" },
+      crud: ["update"],
+      effect: "write",
+      idempotency: "supported",
+      receipt: false,
+      audience: "agent",
+    } as Manifest["operations"][number],
+  );
+  const capsCfg = (setup: unknown[]) => parseConformanceConfig({ setup, inputs: { post_cancel: { id: "${capsPost}" } } }, "test config");
+  const capsStep = { id: "caps_post", as: "capsAgent", op: "post_create", input: { text: "caps probe" }, capture: { capsPost: "/id" } };
+  const runPosts = (config: ConformanceConfig | null) =>
+    runApp({ manifest: pm, config, start: (env) => startMiniApp(pm, env, { postsPerAgent: true }), deployTemplate: template, timeoutMs: 8000 });
+  it("package 0.1.21: a capsAgent setup step gives the fresh caps agent its own post; A3.caps_count passes for the data-owning op", async () => {
+    const r = await runPosts(capsCfg([capsStep]));
+    const c = statusOf(r, "A3.caps_count");
+    assert.equal(c?.status, "pass", c?.asserted);
+    assert.match(c?.asserted ?? "", /post_cancel \(receipt false\): first 200 ok, second 202 held/);
+    assert.match(c?.asserted ?? "", /post_create \(receipt true\): first 200 ok, second 202 held/);
+    assert.equal(r.checks.filter((x) => x.status === "fail").length, 0, renderMarkdown(r));
+    assert.ok(r.notes.some((n) => /setup: step caps_post \(capsAgent post_create\)/.test(n)), r.notes.join("\n"));
+  });
+  it("package 0.1.21: without the capsAgent step the generated input cannot cancel (the probe shows why the step is needed)", async () => {
+    const r = await runPosts(null);
+    assert.match(statusOf(r, "A3.caps_count")?.asserted ?? "", /post_cancel \(receipt false\): first 404 post_not_found/);
+  });
+  it("package 0.1.21: a failing capsAgent step blocks its capture: A3.caps_count is not_run naming the step and its answer", async () => {
+    const r = await runPosts(capsCfg([{ ...capsStep, op: "post_cancel", input: { id: "nope" } }]));
+    const c = statusOf(r, "A3.caps_count");
+    assert.equal(c?.status, "not_run", c?.asserted);
+    assert.match(c?.asserted ?? "", /setup step caps_post \(capsAgent post_cancel\) failed: .*404/);
   });
 
   for (const [name, faults, id] of [

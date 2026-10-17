@@ -55,6 +55,8 @@ export interface CallOptions {
   grantKey?: Ed25519KeyPair;
   /** v0.1.13 (G1): the op proof carries this before-hook hold verdict (`hv`) */
   hv?: HoldVerdictClaim;
+  /** spec 0.1.46 (GRANT-PRD): the companion grant (`caller` only) carries `prd` = this product, as Portal Core's grants do */
+  prd?: string;
 }
 
 export interface SentRequest {
@@ -168,6 +170,7 @@ export class AppClient {
       caps: opts.caps ?? {},
       wf: opts.wf ?? (mode === "bound" ? [op] : []),
       ...(opts.grantKey ? { key: opts.grantKey } : {}),
+      ...(opts.caller && opts.prd !== undefined ? { prd: opts.prd } : {}),
     };
     let grant = opts.grant;
     if (grant === undefined) {

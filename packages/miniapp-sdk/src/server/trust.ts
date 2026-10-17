@@ -15,7 +15,7 @@ import {
 import type { InstanceSlice, ScopeRequest } from "@opt2-tealbrick/spec/bridge";
 import { type BridgeId, type Ed25519PublicJwk, type InstanceId, type InstanceRef, LIFETIME_S, TYP, type WorkspaceId } from "@opt2-tealbrick/spec/credentials";
 import type { ProductId } from "@opt2-tealbrick/spec/manifest";
-import type { KeySet, Refusal, SliceAgent, TrustContext } from "@opt2-tealbrick/spec/sdk";
+import type { KeySet, Logger, Refusal, SliceAgent, TrustContext } from "@opt2-tealbrick/spec/sdk";
 import { metaDelete, metaGet, metaSet, type RawDb } from "./store.ts";
 
 interface StoredSlice {
@@ -181,8 +181,8 @@ export class TrustState {
 
   /**
    * v0.1.27 (SDK-CALLER-PRODUCT, spec 0.1.44): the VERIFIED product id of the app caller instance `ins` = the slice
-   * `companionCallers[]` entry whose `ins` equals it (Portal-signed slice). The ONLY source of `Caller.product`: never
-   * derived from a name. undefined = `ins` is not a companion caller in the current slice.
+   * `companionCallers[]` entry whose `ins` equals it (Portal-signed slice). The FALLBACK source of `Caller.product` (the
+   * grant's `prd` wins, see resolveCallerProduct): never derived from a name. undefined = `ins` is not a companion caller in the current slice.
    */
   companionProduct(ins: string): string | undefined {
     return this.companionCallers().find((x) => x.ins === ins)?.product;
@@ -277,13 +277,37 @@ function peekPayload(token: string): Record<string, unknown> | null {
   }
 }
 
+/** The outcome of {@link resolveCallerProduct}: the `{ product? }` to spread into a Caller, or a grant/slice conflict. */
+export type CallerProductResult = { ok: true; caller: { product?: ProductId } } | { ok: false; grantProduct: string; sliceProduct: string | null };
+
 /**
- * v0.1.27 (SDK-CALLER-PRODUCT, spec 0.1.44): `Caller.product` for an APP caller = the verified product id of the slice
- * `companionCallers[]` entry whose `ins` is the caller instance. Empty for agents, persons and an app not in the slice.
- * The only place a product is attached to a caller; it never reads a name.
+ * THE one place a product is attached to an app Caller (v0.1.28, GRANT-PRD, spec 0.1.46; before: v0.1.27 SDK-CALLER-PRODUCT).
+ * Every Caller built for an app (live op call, scheduled-op fire, handler job context) goes through this.
+ *  - `claims` = the claims of the caller's VERIFIED grant (or null when the context has no grant, e.g. a handler job).
+ *  - Sources, in order: (1) the grant's `prd` (signed with the grant, no lag) - (2) the slice `companionCallers[]` entry
+ *    whose `ins` is the caller instance, only when `prd` is absent (grants minted before Core sends it).
+ *  - Both present for the same instance and different: `{ ok: false }` (the caller refuses `grant_invalid`, never "pick one").
+ *    A `prd` that is present but not a non-empty string is a malformed signed claim: also a conflict (fail closed).
+ *  - Agents, persons and an app in neither source get `{}`. An agent grant's `prd` is never read. A name is never read.
+ * A conflict is logged here as a warning with both product values (no token, no other grant claim).
  */
-export function appCallerProduct(rt: { trust: Pick<TrustState, "companionProduct"> }, type: string, ins: string): { product?: ProductId } {
-  if (type !== "app") return {};
-  const product = rt.trust.companionProduct(ins);
-  return product === undefined ? {} : { product: product as ProductId };
+export function resolveCallerProduct(
+  rt: { trust: Pick<TrustState, "companionProduct">; log?: Pick<Logger, "warn"> },
+  caller: { type: string; id: string },
+  claims: object | null,
+): CallerProductResult {
+  if (caller.type !== "app") return { ok: true, caller: {} };
+  const sliceProduct = rt.trust.companionProduct(caller.id);
+  const prd = claims ? (claims as { prd?: unknown }).prd : undefined;
+  if (prd === undefined) return { ok: true, caller: sliceProduct === undefined ? {} : { product: sliceProduct as ProductId } };
+  if (typeof prd !== "string" || prd === "" || (sliceProduct !== undefined && sliceProduct !== prd)) {
+    const grantProduct = typeof prd === "string" ? prd : "(malformed)";
+    rt.log?.warn("caller product differs between the grant and the instance slice; the call is refused", {
+      caller: caller.id,
+      grantProduct,
+      sliceProduct: sliceProduct ?? null,
+    });
+    return { ok: false, grantProduct, sliceProduct: sliceProduct ?? null };
+  }
+  return { ok: true, caller: { product: prd as ProductId } };
 }
