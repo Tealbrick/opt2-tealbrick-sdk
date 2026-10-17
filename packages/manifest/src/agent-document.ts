@@ -25,6 +25,11 @@ export interface AgentDocumentRules {
   readonly deniedElementsWithAttribute: readonly { readonly element: string; readonly attribute: string }[];
   /** Removed when the app does not opt into scripts (`allowScripts: false`). */
   readonly scriptElements: readonly string[];
+  /** `<script>` types (the `type` attribute, ASCII white space trimmed, ASCII lower-cased, anything after `;` ignored) that are
+   *  removed in EVERY mode, also with `allowScripts: true` (0.1.25, C238): a speculation rules script is a network-reaching
+   *  declaration (prerender, prefetch), not page script, and an import map can point module loads off-site. Whether the
+   *  sandbox or CSP would make an import map inert is not relied on. Other scripts (JSON data scripts too) follow `allowScripts`. */
+  readonly deniedScriptTypes: readonly string[];
   /** Attribute names that start with this are event handlers: removed when `allowScripts` is false. */
   readonly eventHandlerPrefix: string;
   /** Attributes removed on every element, always (full name with prefix, lower case). */
@@ -93,6 +98,7 @@ export const AGENT_DOCUMENT_RULES: AgentDocumentRules = deepFreeze({
   deniedElements: ["applet", "base", "bgsound", "embed", "fencedframe", "form", "frame", "frameset", "iframe", "keygen", "link", "noembed", "noframes", "noscript", "object", "portal"],
   deniedElementsWithAttribute: [{ element: "meta", attribute: "http-equiv" }],
   scriptElements: ["script"],
+  deniedScriptTypes: ["importmap", "speculationrules"],
   eventHandlerPrefix: "on",
   deniedAttributes: ["ping", "srcdoc", "xml:base"],
   linkElements: ["a", "area"],

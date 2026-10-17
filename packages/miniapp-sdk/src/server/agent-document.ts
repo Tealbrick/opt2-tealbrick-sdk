@@ -65,6 +65,7 @@ const MARKER_COMMENT = AGENT_DOCUMENT_MARKER.slice("<!--".length, -"-->".length)
 
 const DENIED_ELEMENTS = new Set(R.deniedElements);
 const SCRIPT_ELEMENTS = new Set(R.scriptElements);
+const DENIED_SCRIPT_TYPES = new Set(R.deniedScriptTypes);
 const DENIED_ATTRIBUTES = new Set(R.deniedAttributes);
 const LINK_ELEMENTS = new Set(R.linkElements);
 const URL_ATTRIBUTES = new Set(R.urlAttributes);
@@ -483,8 +484,21 @@ function attrValue(el: Element, name: string): string | undefined {
   return el.attrs.find((a) => fullName(a) === name)?.value;
 }
 
+/** The script type as a browser reads it for these two kinds: parameters after `;` ignored, ASCII white space, C0 controls and
+ *  spaces trimmed, ASCII lower-cased. Character references are already decoded by the parser. */
+function scriptKind(el: Element): string {
+  const raw = attrValue(el, "type") ?? "";
+  const semi = raw.indexOf(";");
+  return cleanUrl(semi < 0 ? raw : raw.slice(0, semi)).replace(/[A-Z]/g, (c) => c.toLowerCase());
+}
+
 function removeElementReason(el: Element, tag: string, ctx: Ctx): string | null {
   if (DENIED_ELEMENTS.has(tag)) return `element:${tag}`;
+  // speculation rules and import maps go in EVERY mode (C238), before the allowScripts decision
+  if (SCRIPT_ELEMENTS.has(tag)) {
+    const kind = scriptKind(el);
+    if (DENIED_SCRIPT_TYPES.has(kind)) return `element:${tag}-${kind}`;
+  }
   for (const d of R.deniedElementsWithAttribute) if (tag === d.element && el.attrs.some((a) => fullName(a) === d.attribute)) return `element:${tag}-${d.attribute}`;
   if (!ctx.allowScripts && SCRIPT_ELEMENTS.has(tag)) return `element:${tag}`;
   if (SMIL_ELEMENTS.has(tag)) {

@@ -49,7 +49,8 @@ function cssHit(value: string): boolean {
     .replace(/\\(.)/gs, "$1")
     .toLowerCase()
     .replace(/url\(\s*(["']?)#[^)]*\)/g, "");
-  return /(?:url|image|image-set|cross-fade|element|src)\(/.test(decoded) || decoded.includes("@import") || decoded.includes("expression(") || decoded.includes("-moz-binding");
+  // a function name is a whole identifier: `hurl(` is not `url(` (a vendor prefix, `-webkit-image-set(`, still is)
+  return /(?<![a-z0-9_])(?:url|image|image-set|cross-fade|element|src)\(/.test(decoded) || decoded.includes("@import") || decoded.includes("expression(") || decoded.includes("-moz-binding");
 }
 
 function hits(html: string, allowScripts: boolean, prefix: string): string[] {
@@ -66,6 +67,7 @@ function hits(html: string, allowScripts: boolean, prefix: string): string[] {
       if (R.deniedElements.includes(tag)) found.add(`element:${tag}`);
       for (const d of R.deniedElementsWithAttribute) if (tag === d.element && attr(d.attribute) !== undefined) found.add(`element:${tag}-${d.attribute}`);
       if (!allowScripts && R.scriptElements.includes(tag)) found.add(`element:${tag}`);
+      if (R.scriptElements.includes(tag) && R.deniedScriptTypes.includes((attr("type") ?? "").split(";")[0]?.replace(/^[\s\0-\x20]+|[\s\0-\x20]+$/g, "").toLowerCase() ?? "")) found.add(`element:${tag}-denied-type`);
       if (tag === "style") {
         if (child.childNodes.some((c) => c.nodeName !== "#text")) found.add("element:style-markup");
         if (cssHit(child.childNodes.map((c) => (c as T.TextNode).value ?? "").join(""))) found.add("css:style-element");
@@ -411,6 +413,47 @@ describe("runsScripts, NO_SCRIPT_CSP, text slots (Live Artifacts S7)", () => {
     assert.equal(sanitizeAgentDocument(page('<template><p onclick="x()">t</p></template>'), on).runsScripts, true);
     // a script that the sanitiser removes does not count
     assert.equal(sanitizeAgentDocument(page('<noscript><script>1</script></noscript>'), on).runsScripts, false);
+  });
+
+  test("runsScripts is computed from the sanitised output: removed speculation rules and import maps never count (C238)", () => {
+    const rules = '{"prerender":[{"source":"list","urls":["https://x.test/"]}]}';
+    const only = [`<script type="speculationrules">${rules}</script>`, `<script type="importmap">{"imports":{}}</script>`, `<svg><script type="SpeculationRules">${rules}</script></svg>`, `<template><script type=" speculationrules ;a">${rules}</script></template>`, `<script type="speculation&#114;ules">${rules}</script>`];
+    for (const o of [on, off]) {
+      for (const s of only) {
+        const r = sanitizeAgentDocument(page(s), o);
+        assert.equal(r.ok, true, s);
+        assert.equal(r.runsScripts, false, `${s}: the only script was removed`);
+        assert.ok(!/<script|speculationrules|importmap/i.test(r.html), r.html);
+        assert.ok(r.removed.some((x) => x.kind.startsWith("element:script-")), JSON.stringify(r.removed));
+      }
+      const all = sanitizeAgentDocument(page(only.join("")), o);
+      assert.equal(all.runsScripts, false);
+    }
+    // a page that keeps another script still reports true; the denied one is gone
+    const mixed = sanitizeAgentDocument(page(`<script type="speculationrules">${rules}</script><script>go()</script>`), on);
+    assert.equal(mixed.runsScripts, true);
+    assert.ok(mixed.html.includes("<script>go()</script>") && !mixed.html.includes("speculationrules"));
+    // kinds: counted by name, never content
+    assert.deepEqual(sanitizeAgentDocument(page(`<script type="speculationrules">${rules}</script><script type="importmap">{}</script><script type="importmap">{}</script>`), on).removed, [{ kind: "element:script-importmap", count: 2 }, { kind: "element:script-speculationrules", count: 1 }]);
+    // a look-alike type is an ordinary script: it follows allowScripts
+    assert.equal(sanitizeAgentDocument(page('<script type="text/speculationrules">1</script>'), on).runsScripts, true);
+    assert.equal(sanitizeAgentDocument(page('<script type="text/speculationrules">1</script>'), off).runsScripts, false);
+  });
+
+  test("assetPrefix paths and raster data: images stay, other relative URLs go (Live Artifacts assets, C230)", () => {
+    const o = { allowScripts: true, assetPrefix: PREFIX };
+    const r = sanitizeAgentDocument(page(`<script src="${PREFIX}app.js"></script><a href="${PREFIX}style.css">css</a><img src="${PREFIX}logo.png"><img src="data:image/png;base64,iVBORw0KGgo=">`), o);
+    for (const k of [`<script src="${PREFIX}app.js"></script>`, `<a href="${PREFIX}style.css">css</a>`, `<img src="${PREFIX}logo.png">`, '<img src="data:image/png;base64,iVBORw0KGgo=">']) assert.ok(r.html.includes(k), `${k} -> ${r.html}`);
+    assert.deepEqual(r.removed, []);
+    // never svg+xml, never on an anchor; other relative forms are refused
+    for (const bad of ['<img src="data:image/svg+xml;base64,PHN2Zy8+">', '<a href="data:image/png;base64,iVBORw0KGgo=">x</a>', '<img src="logo.png">', '<img src="./logo.png">', '<img src="../logo.png">', '<img src="/_s/logo.png">', '<a href="style.css">x</a>', '<script src="app.js"></script>', '<img src="/v/other/_s/logo.png">']) {
+      const x = sanitizeAgentDocument(page(bad), o);
+      assert.ok(!/(?:src|href)=/.test(x.html.replace(/<!--.*?-->/, "")), `${bad} -> ${x.html}`);
+      assert.ok(x.removed.some((y) => y.kind.startsWith("attribute:url:")), bad);
+    }
+    // a stylesheet <link> is removed whatever its href (design: link, every rel), so a stylesheet cannot be loaded that way
+    const link = sanitizeAgentDocument(page(`<link rel="stylesheet" href="${PREFIX}style.css">`), o);
+    assert.ok(!link.html.includes("<link") && link.removed.some((y) => y.kind === "element:link"));
   });
 
   test("no-scripts mode removes every script element (JSON too) and every on* attribute: runsScripts is always false", () => {

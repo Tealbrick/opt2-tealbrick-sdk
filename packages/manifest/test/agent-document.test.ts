@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { AGENT_DOCUMENT_MARKER, AGENT_DOCUMENT_MAX_BYTES, AGENT_DOCUMENT_UNAVAILABLE_TEXT, AGENT_DOCUMENT_RULES as R } from "../src/index.ts";
 
-test("AGENT_DOCUMENT_RULES (0.1.24): frozen data, one marker, the 2 MiB viewer body cap", () => {
+test("AGENT_DOCUMENT_RULES (0.1.25): frozen data, one marker, the 2 MiB viewer body cap", () => {
   assert.equal(R.version, 1);
   assert.equal(R.marker, AGENT_DOCUMENT_MARKER);
   assert.equal(AGENT_DOCUMENT_MARKER, "<!-- tb:sanitized v1 -->");
@@ -20,6 +20,7 @@ test("AGENT_DOCUMENT_RULES: every name list is lower case, sorted, without dupli
   const lists: Record<string, readonly string[]> = {
     deniedElements: R.deniedElements,
     scriptElements: R.scriptElements,
+    deniedScriptTypes: R.deniedScriptTypes,
     deniedAttributes: R.deniedAttributes,
     linkElements: R.linkElements,
     urlAttributes: R.urlAttributes,
@@ -46,6 +47,9 @@ test("AGENT_DOCUMENT_RULES: the agreed removals are in the list (Creative S3 / L
   assert.ok(!R.deniedElements.includes("template"), "template content is walked, not removed");
   assert.deepEqual(R.deniedElementsWithAttribute, [{ element: "meta", attribute: "http-equiv" }]);
   assert.deepEqual(R.scriptElements, ["script"]);
+  // 0.1.25 (C238): speculation rules and import maps go in every mode
+  assert.deepEqual([...R.deniedScriptTypes], ["importmap", "speculationrules"]);
+  assert.ok(Object.isFrozen(R.deniedScriptTypes));
   assert.equal(R.eventHandlerPrefix, "on");
   for (const a of ["ping", "srcdoc"]) assert.ok(R.deniedAttributes.includes(a), a);
   for (const a of ["action", "formaction", "href", "src", "poster", "data", "background", "xlink:href"]) assert.ok(R.urlAttributes.includes(a), a);
