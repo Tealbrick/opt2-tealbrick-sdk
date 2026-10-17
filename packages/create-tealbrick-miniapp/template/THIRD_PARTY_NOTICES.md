@@ -34,6 +34,8 @@ The UI build (`scripts/build-ui.ts`) copies these files into the app image.
 | `fast-uri` (ajv) | 3.1.8 | BSD-3-Clause | https://github.com/fastify/fast-uri |
 | `json-schema-traverse` (ajv) | 1.0.0 | MIT | https://github.com/epoberezkin/json-schema-traverse |
 | `require-from-string` (ajv) | 2.0.2 | MIT | https://github.com/floatdrop/require-from-string |
+| `parse5` (dependency of `@opt2-tealbrick/miniapp-sdk` from 0.1.29, for `sanitizeAgentDocument`; only when the app depends on that SDK version) | 8.0.1 | MIT (Copyright (c) 2013-2019 Ivan Nikulin) | https://github.com/inikulin/parse5 |
+| `entities` (parse5) | 8.1.0 | BSD-2-Clause (Copyright (c) Felix Boehm) | https://github.com/fb55/entities |
 
 ## Base image
 
