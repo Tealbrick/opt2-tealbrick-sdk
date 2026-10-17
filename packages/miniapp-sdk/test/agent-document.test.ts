@@ -11,7 +11,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { describe, test } from "node:test";
 import { AGENT_DOCUMENT_MARKER, AGENT_DOCUMENT_MAX_BYTES, AGENT_DOCUMENT_UNAVAILABLE_TEXT, AGENT_DOCUMENT_RULES as R, viewerDocumentCspOk } from "@opt2-tealbrick/manifest";
 import { parse, serialize, type DefaultTreeAdapterTypes as T } from "parse5";
-import { AGENT_DOCUMENT_UNAVAILABLE_HTML, fillTextSlots, NO_SCRIPT_CSP, type SanitizeAgentDocumentResult, sanitizeAgentDocument } from "../src/server/index.ts";
+import { AGENT_DOCUMENT_UNAVAILABLE_HTML, agentDocumentPrecheck, agentDocumentStats, fillTextSlots, MAX_ATTRIBUTES_PER_TAG, MAX_TAGS, NO_SCRIPT_CSP, type SanitizeAgentDocumentResult, sanitizeAgentDocument } from "../src/server/index.ts";
 
 const DIR = new URL("./vectors/agent-documents/", import.meta.url);
 interface Case {
@@ -234,13 +234,11 @@ describe("fail closed", () => {
     const attrs = (n: number, quoted = false) => Array.from({ length: n }, (_, i) => (quoted ? `a${i}="1>"` : `a${i}=1`)).join(" ");
     const page = (inner: string) => `<!DOCTYPE html><html><head></head><body>${inner}</body></html>`;
     assert.equal(sanitizeAgentDocument(page(`<p ${attrs(R.maxAttributesPerTag)}>x</p>`), o).ok, true);
-    const started = Date.now();
     expectInert(sanitizeAgentDocument(page(`<p ${attrs(R.maxAttributesPerTag + 1)}>x</p>`), o), "one over");
     expectInert(sanitizeAgentDocument(page(`<p ${attrs(60_000)}>x</p>`), o), "60 000 attributes");
     expectInert(sanitizeAgentDocument(page(`<p ${attrs(60_000, true)}>x</p>`), o), "a > inside quotes does not reset the count");
     expectInert(sanitizeAgentDocument(page(`</p ${attrs(60_000)}>`), o), "an end tag counts too");
     expectInert(sanitizeAgentDocument(page(`<p ${Array.from({ length: 60_000 }, (_, i) => `b${i}`).join("/")}>x</p>`), o), "slash separated, no values");
-    assert.ok(Date.now() - started < 2000, "refused without parsing");
     // many tags with few attributes each are fine
     assert.equal(sanitizeAgentDocument(page("<i a=1 b=2 c=3>x</i>".repeat(5000)), o).ok, true);
   });
@@ -479,6 +477,168 @@ describe("runsScripts, NO_SCRIPT_CSP, text slots (Live Artifacts S7)", () => {
     assert.equal(fillTextSlots(sanitizeAgentDocument(page('<p data-tb-text="constructor">x</p>'), off).html, {}).includes(">x</p>"), true);
   });
 });
+
+describe("pre-parse caps (L39): the HTML parser is quadratic in the attributes of one tag, so the caps run first", () => {
+  const o = { allowScripts: false, assetPrefix: PREFIX };
+  const names = (n: number) => Array.from({ length: n }, (_, i) => `a${i.toString(36)}`).join(" ");
+  /** wraps `attrs` in a tag the parser really reads as a tag, behind each hiding trick */
+  const variants: { name: string; real: boolean; make: (attrs: string) => string }[] = [
+    { name: "plain", real: true, make: (a) => `<p ${a}>x</p>` },
+    { name: "end tag", real: false, make: (a) => `</p ${a}>` },
+    { name: "unterminated at the end of the file", real: true, make: (a) => `<p ${a}` },
+    { name: "after <!-->", real: true, make: (a) => `<!--><p ${a}>x</p>` },
+    { name: "after <!--->", real: true, make: (a) => `<!---><p ${a}>x</p>` },
+    { name: "after a --!> closer", real: true, make: (a) => `<!-- c --!><p ${a}>x</p>` },
+    { name: "after a --!> closer with a decoy tag", real: true, make: (a) => `<!-- <q z=" --!><p ${a}>x</p>` },
+    { name: "svg style", real: true, make: (a) => `<svg><style><p ${a}>x</p></style></svg>` },
+    { name: "svg title", real: true, make: (a) => `<svg><title><p ${a}>x</p></title></svg>` },
+    { name: "svg desc", real: true, make: (a) => `<svg><desc><p ${a}>x</p></desc></svg>` },
+    { name: "math title", real: true, make: (a) => `<math><title><p ${a}>x</p></title></math>` },
+    { name: "math annotation-xml html", real: true, make: (a) => `<math><annotation-xml encoding="text/html"><p ${a}>x</p></annotation-xml></math>` },
+    { name: "after a quoted >", real: true, make: (a) => `<p z=">" ${a}>x</p>` },
+    { name: "after a quoted > behind a comment decoy", real: true, make: (a) => `<!-- <x z=" --><p y=">" ${a}>x</p>` },
+    { name: "after a quoted < and >", real: true, make: (a) => `<p z='<>' ${a}>x</p>` },
+    { name: "unquoted values", real: true, make: (a) => `<p ${a.replace(/ /g, "=1 ")}>x</p>` },
+    { name: "slash separated", real: true, make: (a) => `<p ${a.replace(/ /g, "/")}>x</p>` },
+    { name: "inside a comment", real: false, make: (a) => `<!-- <p ${a}> -->` },
+    { name: "inside a textarea", real: false, make: (a) => `<textarea><p ${a}></textarea>` },
+    { name: "inside a script", real: false, make: (a) => `<script><p ${a}></script>` },
+    { name: "inside a CDATA section", real: false, make: (a) => `<svg><![CDATA[<p ${a}>]]></svg>` },
+  ];
+  const page = (inner: string) => `<!DOCTYPE html><html><head></head><body>${inner}</body></html>`;
+  const counting = () => {
+    const calls = { n: 0 };
+    return { calls, deps: { parse: ((...a: Parameters<typeof parse>) => {
+      calls.n++;
+      return parse(...a);
+    }) as typeof parse } };
+  };
+  const maxElementAttrs = (html: string): number => {
+    let max = 0;
+    const visit = (node: T.ParentNode): void => {
+      for (const c of node.childNodes) {
+        if (!("tagName" in c)) continue;
+        max = Math.max(max, c.attrs.length);
+        visit(c);
+        if ((c as T.Template).content) visit((c as T.Template).content);
+      }
+    };
+    for (const scripting of [true, false]) visit(parse(html, { scriptingEnabled: scripting }));
+    return max;
+  };
+
+  test("a 36 000 attribute tag, in every hiding variant, fails closed and no parser call is made", () => {
+    for (const v of variants) {
+      const html = page(v.make(names(36_000)));
+      assert.equal(agentDocumentPrecheck(html), false, v.name);
+      const { calls, deps } = counting();
+      for (const allowScripts of [false, true]) expectInertResult(sanitizeAgentDocument(html, { ...o, allowScripts }, deps), v.name);
+      expectInertResult({ ok: false, html: fillTextSlots(html, { a: "b" }, deps), runsScripts: false, removed: [] }, `${v.name} (fillTextSlots)`);
+      assert.equal(calls.n, 0, `${v.name}: parse5 must never see a page over the caps`);
+    }
+  });
+
+  test("the variants are real: at 300 attributes the parser itself reads a tag over the cap (and the count is never below it)", () => {
+    for (const v of variants.filter((x) => x.real)) {
+      const html = page(v.make(names(300)));
+      const real = maxElementAttrs(html);
+      assert.ok(real > MAX_ATTRIBUTES_PER_TAG, `${v.name}: parse5 reads ${real} attributes; the variant does not hide a real tag`);
+      assert.ok(agentDocumentStats(html).maxAttributes >= real, `${v.name}: the pre-parse count is below the parser's`);
+      assert.equal(agentDocumentPrecheck(html), false, v.name);
+    }
+  });
+
+  test("soundness: on random tag soup the pre-parse count is never below what the parser reads", () => {
+    let seed = 12345;
+    const rnd = () => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x7fffffff;
+    };
+    const bits = ["<", "<p ", "<q ", "</p ", "<svg>", "<math>", "<style>", "</style>", "<title>", "<textarea>", "<!--", "-->", "--!>", "<!-->", "<!--->", "<![CDATA[", "]]>", ">", '"', "'", "=", "/", " ", "\n", "x=", "y", "<script>", "<template>", "<noscript>", "<annotation-xml encoding=text/html>", "<foreignObject>", "<desc>"];
+    let n = 0;
+    for (let doc = 0; doc < 400; doc++) {
+      let html = "";
+      const parts = 5 + Math.floor(rnd() * 80);
+      for (let i = 0; i < parts; i++) {
+        const b = bits[Math.floor(rnd() * bits.length)] as string;
+        html += rnd() < 0.3 ? `${b}n${n++}=${n++} n${n++} ` : b;
+        if (rnd() < 0.5) html += `m${n++} `;
+      }
+      const real = maxElementAttrs(html);
+      const counted = agentDocumentStats(html).maxAttributes;
+      assert.ok(counted >= real, `doc #${doc}: counted ${counted} < parser ${real}: ${JSON.stringify(html).slice(0, 300)}`);
+    }
+  });
+
+  test("agentDocumentStats: attribute and tag counts", () => {
+    const m = (h: string) => agentDocumentStats(h).maxAttributes;
+    assert.equal(m('<p a b=1 c="x y" d=\'z\'>'), 4);
+    assert.equal(m('<p a=">" b>'), 2);
+    assert.equal(m("</p a b>"), 2);
+    assert.equal(m("<p/a/b>"), 2);
+    assert.equal(m("<p a = 1 b>"), 2);
+    assert.equal(m('<p a="1"b="2"c=3>'), 3);
+    assert.equal(m("<p =a b>"), 2);
+    assert.equal(m("<!-- <p a b c> -->"), 3);
+    assert.equal(m("text only, no tags"), 0);
+    assert.equal(m("<p><q a></q></p>"), 1);
+    assert.deepEqual(agentDocumentStats("<!DOCTYPE html><p></p><!-- x --><? y ?> 1 < 2 <3"), { maxAttributes: 0, tags: 4 });
+    // attributes after a long quoted value still count
+    assert.equal(m(`<p z="${"q ".repeat(5000)}" ${names(20)}>`), 21);
+  });
+
+  test("benign large pages just under the caps pass untouched (quiet on good)", () => {
+    const attrs = Array.from({ length: MAX_ATTRIBUTES_PER_TAG }, (_, i) => `a${i}="1"`).join(" ");
+    const base = page(`<p ${attrs}>x</p>`);
+    assert.equal(agentDocumentStats(base).maxAttributes, MAX_ATTRIBUTES_PER_TAG);
+    const r = sanitizeAgentDocument(base, o);
+    assert.equal(r.ok, true);
+    assert.equal(r.html, AGENT_DOCUMENT_MARKER + base);
+    assert.deepEqual(r.removed, []);
+    // exactly MAX_TAGS tags
+    const baseTags = agentDocumentStats(page("")).tags;
+    const pairs = Math.floor((MAX_TAGS - baseTags) / 2);
+    const odd = (MAX_TAGS - baseTags) % 2 === 1;
+    const big = page(`${"<i>x</i>".repeat(pairs)}${odd ? "<br>" : ""}`);
+    assert.equal(agentDocumentStats(big).tags, MAX_TAGS);
+    assert.ok(Buffer.byteLength(big) < AGENT_DOCUMENT_MAX_BYTES);
+    const rb = sanitizeAgentDocument(big, o);
+    assert.equal(rb.ok, true);
+    assert.equal(rb.html, AGENT_DOCUMENT_MARKER + big);
+    // one over each cap
+    expectInertResult(sanitizeAgentDocument(page(`<p ${attrs} extra="1">x</p>`), o), "257 attributes");
+    expectInertResult(sanitizeAgentDocument(`${big}<b>`, o), "MAX_TAGS + 1");
+    // the real parser is reached for a page under the caps: three passes
+    const { calls, deps } = counting();
+    assert.equal(sanitizeAgentDocument(base, o, deps).ok, true);
+    assert.equal(calls.n, 3);
+    const filled = fillTextSlots(r.html, {}, deps);
+    assert.equal(calls.n, 4);
+    assert.equal(filled, r.html);
+  });
+
+  test("fillTextSlots applies the same caps and size limit", () => {
+    expectInertResult({ ok: false, html: fillTextSlots(page(`<p ${names(MAX_ATTRIBUTES_PER_TAG + 1)}>`), {}), runsScripts: false, removed: [] }, "attributes");
+    assert.equal(fillTextSlots("<p>".repeat(MAX_TAGS + 1), {}), AGENT_DOCUMENT_UNAVAILABLE_HTML);
+    assert.equal(fillTextSlots("a".repeat(AGENT_DOCUMENT_MAX_BYTES + 1), {}), AGENT_DOCUMENT_UNAVAILABLE_HTML);
+    assert.equal(fillTextSlots(5 as never, {}), AGENT_DOCUMENT_UNAVAILABLE_HTML);
+  });
+
+  test("no wall-clock race: a refused page costs one linear pass and zero parses, whatever its size", () => {
+    const { calls, deps } = counting();
+    const worst = `<!DOCTYPE html>${"<p<p<p<p ".repeat(200_000)}`; // 1.8 MB of nested candidate starts
+    assert.ok(Buffer.byteLength(worst) < AGENT_DOCUMENT_MAX_BYTES);
+    expectInertResult(sanitizeAgentDocument(worst, o, deps), "nested candidate starts");
+    assert.equal(calls.n, 0);
+  });
+});
+
+function expectInertResult(r: SanitizeAgentDocumentResult, why: string): void {
+  assert.equal(r.ok, false, why);
+  assert.equal(r.html, AGENT_DOCUMENT_UNAVAILABLE_HTML, why);
+  assert.equal(r.runsScripts, false, why);
+  assert.deepEqual(r.removed, [], why);
+}
 
 describe("package boundary", () => {
   test("server entry exports it; the browser client entry never touches the sanitiser or parse5", () => {

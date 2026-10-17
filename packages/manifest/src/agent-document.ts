@@ -71,9 +71,11 @@ export interface AgentDocumentRules {
   readonly textSlotPattern: string;
   /** Largest tree depth the sanitiser walks; deeper: fail closed. */
   readonly maxDepth: number;
-  /** Most attributes one tag may carry in the input; more: fail closed. (An HTML5 parser takes time quadratic in the
-   *  attribute count of one tag, so a 2 MiB page of attributes would hold the server for minutes.) */
+  /** Most attributes any one tag-like token may carry, and most tag-like tokens a page may hold; more: fail closed BEFORE the
+   *  HTML parser runs (parse5 checks duplicate attributes quadratically: 36 000 attributes in one tag cost seconds). Counted
+   *  over the whole source, for every `<` that could start a tag, whatever comment or raw text it appears to sit in. */
   readonly maxAttributesPerTag: number;
+  readonly maxTags: number;
 }
 
 function deepFreeze<T>(o: T): T {
@@ -118,5 +120,6 @@ export const AGENT_DOCUMENT_RULES: AgentDocumentRules = deepFreeze({
   textSlotAttribute: "data-tb-text",
   textSlotPattern: "^[a-z][a-z0-9_]*(\\.[a-z0-9_]+)*$",
   maxDepth: 600,
-  maxAttributesPerTag: 1000,
+  maxAttributesPerTag: 256,
+  maxTags: 100000,
 });

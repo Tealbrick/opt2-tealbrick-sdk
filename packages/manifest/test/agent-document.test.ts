@@ -11,7 +11,9 @@ test("AGENT_DOCUMENT_RULES (0.1.24): frozen data, one marker, the 2 MiB viewer b
   assert.equal(AGENT_DOCUMENT_UNAVAILABLE_TEXT, "This file cannot be shown.");
   assert.ok(Object.isFrozen(R) && Object.isFrozen(R.deniedElements) && Object.isFrozen(R.allowedUrlForms) && Object.isFrozen(R.allowedUrlForms[1]));
   assert.throws(() => (R.deniedElements as string[]).push("x"));
-  assert.ok(R.maxDepth > 100 && R.maxAttributesPerTag >= 100);
+  assert.ok(R.maxDepth > 100);
+  assert.equal(R.maxAttributesPerTag, 256);
+  assert.equal(R.maxTags, 100000);
 });
 
 test("AGENT_DOCUMENT_RULES: every name list is lower case, sorted, without duplicates", () => {

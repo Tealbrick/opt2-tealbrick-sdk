@@ -22,6 +22,13 @@ export interface SanitizeAgentDocumentOptions {
   assetPrefix: string;
 }
 
+type ParseFn = typeof parse;
+
+/** Test seam: replaces the HTML parser, so a test can count parse calls (a refused page must reach none). Not for apps. */
+export interface AgentDocumentDeps {
+  parse?: ParseFn;
+}
+
 export interface SanitizeAgentDocumentResult {
   /** True: `html` is the sanitised document. False: the sanitiser failed closed and `html` is AGENT_DOCUMENT_UNAVAILABLE_HTML. */
   ok: boolean;
@@ -319,53 +326,137 @@ function cssValueBad(value: string): boolean {
 
 // ------------------------------------------------------------------------------------------------------------ input guard
 
-const isSpace = (c: string | undefined) => c === " " || c === "\t" || c === "\n" || c === "\f" || c === "\r";
-const isAlpha = (c: string | undefined) => c !== undefined && ((c >= "a" && c <= "z") || (c >= "A" && c <= "Z"));
+/** Caps counted before parse5 runs (see AGENT_DOCUMENT_RULES). Exported so a later re-parse applies the same caps. */
+export const MAX_ATTRIBUTES_PER_TAG = R.maxAttributesPerTag;
+export const MAX_TAGS = R.maxTags;
 
-/** One linear pass that follows the HTML tokenizer's tag rules (name, attribute names, quoted and unquoted values) and returns
- *  the largest attribute count of any one tag. It may count tags the tokenizer would read as text (inside `<style>`): that can
- *  only fail closed, never let a page through. */
-function maxAttributesInOneTag(s: string, limit: number): number {
+// HTML tokenizer states of a tag, the ones that decide where an attribute starts.
+const TAG_NAME = 0;
+const BEFORE_NAME = 1;
+const IN_NAME = 2;
+const AFTER_NAME = 3;
+const BEFORE_VALUE = 4;
+const VALUE_DQ = 5;
+const VALUE_SQ = 6;
+const VALUE_UNQ = 7;
+const AFTER_QUOTED = 8;
+const SELF_CLOSING = 9;
+const END_OPEN = 10; // after "</", before the tag name
+const STATES = 11;
+
+export interface AgentDocumentStats {
+  /** The most attributes any candidate tag carries before it ends (or the source ends). */
+  maxAttributes: number;
+  /** Count of `<` followed by a letter, `/` or `!`. */
+  tags: number;
+}
+
+/**
+ * ONE linear pass over the WHOLE source, with no notion of comments, raw text, CDATA or `<script>`: every `<` that could start
+ * a tag (`<` + letter, or `</` + letter) starts a tag-reading automaton there, whatever the page "really" is at that point
+ * (inside `<!-->`, `<!--->`, `--!>`, an SVG `<style>`, a MathML `<title>`: all counted). Each automaton follows the HTML
+ * tokenizer's own tag states (names, quoted and unquoted values), so a `>` in a quoted value does not hide attributes. The
+ * automata are merged by state, keeping the highest attribute count per state, so the pass stays linear however many start.
+ * The real tokenizer's count for any real tag is one of the candidates', so this never counts less than parse5 will see.
+ */
+export function agentDocumentStats(s: string): AgentDocumentStats {
+  let cnt = new Int32Array(STATES).fill(-1);
+  let next = new Int32Array(STATES);
+  let active = 0;
   let max = 0;
-  let i = 0;
+  let tags = 0;
   const n = s.length;
-  while (i < n) {
-    if (s[i] !== "<") {
-      i++;
-      continue;
-    }
-    i++;
-    if (s[i] === "/") i++;
-    if (!isAlpha(s[i])) continue;
-    while (i < n && !isSpace(s[i]) && s[i] !== "/" && s[i] !== ">") i++;
-    let count = 0;
-    for (;;) {
-      while (i < n && (isSpace(s[i]) || s[i] === "/")) i++;
-      if (i >= n) break;
-      if (s[i] === ">") {
-        i++;
-        break;
-      }
-      count++;
-      if (count > limit) return count;
-      i++;
-      while (i < n && !isSpace(s[i]) && s[i] !== "/" && s[i] !== ">" && s[i] !== "=") i++;
-      while (i < n && isSpace(s[i])) i++;
-      if (s[i] === "=") {
-        i++;
-        while (i < n && isSpace(s[i])) i++;
-        const q = s[i];
-        if (q === '"' || q === "'") {
-          const e = s.indexOf(q, i + 1);
-          i = e < 0 ? n : e + 1;
-        } else {
-          while (i < n && !isSpace(s[i]) && s[i] !== ">") i++;
+  for (let i = 0; i < n; i++) {
+    const c = s.charCodeAt(i);
+    if (active > 0) {
+      next.fill(-1);
+      active = 0;
+      const ws = c === 0x20 || c === 0x09 || c === 0x0a || c === 0x0c || c === 0x0d;
+      for (let st = 0; st < STATES; st++) {
+        const k = cnt[st] as number;
+        if (k < 0) continue;
+        let to = -1; // -1: the tag ends
+        let inc = 0;
+        switch (st) {
+          case TAG_NAME:
+            to = ws ? BEFORE_NAME : c === 0x2f ? SELF_CLOSING : c === 0x3e ? -1 : TAG_NAME;
+            break;
+          case BEFORE_NAME:
+          case SELF_CLOSING:
+            if (ws) to = BEFORE_NAME;
+            else if (c === 0x2f) to = SELF_CLOSING;
+            else if (c === 0x3e) to = -1;
+            else {
+              to = IN_NAME;
+              inc = 1;
+            }
+            break;
+          case IN_NAME:
+            to = ws ? AFTER_NAME : c === 0x2f ? SELF_CLOSING : c === 0x3e ? -1 : c === 0x3d ? BEFORE_VALUE : IN_NAME;
+            break;
+          case AFTER_NAME:
+            if (ws) to = AFTER_NAME;
+            else if (c === 0x2f) to = SELF_CLOSING;
+            else if (c === 0x3d) to = BEFORE_VALUE;
+            else if (c === 0x3e) to = -1;
+            else {
+              to = IN_NAME;
+              inc = 1;
+            }
+            break;
+          case BEFORE_VALUE:
+            to = ws ? BEFORE_VALUE : c === 0x22 ? VALUE_DQ : c === 0x27 ? VALUE_SQ : c === 0x3e ? -1 : VALUE_UNQ;
+            break;
+          case VALUE_DQ:
+            to = c === 0x22 ? AFTER_QUOTED : VALUE_DQ;
+            break;
+          case VALUE_SQ:
+            to = c === 0x27 ? AFTER_QUOTED : VALUE_SQ;
+            break;
+          case VALUE_UNQ:
+            to = ws ? BEFORE_NAME : c === 0x3e ? -1 : VALUE_UNQ;
+            break;
+          case END_OPEN:
+            to = TAG_NAME;
+            break;
+          default: // AFTER_QUOTED
+            if (ws) to = BEFORE_NAME;
+            else if (c === 0x2f) to = SELF_CLOSING;
+            else if (c === 0x3e) to = -1;
+            else {
+              to = IN_NAME;
+              inc = 1;
+            }
         }
+        if (to < 0) continue;
+        const v = k + inc;
+        if (v > (next[to] as number)) next[to] = v;
+        if (v > max) max = v;
+      }
+      const swap = cnt;
+      cnt = next;
+      next = swap;
+      for (let st = 0; st < STATES; st++) if ((cnt[st] as number) >= 0) active++;
+    }
+    if (c === 0x3c) {
+      const d = s.charCodeAt(i + 1);
+      const letter = (x: number) => (x >= 0x41 && x <= 0x5a) || (x >= 0x61 && x <= 0x7a);
+      if (letter(d) || d === 0x2f || d === 0x21) tags++;
+      const spawn = letter(d) ? TAG_NAME : d === 0x2f && letter(s.charCodeAt(i + 2)) ? END_OPEN : -1;
+      if (spawn >= 0 && (cnt[spawn] as number) < 0) {
+        cnt[spawn] = 0;
+        active++;
       }
     }
-    if (count > max) max = count;
   }
-  return max;
+  return { maxAttributes: max, tags };
+}
+
+/** True when the source is within the caps (MAX_ATTRIBUTES_PER_TAG attributes in any tag-like token, MAX_TAGS tags). Cheap,
+ *  linear, runs before any parse. Apply it before every re-parse of agent HTML (`fillTextSlots` does). */
+export function agentDocumentPrecheck(html: string): boolean {
+  const st = agentDocumentStats(html);
+  return st.maxAttributes <= MAX_ATTRIBUTES_PER_TAG && st.tags <= MAX_TAGS;
 }
 
 // ----------------------------------------------------------------------------------------------------------------- walk
@@ -504,8 +595,8 @@ function walk(parent: ParentNode, ctx: Ctx, depth: number): void {
   parent.childNodes = kept;
 }
 
-function runPass(input: string, opts: SanitizeAgentDocumentOptions, scripting: boolean): { html: string; runsScripts: boolean; removed: { kind: string; count: number }[] } {
-  const doc = parse(input, { scriptingEnabled: scripting });
+function runPass(input: string, opts: SanitizeAgentDocumentOptions, scripting: boolean, parseFn: ParseFn): { html: string; runsScripts: boolean; removed: { kind: string; count: number }[] } {
+  const doc = parseFn(input, { scriptingEnabled: scripting });
   const counts = new Counts();
   const ctx: Ctx = { allowScripts: opts.allowScripts, assetPrefix: opts.assetPrefix, counts, runsScripts: false };
   walk(doc, ctx, 0);
@@ -531,17 +622,18 @@ function runPass(input: string, opts: SanitizeAgentDocumentOptions, scripting: b
  * fragment, a raster `data:` image or a path under `assetPrefix`, `srcset`, CSS `url()`/`image-set()`/`@import`, SMIL that
  * writes a URL. See AGENT_DOCUMENT_RULES. The output starts with `<!-- tb:sanitized v1 -->`. Fail closed (`ok: false`).
  */
-export function sanitizeAgentDocument(html: string, opts: SanitizeAgentDocumentOptions): SanitizeAgentDocumentResult {
+export function sanitizeAgentDocument(html: string, opts: SanitizeAgentDocumentOptions, deps?: AgentDocumentDeps): SanitizeAgentDocumentResult {
   try {
     if (typeof html !== "string" || !opts || typeof opts.allowScripts !== "boolean" || typeof opts.assetPrefix !== "string" || !ASSET_PREFIX_RE.test(opts.assetPrefix)) return failed();
     if (opts.assetPrefix.split("/").some((s) => s === "." || s === "..")) return failed();
     if (html.length > R.maxInputBytes || Buffer.byteLength(html, "utf8") > R.maxInputBytes) return failed();
-    if (maxAttributesInOneTag(html, R.maxAttributesPerTag) > R.maxAttributesPerTag) return failed();
+    if (!agentDocumentPrecheck(html)) return failed();
     const o: SanitizeAgentDocumentOptions = { allowScripts: opts.allowScripts, assetPrefix: opts.assetPrefix };
-    const first = runPass(html, o, true);
+    const parseFn = deps?.parse ?? parse;
+    const first = runPass(html, o, true, parseFn);
     // a second pass, parsed with scripting on AND off, must find nothing to remove and change nothing
     for (const scripting of [true, false]) {
-      const again = runPass(first.html, o, scripting);
+      const again = runPass(first.html, o, scripting, parseFn);
       if (again.removed.length > 0 || again.html !== first.html || again.runsScripts !== first.runsScripts) return failed();
     }
     return { ok: true, html: first.html, runsScripts: first.runsScripts, removed: first.removed };
@@ -555,10 +647,13 @@ export function sanitizeAgentDocument(html: string, opts: SanitizeAgentDocumentO
  * value as its only child, as a text node. The value is text, never markup: the serialiser escapes it (`<`, `&`, ...), so
  * `<img src=x onerror=...>` comes out as visible text. A slot on a raw-text or code element (`script`, `style`, `template`,
  * `noscript`, `iframe`, `xmp`, ...) or on a void element (`img`, `br`, ...) is left alone; so is a slot whose key is not in `values` or is not a
- * valid key. Values that are not strings are written with `String()`. Run it AFTER `sanitizeAgentDocument`, on its `html`.
+ * valid key. Values that are not strings are written with `String()`. Over the caps (size, attributes per tag, tags) it
+ * returns AGENT_DOCUMENT_UNAVAILABLE_HTML without parsing. Run it AFTER `sanitizeAgentDocument`, on its `html`.
  */
-export function fillTextSlots(html: string, values: Readonly<Record<string, string | number | boolean>>): string {
-  const doc = parse(html, { scriptingEnabled: true });
+export function fillTextSlots(html: string, values: Readonly<Record<string, string | number | boolean>>, deps?: AgentDocumentDeps): string {
+  // the same caps as the sanitiser, before any parse: over them, the inert page
+  if (typeof html !== "string" || html.length > R.maxInputBytes || Buffer.byteLength(html, "utf8") > R.maxInputBytes || !agentDocumentPrecheck(html)) return AGENT_DOCUMENT_UNAVAILABLE_HTML;
+  const doc = (deps?.parse ?? parse)(html, { scriptingEnabled: true });
   const fill = (parent: ParentNode): void => {
     for (const child of parent.childNodes) {
       if (!isElement(child)) continue;
