@@ -3,6 +3,25 @@
 The Teal Brick opt2 conformance suite: checks, a fake bridge and a fake Portal, generated from `@opt2-tealbrick/spec`.
 Targets: `app`, `manifest`, `bridge`, `relay`, `core` (`tb-conformance --help`).
 
+## 0.1.22 (spec 0.1.47)
+
+- App target, SDK-INSTANCE-GRANT (group A18, SDK >= 0.1.31; an older SDK, read from its claim, is `not_applicable` by version): a person op that gives one agent one scope instance.
+  - `A18.scope_grant_within`: the person op named by `scopeGrantOp` runs with `scopeGrantOp.input` (a grant within the agent ceiling) → 200, and `tb.agents_list` then lists a scope row with `source: "app"` and `grantedByOp` = that op id.
+  - `A18.scope_grant_ceiling`: the same op with `scopeGrantOp.aboveCeiling` → 400 `scope_grant_invalid` and no new `source: "app"` row (a sabotaged SDK that skips the ceiling fails).
+  - `A18.scope_grant_agent_absent`: an AGENT calling that person op is refused 403 `audience_not_agent` and writes no row; with the optional `scopeGrantOp.agentProbe` (an agent op whose output has a boolean at `path`, default `/scopeGrants`, equal to `ctx.scopeGrants !== undefined`) the boolean must be `false` (a sabotaged SDK that exposes `scopeGrants` on an agent call fails).
+  - `scopeGrantOp` in `tealbrick-conformance.json` (placeholders such as `${tb.agentA}` allowed). Without it (an app that does not use the API) the three checks are `not_applicable`. Every `source: "app"` row the checks cause is removed again with `tb.scopes_set` (`access: null`).
+
+    ```json
+    {
+      "scopeGrantOp": {
+        "op": "draft_start",
+        "input": { "agent": "${tb.agentA}", "draft": "conformance-draft", "access": "read_write" },
+        "aboveCeiling": { "agent": "${tb.agentA}", "draft": "conformance-draft", "access": "manage" },
+        "agentProbe": { "op": "scope_probe", "path": "/scopeGrants" }
+      }
+    }
+    ```
+
 ## 0.1.21 (spec 0.1.46)
 
 - App target, GRANT-PRD: `A12.grant_prd_first` (a companion grant with `prd`, caller not yet in the slice: the receipt reports that product), `A12.grant_prd_mismatch` (grant `prd` differs from the slice product: refused 403 `grant_invalid`; a sabotaged SDK that prefers the slice fails), `A12.grant_prd_absent` (no `prd`: the slice product).

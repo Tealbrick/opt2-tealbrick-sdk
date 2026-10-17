@@ -22,7 +22,7 @@ import { jsonPointer, resolvePlaceholders, runSetup } from "../setup.ts";
 import { bad, na, notRun, type Outcome, ok, refusedWith, type Suite, verdict } from "../suite.ts";
 import { Mint, newId, nowS, peek } from "../tokens.ts";
 import { versionBelow } from "../version.ts";
-import { CAPS_AGENT_PLACEHOLDER, type ConformanceConfig, type InputCaller, type NarrowingFixture, type SetupStep } from "../waivers.ts";
+import { CAPS_AGENT_PLACEHOLDER, type ConformanceConfig, type InputCaller, type NarrowingFixture, type ScopeGrantFixture, type SetupStep } from "../waivers.ts";
 import { CHECK_IDS } from "./catalog.ts";
 
 export interface AppTargetContext {
@@ -50,6 +50,8 @@ export interface AppTargetContext {
   dynamic?: ConformanceConfig["dynamic"];
   /** v0.1.23 (C115): the tag-filtered read A11.narrowing_empty_anyof sends (tealbrick-conformance.json `narrowing`) */
   narrowing?: NarrowingFixture;
+  /** package 0.1.22 (SDK-INSTANCE-GRANT): the person op that grants an agent one scope instance (`scopeGrantOp` in tealbrick-conformance.json) */
+  scopeGrantOp?: ScopeGrantFixture;
   /** report notes (setup step results are appended) */
   notes?: string[];
   /**
@@ -100,6 +102,9 @@ function collectRows(v: unknown, out: ScopeRow[], depth = 0): void {
 
 /** First miniapp-sdk release that reads the grant's `prd` (spec 0.1.46, GRANT-PRD). */
 const GRANT_PRD_SINCE = "0.1.28";
+
+/** First miniapp-sdk release with `ctx.scopeGrants` / `ctx.scopeSelfRevoke` (spec 0.1.47, SDK-INSTANCE-GRANT). */
+const SCOPE_GRANT_SINCE = "0.1.31";
 
 /** Runs every app-target check into `s`; returns the payload scan for the report. */
 export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<PayloadScan> {
@@ -1097,6 +1102,119 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
         }
       } else parts.push("anyOf [tag] not checked (no narrowing.tag)");
       return verdict(emptyOk && tagOk, `${op.id}: ${parts.join("; ")}`);
+    },
+  );
+
+  // ── A18 SDK-INSTANCE-GRANT (spec 0.1.47, SDK >= 0.1.31): a PERSON op gives one agent access to one scope instance ──
+  // `scopeGrantOp {op, input, aboveCeiling, agentProbe?}` (tealbrick-conformance.json) names the person op that calls
+  // `ctx.scopeGrants.grant`. Without it (an app that does not use the API) and for an SDK older than 0.1.31 the three checks
+  // are not_applicable. Every grant row the person op leaves is removed again (tb.scopes_set null) so later checks see the
+  // scope state they expect.
+  const grantCfg = ctx.scopeGrantOp;
+  const grantGate = (): Outcome | null => {
+    const v = b.claims[0]?.request.sdkVersion;
+    if (versionBelow(v, SCOPE_GRANT_SINCE)) return na(`SDK ${v} predates ${SCOPE_GRANT_SINCE} (SDK-INSTANCE-GRANT, spec 0.1.47): not applicable by version`);
+    if (!grantCfg) return na("no scopeGrantOp in tealbrick-conformance.json (the app does not grant scope instances from a person op)");
+    return null;
+  };
+  /** Full scope rows (with source / grantedByOp) from tb.agents_list. */
+  const fullRows = async (): Promise<Record<string, unknown>[]> => {
+    if (!sess) return [];
+    const r = await c().personOp(sess, "tb.agents_list", {});
+    const out: Record<string, unknown>[] = [];
+    const walk = (v: unknown, depth = 0): void => {
+      if (depth > 6) return;
+      if (Array.isArray(v)) for (const x of v) walk(x, depth + 1);
+      else if (isObj(v)) {
+        if (typeof v.agent === "string" && typeof v.type === "string" && typeof v.instanceId === "string" && typeof v.access === "string") out.push(v);
+        for (const x of Object.values(v)) walk(x, depth + 1);
+      }
+    };
+    walk(r.output);
+    return out;
+  };
+  const appRows = (all: Record<string, unknown>[]) => all.filter((r) => r.source === "app" && r.grantedByOp === grantCfg?.op);
+  const rowKey = (r: Record<string, unknown>) => `${String(r.agent)}|${String(r.type)}|${String(r.instanceId)}`;
+  const grantInput = (raw: Json): Json => {
+    const r = resolvePlaceholders(raw, setup);
+    taint.push(...r.blocked);
+    return r.value;
+  };
+  /** The op must be a person op of the manifest; the message names the config key when it is not. */
+  const grantOpProblem = (): string | null => {
+    const op = grantCfg ? personOps.find((o) => o.id === grantCfg.op) : undefined;
+    return grantCfg && !op ? `tealbrick-conformance.json scopeGrantOp.op ${JSON.stringify(grantCfg.op)}: not a person op of this manifest` : null;
+  };
+  const dropRows = async (rows: Record<string, unknown>[]) => {
+    for (const r of rows) await c().personOp(sess as PersonSession, "tb.scopes_set", { agent: r.agent as string, type: r.type as string, id: r.instanceId as string, access: null });
+  };
+  await s.run(
+    "A18.scope_grant_within",
+    "a person op that grants an agent one scope instance within the ceiling works; the row shows in tb.agents_list with source app (SDK-INSTANCE-GRANT)",
+    "the configured scopeGrantOp.op as the owner with scopeGrantOp.input → 200 ok; tb.agents_list then lists a NEW scope row with source \"app\" and grantedByOp = the op id (for the agent named in the input)",
+    async () => {
+      const gate = grantGate();
+      if (gate || !grantCfg) return gate ?? na("no scopeGrantOp");
+      const problem = grantOpProblem();
+      if (problem) return bad(problem);
+      if (!sess) return bad("no person session");
+      const before = new Set(appRows(await fullRows()).map(rowKey));
+      const input = grantInput(grantCfg.input);
+      const r = await c().personOp(sess, grantCfg.op, input);
+      if (r.status !== 200) return bad(`${grantCfg.op} within the ceiling: ${show(r)} (expected 200 ok)`);
+      const named = isObj(input) ? Object.values(input).find((v) => v === agentA.id || v === agentB.id) : undefined;
+      const mine = appRows(await fullRows()).filter((x) => named === undefined || x.agent === named);
+      await dropRows(mine.filter((x) => !before.has(rowKey(x))));
+      if (mine.length === 0) return bad(`${grantCfg.op}: 200 ok, but tb.agents_list lists no scope row with source "app" and grantedByOp "${grantCfg.op}"${named ? ` for ${String(named)}` : ""}: the row is missing or the SDK does not record who wrote it`);
+      return ok(`${grantCfg.op}: 200 ok; tb.agents_list row ${String(mine[0]?.type)}/${String(mine[0]?.instanceId)} access ${String(mine[0]?.access)} source "app" grantedByOp "${grantCfg.op}"`);
+    },
+  );
+  await s.run(
+    "A18.scope_grant_ceiling",
+    "a grant above the agent ceiling is refused 400 scope_grant_invalid and writes no row (SDK-INSTANCE-GRANT)",
+    "the configured scopeGrantOp.op as the owner with scopeGrantOp.aboveCeiling → 400 scope_grant_invalid, and no new source \"app\" row appears in tb.agents_list",
+    async () => {
+      const gate = grantGate();
+      if (gate || !grantCfg) return gate ?? na("no scopeGrantOp");
+      const problem = grantOpProblem();
+      if (problem) return bad(problem);
+      if (!sess) return bad("no person session");
+      const before = new Set((await fullRows()).map(rowKey));
+      const r = await c().personOp(sess, grantCfg.op, grantInput(grantCfg.aboveCeiling));
+      const after = await fullRows();
+      const added = after.filter((x) => !before.has(rowKey(x)));
+      const wroteApp = added.filter((x) => x.source === "app");
+      if (wroteApp.length > 0) await dropRows(wroteApp);
+      if (r.status === 200 || wroteApp.length > 0) return bad(`${grantCfg.op} above the ceiling: ${show(r)}${wroteApp.length ? `; tb.agents_list gained ${wroteApp.length} source "app" row(s) (${wroteApp.map((x) => `${String(x.type)}/${String(x.instanceId)}=${String(x.access)}`).join(", ")})` : ""}: the SDK did not enforce the agent ceiling`);
+      return verdict(r.status === 400 && r.code === "scope_grant_invalid", `${grantCfg.op} above the ceiling: ${show(r)} (expected 400 scope_grant_invalid)`);
+    },
+  );
+  await s.run(
+    "A18.scope_grant_agent_absent",
+    "an agent call has no ctx.scopeGrants and cannot reach the person grant op (SDK-INSTANCE-GRANT)",
+    "agent A calls the configured scopeGrantOp.op through the agent route → refused 403 audience_not_agent, no source \"app\" row; with scopeGrantOp.agentProbe: the probe agent op's output at path (default /scopeGrants) is false",
+    async () => {
+      const gate = grantGate();
+      if (gate || !grantCfg) return gate ?? na("no scopeGrantOp");
+      const problem = grantOpProblem();
+      if (problem) return bad(problem);
+      if (!sess) return bad("no person session");
+      const before = new Set((await fullRows()).map(rowKey));
+      const viaAgent = await c().callOp(grantCfg.op, grantInput(grantCfg.input), { agent: agentA.id });
+      const added = (await fullRows()).filter((x) => !before.has(rowKey(x)) && x.source === "app");
+      if (added.length > 0) await dropRows(added);
+      if (isOk(viaAgent) || isHeld(viaAgent) || added.length > 0) return bad(`${grantCfg.op} called by an AGENT: ${show(viaAgent)}${added.length ? `; ${added.length} source "app" row(s) appeared` : ""}: an agent must never reach a person grant op`);
+      if (viaAgent.status !== 403 || viaAgent.code !== "audience_not_agent") return bad(`${grantCfg.op} called by an AGENT: ${show(viaAgent)} (expected 403 audience_not_agent)`);
+      const probeCfg = grantCfg.agentProbe;
+      if (!probeCfg) return ok(`${grantCfg.op} by an agent: ${show(viaAgent)}; no agentProbe configured (ctx.scopeGrants on agent calls is not observable black-box)`);
+      const probe = m.operations.find((o) => o.id === probeCfg.op);
+      if (probe?.audience !== "agent" || probe.dynamic) return bad(`tealbrick-conformance.json scopeGrantOp.agentProbe.op ${JSON.stringify(probeCfg.op)}: not a static agent op of this manifest`);
+      const a = track(await c().callOp(probe.id, probeCfg.input !== undefined ? grantInput(probeCfg.input) : inputFor(probe), { agent: agentA.id, ...(idemKey(probe) ? { idempotencyKey: idemKey(probe) } : {}) }));
+      if (!isOk(a)) return bad(`${probe.id} as agent A: ${show(a)} (expected 200 ok)`);
+      const path = probeCfg.path ?? "/scopeGrants";
+      const v = jsonPointer(isObj(a.body) ? a.body.output : undefined, path);
+      if (typeof v !== "boolean") return bad(`${probe.id}: output${path} is ${JSON.stringify(v)}, expected a boolean (ctx.scopeGrants !== undefined)`);
+      return verdict(v === false, `${grantCfg.op} by an agent: ${show(viaAgent)}; ${probe.id} output${path} = ${v} (expected false: an agent call has no ctx.scopeGrants)`);
     },
   );
 

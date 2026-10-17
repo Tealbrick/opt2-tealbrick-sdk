@@ -13,7 +13,16 @@ const callerKind = (id: string): "agent" | "app" => (id.startsWith("ins_") ? "ap
 const appliesTo = (g: { callers?: readonly ("agent" | "app")[] }, id: string): boolean => !g.callers || g.callers.includes(callerKind(id));
 
 function toRow(r: Row): ScopeGrantRow {
-  return { agent: String(r.agent) as AgentId, type: String(r.type), instanceId: String(r.instance_id), access: String(r.access) };
+  const source = r.source === "default" || r.source === "owner" || r.source === "app" ? r.source : undefined;
+  return {
+    agent: String(r.agent) as AgentId,
+    type: String(r.type),
+    instanceId: String(r.instance_id),
+    access: String(r.access),
+    // v0.1.31 (SDK-INSTANCE-GRANT): absent on rows written before 0.1.31 (the writer was not stored)
+    ...(source ? { source } : {}),
+    ...(source === "app" && typeof r.granted_by_op === "string" ? { grantedByOp: r.granted_by_op } : {}),
+  };
 }
 function toInstance(r: Row): ScopeInstance {
   return { type: String(r.type), id: String(r.id), label: String(r.label), shared: Number(r.shared) === 1 };
@@ -30,6 +39,39 @@ export interface ScopeStoreInternals extends ScopeStore {
   view(caller: string | null, access: ScopeAccessView["access"]): ScopeAccessView;
   /** Applies defaults for a caller that has no slice entry (companion app callers). */
   applyDefaultsFor(caller: string, name: string): void;
+  /** v0.1.31: the highest access level the manifest gives AGENTS by default for `type` (see ScopeGrantOps); null = none. */
+  agentCeiling(type: string): string | null;
+}
+
+/**
+ * v0.1.31 (SDK-INSTANCE-GRANT): the write paths behind `ctx.scopeGrants` / `ctx.scopeSelfRevoke`. Deliberately NOT members
+ * of the store object (Start/Event contexts hand the store itself to app code): they are reached only through
+ * `scopeGrantOps(store)`, called by the person-op / agent-op context builders in ops.ts.
+ */
+export interface ScopeGrantOps {
+  /** `ctx.scopeGrants.grant`: person op only (the caller builds `by` from the verified session). */
+  appGrant(by: GrantBy, agent: string, type: string, instanceId: string, access: string): Promise<ScopeGrantRow>;
+  /** `ctx.scopeGrants.revoke`: removes the agent's row for the instance, whatever its source; audited. */
+  appRevoke(by: GrantBy, agent: string, type: string, instanceId: string): Promise<void>;
+  /** `ctx.scopeSelfRevoke`: an agent call drops its OWN row (narrowing is always allowed); audited as `system`. */
+  selfRevoke(agent: string, op: string, callId: string | null, type: string, instanceId: string): Promise<void>;
+}
+const grantOps = new WeakMap<object, ScopeGrantOps>();
+export function scopeGrantOps(store: ScopeStoreInternals): ScopeGrantOps {
+  const ops = grantOps.get(store);
+  if (!ops) throw new TbError("scope_store_unknown", "not a scope store of this SDK", 500);
+  return ops;
+}
+
+/** Who performs an app grant: the verified person of the live person op, the op, and a check against the verified slice. */
+export interface GrantBy {
+  principal: PersonPrincipal;
+  op: string;
+  callId: string | null;
+  /** the request id of the person op call (a person op has no call id) */
+  requestId: string | null;
+  /** true when the agent is in the verified slice (= has an edge to this app) */
+  inSlice(agent: string): boolean;
 }
 
 export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog, onChange: () => void): ScopeStoreInternals {
@@ -53,6 +95,17 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
     (db.prepare("SELECT * FROM tb_scopes WHERE agent = ? AND type = ?").all(caller, type) as Row[]).map(toRow);
   const bestOf = (caller: string, type: string): ScopeGrantRow | null =>
     rowsOf(caller, type).reduce<ScopeGrantRow | null>((b, r) => (b === null || rank(type, r.access) > rank(type, b.access) ? r : b), null);
+  /** v0.1.31 (SDK-INSTANCE-GRANT): the agent ceiling of a type = the highest level any agent-applicable default grant gives. */
+  const agentCeiling = (type: string): string | null => {
+    const s = scopes.get(type);
+    if (!s) return null;
+    let best: string | null = null;
+    for (const g of s.defaultGrants) {
+      if (g.callers && !g.callers.includes("agent")) continue;
+      if (best === null || rank(type, g.access) > rank(type, best)) best = g.access;
+    }
+    return best;
+  };
   const accessOf = (caller: string, type: string, id: string): ScopeGrantRow | null => {
     const r = db.prepare("SELECT * FROM tb_scopes WHERE agent = ? AND type = ? AND instance_id = ?").get(caller, type, id) as Row | undefined;
     return r ? toRow(r) : null;
@@ -68,7 +121,7 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
     if (shared.length === 0) return false;
     const seen = (db.prepare("SELECT agent FROM tb_scope_defaults WHERE type = ?").all(s.type) as Row[]).map((r) => String(r.agent));
     let n = 0;
-    const grant = db.prepare("INSERT OR IGNORE INTO tb_scopes (agent, type, instance_id, access) VALUES (?, ?, ?, ?)");
+    const grant = db.prepare("INSERT OR IGNORE INTO tb_scopes (agent, type, instance_id, access, source) VALUES (?, ?, ?, ?, 'default')");
     for (const agent of seen) {
       const g = shared.find((x) => appliesTo(x, agent));
       if (g) n += Number(grant.run(agent, s.type, id, g.access).changes ?? 0);
@@ -94,7 +147,7 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
     tx(db, () => {
       for (const s of scopes.values()) {
         if (db.prepare("SELECT 1 FROM tb_scope_defaults WHERE agent = ? AND type = ?").get(caller, s.type)) continue;
-        const grant = db.prepare("INSERT OR IGNORE INTO tb_scopes (agent, type, instance_id, access) VALUES (?, ?, ?, ?)");
+        const grant = db.prepare("INSERT OR IGNORE INTO tb_scopes (agent, type, instance_id, access, source) VALUES (?, ?, ?, ?, 'default')");
         for (const g of s.defaultGrants) {
           if (!appliesTo(g, caller)) continue;
           let ids: string[];
@@ -144,7 +197,8 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
       if (access === null) db.prepare("DELETE FROM tb_scopes WHERE agent = ? AND type = ? AND instance_id = ?").run(agent, type, instanceId);
       else
         db.prepare(
-          "INSERT INTO tb_scopes (agent, type, instance_id, access) VALUES (?, ?, ?, ?) ON CONFLICT (agent, type, instance_id) DO UPDATE SET access = excluded.access",
+          `INSERT INTO tb_scopes (agent, type, instance_id, access, source, granted_by_op) VALUES (?, ?, ?, ?, 'owner', NULL)
+           ON CONFLICT (agent, type, instance_id) DO UPDATE SET access = excluded.access, source = 'owner', granted_by_op = NULL`,
         ).run(agent, type, instanceId, access);
       await audit.record({ actor: principal.id, action: "scope.set", target: agent, detail: { type, instance: instanceId, access } });
       bump();
@@ -169,6 +223,7 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
       return out.length <= SUMMARY_MAX ? out : `${out.slice(0, SUMMARY_MAX - 1)}…`;
     },
     crudOf,
+    agentCeiling,
     rev: () => metaGet<number>(db, "scopes_rev") ?? 0,
     resolve(caller, type, instanceId) {
       const row = instanceId === null ? bestOf(caller, type) : accessOf(caller, type, instanceId);
@@ -196,5 +251,62 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
     },
     applyDefaultsFor,
   };
+  const ops: ScopeGrantOps = {
+    async appGrant(by, agent, type, instanceId, access) {
+      const bad = (reason: string, message: string): TbError => new TbError("scope_grant_invalid", message, 400, { reason });
+      if (by?.principal?.type !== "person") throw new TbError("session_required", "only a person op can grant scope access", 403);
+      if (typeof agent !== "string" || !agent.startsWith("agt_")) throw bad("agent_invalid", "not an agent id");
+      const s = scopes.get(type);
+      if (!s) throw bad("type_unknown", `scope type not declared: ${type}`);
+      if (typeof instanceId !== "string" || !db.prepare("SELECT 1 FROM tb_scope_instances WHERE type = ? AND id = ?").get(type, instanceId))
+        throw bad("instance_unknown", "scope instance does not exist");
+      if (typeof access !== "string" || !s.access.some((a) => a.id === access)) throw bad("level_unknown", `access level not declared: ${String(access)}`);
+      const ceiling = agentCeiling(type);
+      if (ceiling === null) throw bad("no_agent_ceiling", `the manifest gives agents no default access to ${type}: an app cannot grant it`);
+      // level <= ceiling: not above it in the manifest order AND no CRUD action the ceiling lacks
+      const cc = crudOf(type, ceiling);
+      if (rank(type, access) > rank(type, ceiling) || !crudOf(type, access).every((c) => cc.includes(c)))
+        throw bad("above_ceiling", `access level ${access} is above the agent ceiling ${ceiling}`);
+      if (!by.inSlice(agent)) throw bad("agent_not_in_slice", "the agent has no edge to this app");
+      db.prepare(
+        `INSERT INTO tb_scopes (agent, type, instance_id, access, source, granted_by_op) VALUES (?, ?, ?, ?, 'app', ?)
+         ON CONFLICT (agent, type, instance_id) DO UPDATE SET access = excluded.access, source = 'app', granted_by_op = excluded.granted_by_op`,
+      ).run(agent, type, instanceId, access, by.op);
+      await audit.record({
+        actor: by.principal.id,
+        action: "scope.set",
+        target: agent,
+        detail: { type, instance: instanceId, access, source: "app", op: by.op, callId: by.callId, requestId: by.requestId },
+      });
+      bump();
+      return toRow(db.prepare("SELECT * FROM tb_scopes WHERE agent = ? AND type = ? AND instance_id = ?").get(agent, type, instanceId) as Row);
+    },
+    async appRevoke(by, agent, type, instanceId) {
+      if (by?.principal?.type !== "person") throw new TbError("session_required", "only a person op can revoke scope access", 403);
+      if (!scopes.has(type)) throw new TbError("scope_grant_invalid", `scope type not declared: ${type}`, 400, { reason: "type_unknown" });
+      const r = db.prepare("DELETE FROM tb_scopes WHERE agent = ? AND type = ? AND instance_id = ?").run(agent, type, instanceId);
+      if (Number(r.changes ?? 0) === 0) return;
+      await audit.record({
+        actor: by.principal.id,
+        action: "scope.set",
+        target: agent,
+        detail: { type, instance: instanceId, access: null, source: "app", op: by.op, callId: by.callId, requestId: by.requestId },
+      });
+      bump();
+    },
+    async selfRevoke(agent, op, callId, type, instanceId) {
+      if (!scopes.has(type)) throw new TbError("scope_grant_invalid", `scope type not declared: ${type}`, 400, { reason: "type_unknown" });
+      const r = db.prepare("DELETE FROM tb_scopes WHERE agent = ? AND type = ? AND instance_id = ?").run(agent, type, instanceId);
+      if (Number(r.changes ?? 0) === 0) return;
+      await audit.record({
+        actor: "system",
+        action: "scope.set",
+        target: agent,
+        detail: { type, instance: instanceId, access: null, source: "agent_self", op, callId },
+      });
+      bump();
+    },
+  };
+  grantOps.set(store, ops);
   return store;
 }
