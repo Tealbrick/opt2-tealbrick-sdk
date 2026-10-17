@@ -1,6 +1,6 @@
 {
   "name": "@opt2-tealbrick/miniapp-sdk",
-  "version": "0.1.28",
+  "version": "0.1.29",
   "private": true,
   "description": "Teal Brick opt2 Miniapp SDK: server runtime (defineApp/startApp), React client (/client), the tb-exec wrapper bin and the tb-gen generator bin.",
   "license": "SEE LICENSE IN LICENSE",
@@ -29,8 +29,9 @@
     "test": "node --test 'test/**/*.test.ts'"
   },
   "dependencies": {
+    "@opt2-tealbrick/manifest": "workspace:*",
     "@opt2-tealbrick/spec": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.46/opt2-tealbrick-spec-0.1.46.tgz",
-    "@opt2-tealbrick/manifest": "workspace:*"
+    "parse5": "8.0.1"
   },
   "peerDependencies": {
     "react": ">=19"

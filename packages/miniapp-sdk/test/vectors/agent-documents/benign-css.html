@@ -1,0 +1,5 @@
+<!DOCTYPE html><html><head><title>Css</title><style>/* header */
+body{margin:0;font:16px/1.4 "Helvetica Neue",sans-serif}
+/* a note that mentions nothing special */
+.card{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;background:linear-gradient(90deg,#fff,#eee);box-shadow:0 1px 2px rgba(0,0,0,.2)}
+@media print{.card{box-shadow:none}}@supports (display:grid){.grid{display:grid}}@keyframes fade{0%{opacity:0}100%{opacity:1}}a[href^="#"]{text-decoration:none}p::after{content:"a;b {c}"}.x{width:calc(100% - (2*var(--g,4px)));transition:opacity .2s ease-in-out}</style></head><body><div class="card" style="gap:4px;color:#111"><p>Hello</p></div></body></html>

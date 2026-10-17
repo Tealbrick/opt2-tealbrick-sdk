@@ -1,0 +1,1819 @@
+{
+ "version": 1,
+ "assetPrefix": "/v/live-artifacts/_s/",
+ "note": "One .html per case. The file text without its final newline is the input. kind: hostile (the raw page holds at least one construct the rule list matches), roundtrip (parse, serialise, parse again must change the tree: a mutation trap), benign (comes back equal except the marker). absent: lower-case substrings that must not be in the output; present: substrings that must stay; removed: kinds (prefix) the result must report.",
+ "cases": [
+  {
+   "file": "link-prerender.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "prerender"
+   ],
+   "present": [],
+   "removed": [
+    "element:link"
+   ],
+   "ok": true
+  },
+  {
+   "file": "link-prefetch.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "prefetch"
+   ],
+   "present": [],
+   "removed": [
+    "element:link"
+   ],
+   "ok": true
+  },
+  {
+   "file": "link-preconnect.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "preconnect"
+   ],
+   "present": [],
+   "removed": [
+    "element:link"
+   ],
+   "ok": true
+  },
+  {
+   "file": "link-dns-prefetch.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "dns-prefetch"
+   ],
+   "present": [],
+   "removed": [
+    "element:link"
+   ],
+   "ok": true
+  },
+  {
+   "file": "link-preload.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "preload"
+   ],
+   "present": [],
+   "removed": [
+    "element:link"
+   ],
+   "ok": true
+  },
+  {
+   "file": "link-modulepreload.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "modulepreload"
+   ],
+   "present": [],
+   "removed": [
+    "element:link"
+   ],
+   "ok": true
+  },
+  {
+   "file": "link-stylesheet-icon-manifest.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "stylesheet",
+    "manifest"
+   ],
+   "present": [],
+   "removed": [
+    "element:link"
+   ],
+   "ok": true
+  },
+  {
+   "file": "link-mixed-case.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "prerender"
+   ],
+   "present": [],
+   "removed": [
+    "element:link"
+   ],
+   "ok": true,
+   "note": "mixed case tag and attributes"
+  },
+  {
+   "file": "link-in-body.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [
+    "element:link"
+   ],
+   "ok": true
+  },
+  {
+   "file": "link-entity-attrs.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "prerender"
+   ],
+   "present": [],
+   "removed": [
+    "element:link"
+   ],
+   "ok": true,
+   "note": "numeric character references in attribute values"
+  },
+  {
+   "file": "link-modulepreload-protocol-relative.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [
+    "element:link"
+   ],
+   "ok": true
+  },
+  {
+   "file": "a-ping.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "ping"
+   ],
+   "present": [
+    "href=\"#x\""
+   ],
+   "removed": [
+    "attribute:ping"
+   ],
+   "ok": true
+  },
+  {
+   "file": "a-href-absolute.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [
+    "link text"
+   ],
+   "removed": [
+    "attribute:url:href"
+   ],
+   "ok": true
+  },
+  {
+   "file": "a-href-protocol-relative.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [
+    "link text"
+   ],
+   "removed": [
+    "attribute:url:href"
+   ],
+   "ok": true
+  },
+  {
+   "file": "a-href-backslash-host.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [
+    "link text",
+    "second"
+   ],
+   "removed": [
+    "attribute:url:href"
+   ],
+   "ok": true
+  },
+  {
+   "file": "a-href-javascript.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "javascript:"
+   ],
+   "present": [
+    "link text"
+   ],
+   "removed": [
+    "attribute:url:href"
+   ],
+   "ok": true
+  },
+  {
+   "file": "a-href-javascript-mixed-case.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "javascript:"
+   ],
+   "present": [
+    "link text"
+   ],
+   "removed": [
+    "attribute:url:href"
+   ],
+   "ok": true
+  },
+  {
+   "file": "a-href-javascript-tab.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "javascript",
+    "java\t",
+    "alert"
+   ],
+   "present": [
+    "tab",
+    "ref newline"
+   ],
+   "removed": [
+    "attribute:url:href"
+   ],
+   "ok": true,
+   "note": "whitespace and control characters inside the scheme"
+  },
+  {
+   "file": "a-href-javascript-numeric-refs.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "alert",
+    "javascript"
+   ],
+   "present": [
+    "refs",
+    "colon"
+   ],
+   "removed": [
+    "attribute:url:href"
+   ],
+   "ok": true
+  },
+  {
+   "file": "a-href-javascript-leading-control.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "alert"
+   ],
+   "present": [
+    "ctl",
+    "nbsp"
+   ],
+   "removed": [
+    "attribute:url:href"
+   ],
+   "ok": true,
+   "note": "leading control characters, spaces and a no-break space"
+  },
+  {
+   "file": "a-href-vbscript.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "vbscript"
+   ],
+   "present": [
+    "vb"
+   ],
+   "removed": [
+    "attribute:url:href"
+   ],
+   "ok": true
+  },
+  {
+   "file": "a-href-data-html.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "data:text/html"
+   ],
+   "present": [
+    "d64"
+   ],
+   "removed": [
+    "attribute:url:href"
+   ],
+   "ok": true
+  },
+  {
+   "file": "a-href-data-image-on-anchor.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "data:"
+   ],
+   "present": [
+    "img link"
+   ],
+   "removed": [
+    "attribute:url:href"
+   ],
+   "ok": true,
+   "note": "a data URL is never an allowed navigation target"
+  },
+  {
+   "file": "a-href-relative.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "href=\"other",
+    "href=\"/other",
+    "href=\"?q"
+   ],
+   "present": [
+    "rel",
+    "root",
+    "query"
+   ],
+   "removed": [
+    "attribute:url:href"
+   ],
+   "ok": true
+  },
+  {
+   "file": "a-target-blank.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "target",
+    "_blank",
+    "_top"
+   ],
+   "present": [
+    "rel=\"noreferrer noopener\"",
+    "href=\"#x\""
+   ],
+   "removed": [
+    "attribute:target"
+   ],
+   "ok": true
+  },
+  {
+   "file": "a-href-asset-dot-segments.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "_d/x",
+    "/../",
+    "%2e"
+   ],
+   "present": [
+    "dots",
+    "enc dots",
+    "more"
+   ],
+   "removed": [
+    "attribute:url:href"
+   ],
+   "ok": true
+  },
+  {
+   "file": "a-href-asset-backslash.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "..\\",
+    "_sx",
+    "href=\"/v/live-artifacts/_s\""
+   ],
+   "present": [
+    "bs",
+    "wrong prefix"
+   ],
+   "removed": [
+    "attribute:url:href"
+   ],
+   "ok": true
+  },
+  {
+   "file": "area-href-and-target.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "_blank"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:url:href",
+    "attribute:target",
+    "attribute:ping"
+   ],
+   "ok": true
+  },
+  {
+   "file": "meta-refresh.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "refresh"
+   ],
+   "present": [],
+   "removed": [
+    "element:meta-http-equiv"
+   ],
+   "ok": true
+  },
+  {
+   "file": "meta-refresh-mixed-case.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "refresh"
+   ],
+   "present": [],
+   "removed": [
+    "element:meta-http-equiv"
+   ],
+   "ok": true,
+   "note": "mixed case, entity in the value"
+  },
+  {
+   "file": "meta-content-security-policy.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "default-src",
+    "set-cookie"
+   ],
+   "present": [],
+   "removed": [
+    "element:meta-http-equiv"
+   ],
+   "ok": true
+  },
+  {
+   "file": "base-href.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "<base"
+   ],
+   "present": [],
+   "removed": [
+    "element:base"
+   ],
+   "ok": true
+  },
+  {
+   "file": "base-target.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "<base"
+   ],
+   "present": [],
+   "removed": [
+    "element:base"
+   ],
+   "ok": true
+  },
+  {
+   "file": "form-action.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "<form"
+   ],
+   "present": [],
+   "removed": [
+    "element:form"
+   ],
+   "ok": true
+  },
+  {
+   "file": "form-formaction.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "formaction"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:url:formaction"
+   ],
+   "ok": true
+  },
+  {
+   "file": "input-image-src.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:url:src"
+   ],
+   "ok": true
+  },
+  {
+   "file": "iframe.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "<iframe",
+    "srcdoc"
+   ],
+   "present": [],
+   "removed": [
+    "element:iframe"
+   ],
+   "ok": true
+  },
+  {
+   "file": "frameset-document.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "<frame"
+   ],
+   "present": [],
+   "removed": [
+    "element:frameset"
+   ],
+   "ok": true,
+   "note": "a frameset document (no body)"
+  },
+  {
+   "file": "object.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "<object"
+   ],
+   "present": [],
+   "removed": [
+    "element:object"
+   ],
+   "ok": true
+  },
+  {
+   "file": "embed.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "<embed"
+   ],
+   "present": [],
+   "removed": [
+    "element:embed"
+   ],
+   "ok": true
+  },
+  {
+   "file": "applet-portal-fencedframe.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "<applet",
+    "<portal",
+    "<fencedframe"
+   ],
+   "present": [],
+   "removed": [
+    "element:applet",
+    "element:portal",
+    "element:fencedframe"
+   ],
+   "ok": true
+  },
+  {
+   "file": "svg-use-xlink-href.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:url:href"
+   ],
+   "ok": true
+  },
+  {
+   "file": "svg-use-href.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:url:href"
+   ],
+   "ok": true
+  },
+  {
+   "file": "svg-image-href.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:url:href"
+   ],
+   "ok": true
+  },
+  {
+   "file": "svg-xlink-href-mixed-case.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:url:href"
+   ],
+   "ok": true,
+   "note": "mixed case xlink attribute"
+  },
+  {
+   "file": "svg-a-href.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "javascript"
+   ],
+   "present": [
+    "svg link"
+   ],
+   "removed": [
+    "attribute:url:href"
+   ],
+   "ok": true
+  },
+  {
+   "file": "svg-feimage.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:url:href"
+   ],
+   "ok": true
+  },
+  {
+   "file": "svg-script.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "alert",
+    "<script"
+   ],
+   "present": [],
+   "removed": [
+    "element:script"
+   ],
+   "ok": true
+  },
+  {
+   "file": "svg-use-data-image.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "data:"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:url:href"
+   ],
+   "ok": true,
+   "note": "a data URL is not an allowed use target"
+  },
+  {
+   "file": "svg-fill-url.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:css:fill"
+   ],
+   "ok": true
+  },
+  {
+   "file": "svg-filter-url.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:css:filter"
+   ],
+   "ok": true
+  },
+  {
+   "file": "svg-mask-url.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:css:mask"
+   ],
+   "ok": true
+  },
+  {
+   "file": "svg-clip-path-url.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:css:clip-path"
+   ],
+   "ok": true
+  },
+  {
+   "file": "svg-marker-url.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:css:marker-start",
+    "attribute:css:marker-mid",
+    "attribute:css:marker-end"
+   ],
+   "ok": true
+  },
+  {
+   "file": "svg-stroke-url.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:css:stroke"
+   ],
+   "ok": true
+  },
+  {
+   "file": "cursor-url-any-element.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [
+    "c</span>"
+   ],
+   "removed": [
+    "attribute:css:cursor"
+   ],
+   "ok": true
+  },
+  {
+   "file": "svg-fill-escaped-url.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:css:fill"
+   ],
+   "ok": true,
+   "note": "CSS escape and character reference spell url("
+  },
+  {
+   "file": "svg-fill-image-set.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:css:fill"
+   ],
+   "ok": true
+  },
+  {
+   "file": "svg-smil-set-href.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "<set"
+   ],
+   "present": [
+    "<text"
+   ],
+   "removed": [
+    "element:set-href-target"
+   ],
+   "ok": true
+  },
+  {
+   "file": "svg-smil-animate-xlink-href.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "<animate"
+   ],
+   "present": [],
+   "removed": [
+    "element:animate-href-target"
+   ],
+   "ok": true
+  },
+  {
+   "file": "svg-smil-mixed-case-href.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "animate"
+   ],
+   "present": [],
+   "removed": [
+    "element:animate-href-target",
+    "element:animatetransform-href-target"
+   ],
+   "ok": true,
+   "note": "attributeName with case and spaces"
+  },
+  {
+   "file": "svg-smil-animate-motion-href.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "animatemotion"
+   ],
+   "present": [],
+   "removed": [
+    "element:animatemotion-href-target"
+   ],
+   "ok": true
+  },
+  {
+   "file": "svg-smil-event-handler-target.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "alert",
+    "<set"
+   ],
+   "present": [],
+   "removed": [
+    "element:set-href-target"
+   ],
+   "ok": true
+  },
+  {
+   "file": "svg-smil-fill-url.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [
+    "<animate"
+   ],
+   "removed": [
+    "attribute:css:to",
+    "attribute:css:values"
+   ],
+   "ok": true
+  },
+  {
+   "file": "svg-style-with-markup.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "<style"
+   ],
+   "present": [],
+   "removed": [
+    "element:style-markup"
+   ],
+   "ok": true,
+   "note": "markup inside an svg style element"
+  },
+  {
+   "file": "img-srcset.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "srcset"
+   ],
+   "present": [
+    "src=\"/v/live-artifacts/_s/a.png\""
+   ],
+   "removed": [
+    "attribute:url:srcset"
+   ],
+   "ok": true
+  },
+  {
+   "file": "img-srcset-mixed.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:url:srcset"
+   ],
+   "ok": true,
+   "note": "one bad candidate removes the whole attribute"
+  },
+  {
+   "file": "img-srcset-descriptor-trick.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:url:srcset"
+   ],
+   "ok": true
+  },
+  {
+   "file": "picture-source-srcset.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [
+    "<picture>"
+   ],
+   "removed": [
+    "attribute:url:srcset",
+    "attribute:url:src"
+   ],
+   "ok": true
+  },
+  {
+   "file": "img-src-external.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:url:src"
+   ],
+   "ok": true
+  },
+  {
+   "file": "img-src-protocol-relative.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:url:src"
+   ],
+   "ok": true
+  },
+  {
+   "file": "img-src-javascript-and-data-html.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "javascript",
+    "data:"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:url:src"
+   ],
+   "ok": true
+  },
+  {
+   "file": "video-audio-poster-src.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:url:src",
+    "attribute:url:poster"
+   ],
+   "ok": true
+  },
+  {
+   "file": "body-table-background.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [
+    "<table"
+   ],
+   "removed": [
+    "attribute:url:background"
+   ],
+   "ok": true
+  },
+  {
+   "file": "body-background.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [
+    "kept text"
+   ],
+   "removed": [
+    "attribute:url:background"
+   ],
+   "ok": true
+  },
+  {
+   "file": "misc-url-attributes.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [
+    "<blockquote"
+   ],
+   "removed": [
+    "attribute:url:cite",
+    "attribute:url:longdesc",
+    "attribute:url:attributionsrc"
+   ],
+   "ok": true
+  },
+  {
+   "file": "html-manifest-attribute.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [
+    "kept text"
+   ],
+   "removed": [
+    "attribute:url:manifest"
+   ],
+   "ok": true
+  },
+  {
+   "file": "css-style-attr-url.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "url("
+   ],
+   "present": [
+    "color:red",
+    "font-weight:bold"
+   ],
+   "removed": [
+    "css:declaration"
+   ],
+   "ok": true
+  },
+  {
+   "file": "css-style-attr-url-quoted-protocol-relative.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "url("
+   ],
+   "present": [],
+   "removed": [
+    "css:declaration",
+    "attribute:style"
+   ],
+   "ok": true
+  },
+  {
+   "file": "css-style-attr-image-set.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "image-set"
+   ],
+   "present": [
+    "color: blue"
+   ],
+   "removed": [
+    "css:declaration"
+   ],
+   "ok": true
+  },
+  {
+   "file": "css-style-attr-vendor-image-set.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "image-set"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:style"
+   ],
+   "ok": true
+  },
+  {
+   "file": "css-style-attr-cross-fade-element-src-image.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "cross-fade",
+    "element(",
+    "src(",
+    "image("
+   ],
+   "present": [],
+   "removed": [
+    "attribute:style"
+   ],
+   "ok": true
+  },
+  {
+   "file": "css-style-attr-escapes.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "\\75",
+    "\\000075",
+    "image-set"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:style"
+   ],
+   "ok": true,
+   "note": "CSS escapes decoded before matching"
+  },
+  {
+   "file": "css-style-attr-uppercase.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:style"
+   ],
+   "ok": true
+  },
+  {
+   "file": "css-style-attr-entity.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:style"
+   ],
+   "ok": true,
+   "note": "url( spelled with character references"
+  },
+  {
+   "file": "css-style-attr-comment-tricks.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "/**/"
+   ],
+   "present": [
+    "color:red"
+   ],
+   "removed": [
+    "css:declaration"
+   ],
+   "ok": true,
+   "note": "a comment inside url( must not turn an external URL into a fragment; comments are also taken out before matching"
+  },
+  {
+   "file": "css-style-attr-string-comment-trick.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "url("
+   ],
+   "present": [],
+   "removed": [
+    "css:declaration"
+   ],
+   "ok": true,
+   "note": "a comment opener inside a string does not hide a url("
+  },
+  {
+   "file": "css-style-element-url.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "url("
+   ],
+   "present": [
+    "color:green"
+   ],
+   "removed": [
+    "css:rule"
+   ],
+   "ok": true
+  },
+  {
+   "file": "css-style-element-import.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "@import"
+   ],
+   "present": [
+    "color:red"
+   ],
+   "removed": [
+    "css:rule"
+   ],
+   "ok": true
+  },
+  {
+   "file": "css-style-element-import-escape.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "import",
+    "\\69"
+   ],
+   "present": [
+    "color:red"
+   ],
+   "removed": [
+    "css:rule"
+   ],
+   "ok": true
+  },
+  {
+   "file": "css-style-element-import-comment.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "@import"
+   ],
+   "present": [
+    "color:red"
+   ],
+   "removed": [
+    "css:rule"
+   ],
+   "ok": true
+  },
+  {
+   "file": "css-style-element-font-face.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "url("
+   ],
+   "present": [
+    "local(Arial)"
+   ],
+   "removed": [
+    "css:rule"
+   ],
+   "ok": true
+  },
+  {
+   "file": "css-style-element-nested-at-rules.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "url(",
+    "image-set"
+   ],
+   "present": [
+    "color:red",
+    "color:blue"
+   ],
+   "removed": [
+    "css:rule"
+   ],
+   "ok": true
+  },
+  {
+   "file": "css-style-element-selector-string.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "url("
+   ],
+   "present": [
+    "color:red",
+    "content:\"a;b\""
+   ],
+   "removed": [
+    "css:rule"
+   ],
+   "ok": true
+  },
+  {
+   "file": "css-style-element-url-in-block-prelude.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "url("
+   ],
+   "present": [
+    "color:blue"
+   ],
+   "removed": [
+    "css:rule"
+   ],
+   "ok": true,
+   "note": "a forbidden function in a prelude drops the whole block"
+  },
+  {
+   "file": "css-style-element-escaped-delimiters.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "url(",
+    "\\75"
+   ],
+   "present": [
+    "color:red"
+   ],
+   "removed": [
+    "css:rule"
+   ],
+   "ok": true
+  },
+  {
+   "file": "css-moz-binding-and-expression.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "expression",
+    "binding"
+   ],
+   "present": [],
+   "removed": [
+    "attribute:style"
+   ],
+   "ok": true
+  },
+  {
+   "file": "css-url-fragment-with-external-rest.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "stroke"
+   ],
+   "present": [
+    "fill:url(#g)"
+   ],
+   "removed": [
+    "css:declaration"
+   ],
+   "ok": true,
+   "note": "url(#fragment) stays, the external one goes"
+  },
+  {
+   "file": "template-nested.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "onerror",
+    "ping"
+   ],
+   "present": [
+    "<template>"
+   ],
+   "removed": [
+    "element:link",
+    "attribute:url:src",
+    "attribute:event-handler"
+   ],
+   "ok": true
+  },
+  {
+   "file": "template-shadowrootmode.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "prefetch",
+    "url("
+   ],
+   "present": [],
+   "removed": [
+    "element:link",
+    "attribute:url:src",
+    "css:rule"
+   ],
+   "ok": true
+  },
+  {
+   "file": "noscript-body.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "noscript",
+    "prerender"
+   ],
+   "present": [
+    "after"
+   ],
+   "removed": [
+    "element:noscript"
+   ],
+   "ok": true
+  },
+  {
+   "file": "noscript-head.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "noscript"
+   ],
+   "present": [],
+   "removed": [
+    "element:noscript"
+   ],
+   "ok": true
+  },
+  {
+   "file": "noscript-scripting-mismatch.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "noscript",
+    "prerender"
+   ],
+   "present": [],
+   "removed": [
+    "element:noscript"
+   ],
+   "ok": true,
+   "note": "inert with scripting off, live with scripting on"
+  },
+  {
+   "file": "noscript-scripting-mismatch-attr-variants.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "noscript",
+    "refresh"
+   ],
+   "present": [],
+   "removed": [
+    "element:noscript"
+   ],
+   "ok": true
+  },
+  {
+   "file": "noscript-uppercase-nested.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "noscript",
+    "prefetch"
+   ],
+   "present": [],
+   "removed": [
+    "element:noscript"
+   ],
+   "ok": true
+  },
+  {
+   "file": "script-element.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "alert",
+    "<script"
+   ],
+   "present": [
+    "after"
+   ],
+   "removed": [
+    "element:script"
+   ],
+   "ok": true
+  },
+  {
+   "file": "event-handlers.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "alert",
+    "onerror",
+    "onload",
+    "onclick",
+    "onfocus"
+   ],
+   "present": [
+    "p</p>"
+   ],
+   "removed": [
+    "attribute:event-handler"
+   ],
+   "ok": true
+  },
+  {
+   "file": "allow-scripts-keeps-script-and-handlers.html",
+   "kind": "hostile",
+   "allowScripts": true,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [
+    "document.title=\"x\"",
+    "onclick=\"go()\"",
+    "src=\"/v/live-artifacts/_s/app.js\""
+   ],
+   "removed": [
+    "attribute:url:src"
+   ],
+   "ok": true,
+   "note": "scripts opt-in: scripts and handlers stay, network attributes still go"
+  },
+  {
+   "file": "allow-scripts-javascript-url-and-network.html",
+   "kind": "hostile",
+   "allowScripts": true,
+   "absent": [
+    "canary.invalid",
+    "javascript:",
+    "ping"
+   ],
+   "present": [
+    "onerror=\"go()\""
+   ],
+   "removed": [
+    "attribute:url:href",
+    "attribute:ping",
+    "attribute:url:src",
+    "element:link",
+    "css:rule"
+   ],
+   "ok": true
+  },
+  {
+   "file": "allow-scripts-noscript-and-smil.html",
+   "kind": "hostile",
+   "allowScripts": true,
+   "absent": [
+    "canary.invalid",
+    "noscript",
+    "javascript:",
+    "<set"
+   ],
+   "present": [],
+   "removed": [
+    "element:noscript",
+    "element:set-href-target"
+   ],
+   "ok": true
+  },
+  {
+   "file": "mxss-svg-style-anchor.html",
+   "kind": "roundtrip",
+   "allowScripts": false,
+   "absent": [
+    "onerror",
+    "alert"
+   ],
+   "present": [],
+   "removed": [],
+   "ok": true,
+   "note": "namespace confusion around style"
+  },
+  {
+   "file": "mxss-math-mglyph-style.html",
+   "kind": "roundtrip",
+   "allowScripts": false,
+   "absent": [
+    "onerror",
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [],
+   "ok": true
+  },
+  {
+   "file": "mxss-form-math-mtext.html",
+   "kind": "roundtrip",
+   "allowScripts": false,
+   "absent": [
+    "onerror",
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [],
+   "ok": true
+  },
+  {
+   "file": "mxss-noscript-style.html",
+   "kind": "roundtrip",
+   "allowScripts": false,
+   "absent": [
+    "onerror",
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [],
+   "ok": true
+  },
+  {
+   "file": "mxss-svg-desc-cdata.html",
+   "kind": "roundtrip",
+   "allowScripts": false,
+   "absent": [
+    "alert",
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [],
+   "ok": true
+  },
+  {
+   "file": "mxss-table-foster-parent.html",
+   "kind": "roundtrip",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "prerender"
+   ],
+   "present": [],
+   "removed": [],
+   "ok": true
+  },
+  {
+   "file": "mxss-textarea-title-xmp.html",
+   "kind": "roundtrip",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid"
+   ],
+   "present": [],
+   "removed": [],
+   "ok": true
+  },
+  {
+   "file": "benign-rich-document.html",
+   "kind": "benign",
+   "allowScripts": false,
+   "absent": [],
+   "present": [],
+   "removed": [],
+   "ok": true,
+   "note": "headings, tables, inline svg without links, assetPrefix images, data:image/png, fragments"
+  },
+  {
+   "file": "benign-svg-references.html",
+   "kind": "benign",
+   "allowScripts": false,
+   "absent": [],
+   "present": [],
+   "removed": [],
+   "ok": true,
+   "note": "svg references by fragment, SMIL that is not about href, foreignObject"
+  },
+  {
+   "file": "benign-css.html",
+   "kind": "benign",
+   "allowScripts": false,
+   "absent": [],
+   "present": [],
+   "removed": [],
+   "ok": true,
+   "note": "plain CSS: comments, grid, calc, at-rules, strings with delimiters"
+  },
+  {
+   "file": "benign-scripts-allowed.html",
+   "kind": "benign",
+   "allowScripts": true,
+   "absent": [],
+   "present": [],
+   "removed": [],
+   "ok": true,
+   "note": "allowScripts: scripts and handlers stay"
+  },
+  {
+   "file": "benign-plain.html",
+   "kind": "benign",
+   "allowScripts": false,
+   "absent": [],
+   "present": [],
+   "removed": [],
+   "ok": true,
+   "note": "plain document"
+  }
+ ]
+}

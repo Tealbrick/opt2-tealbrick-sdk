@@ -60,6 +60,8 @@ export type {
   SessionInfo,
   SliceAgent,
 } from "@opt2-tealbrick/spec/sdk";
+// v0.1.29 (C238, C230): agent documents. Server entry only; the rule list is AGENT_DOCUMENT_RULES (@opt2-tealbrick/manifest 0.1.24).
+export { AGENT_DOCUMENT_UNAVAILABLE_HTML, type SanitizeAgentDocumentOptions, type SanitizeAgentDocumentResult, sanitizeAgentDocument } from "./agent-document.ts";
 export { decideHold, defineApp, getKey, onKeysChanged, SDK_MAJOR, SDK_VERSION, startApp } from "./app.ts";
 export type {
   AppSecrets,
