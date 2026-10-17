@@ -23,12 +23,12 @@
     "gen": "tb-gen all"
   },
   "dependencies": {
-    "@opt2-tealbrick/manifest": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-sdk-manifest-v0.1.22/opt2-tealbrick-manifest-0.1.22.tgz",
-    "@opt2-tealbrick/miniapp-sdk": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-sdk-miniapp-sdk-v0.1.27/opt2-tealbrick-miniapp-sdk-0.1.27.tgz"
+    "@opt2-tealbrick/manifest": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-sdk-manifest-v0.1.24/opt2-tealbrick-manifest-0.1.24.tgz",
+    "@opt2-tealbrick/miniapp-sdk": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-sdk-miniapp-sdk-v0.1.29/opt2-tealbrick-miniapp-sdk-0.1.29.tgz"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
-    "@opt2-tealbrick/conformance": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-sdk-conformance-v0.1.19/opt2-tealbrick-conformance-0.1.19.tgz",
+    "@opt2-tealbrick/conformance": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-sdk-conformance-v0.1.21/opt2-tealbrick-conformance-0.1.21.tgz",
     "@opt2-tealbrick/ui": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-packages-ui-v0.3.0/opt2-tealbrick-ui-0.3.0.tgz",
     "@types/node": "24.19.2",
     "@types/react": "19.3.0",
