@@ -537,3 +537,116 @@ describe("app target", () => {
     assert.equal(r.ok, false);
   });
 });
+
+// ── spec 0.1.47 (SDK-INSTANCE-GRANT, conformance 0.1.22): A18 ────────────────────────────────────────────────────────
+describe("A18 SDK-INSTANCE-GRANT (conformance 0.1.22)", () => {
+  const gm = structuredClone(manifest) as Manifest;
+  const space = gm.scopes?.[0];
+  if (!space) throw new Error("sample has no scope");
+  // agents get read_write on their own space by default; `manage` is above that ceiling
+  space.access.push({ id: "manage", label: "Manage", crud: ["read", "create", "update", "delete"] });
+  gm.operations.push(
+    {
+      id: "scope_grant",
+      title: "Start draft",
+      description: "Person op that gives one agent access to one space.",
+      input: { type: "object" },
+      output: { type: "object" },
+      crud: ["update"],
+      effect: "write",
+      idempotency: "supported",
+      receipt: false,
+      audience: "person",
+    } as Manifest["operations"][number],
+    {
+      id: "scope_probe",
+      title: "Probe grants",
+      description: "Reports whether ctx.scopeGrants exists in this agent call.",
+      input: { type: "object" },
+      output: { type: "object" },
+      crud: ["read"],
+      effect: "read",
+      idempotency: "none",
+      receipt: false,
+      audience: "agent",
+    } as Manifest["operations"][number],
+  );
+  const cfg = (over: Record<string, unknown> = {}) =>
+    parseConformanceConfig(
+      { scopeGrantOp: { op: "scope_grant", input: { agent: "${tb.agentA}", id: "space-draft", access: "read_write" }, aboveCeiling: { agent: "${tb.agentA}", id: "space-draft", access: "manage" }, agentProbe: { op: "scope_probe" }, ...over } },
+      "test config",
+    );
+  const runG = (faults: MiniAppFaults = {}, config: ConformanceConfig | null = cfg()) => runApp({ manifest: gm, manifestPath: path, config, start: (env) => startMiniApp(gm, env, faults), deployTemplate: template, timeoutMs: 8000 });
+  const ids = ["A18.scope_grant_within", "A18.scope_grant_ceiling", "A18.scope_grant_agent_absent"];
+  const st = (r: Report, id: string) => r.checks.find((c) => c.id === id);
+
+  it("a correct app passes the three checks (and every other check); the grant row is removed again", async () => {
+    const r = await runG();
+    assert.deepEqual(failing(r), [], renderMarkdown(r));
+    for (const id of ids) assert.equal(st(r, id)?.status, "pass", `${id}: ${st(r, id)?.asserted}`);
+    assert.match(st(r, "A18.scope_grant_within")?.asserted ?? "", /source "app" grantedByOp "scope_grant"/);
+    assert.match(st(r, "A18.scope_grant_ceiling")?.asserted ?? "", /400 scope_grant_invalid/);
+    assert.match(st(r, "A18.scope_grant_agent_absent")?.asserted ?? "", /403 audience_not_agent.*output\/scopeGrants = false/);
+  });
+
+  it("without a scopeGrantOp fixture the checks are not_applicable (an app that does not use the API passes)", async () => {
+    const r = await run();
+    for (const id of ids) {
+      assert.equal(st(r, id)?.status, "not_applicable", id);
+      assert.match(st(r, id)?.asserted ?? "", /no scopeGrantOp/);
+    }
+  });
+
+  it("an SDK older than 0.1.31 gets not_applicable by version, whatever it does", async () => {
+    const r = await runG({ reportedSdkVersion: "0.1.30", scopeGrantNoCeiling: true, scopeGrantsOnAgent: true });
+    for (const id of ids) {
+      assert.equal(st(r, id)?.status, "not_applicable", `${id}: ${st(r, id)?.asserted}`);
+      assert.match(st(r, id)?.asserted ?? "", /predates 0\.1\.31.*not applicable by version/);
+    }
+    const ok = await runG({ reportedSdkVersion: "0.1.31", scopeGrantNoCeiling: true });
+    assert.equal(st(ok, "A18.scope_grant_ceiling")?.status, "fail");
+  });
+
+  it("fire-on-bad: an SDK that skips the ceiling fails A18.scope_grant_ceiling", async () => {
+    const r = await runG({ scopeGrantNoCeiling: true });
+    const c = st(r, "A18.scope_grant_ceiling");
+    assert.equal(c?.status, "fail");
+    assert.match(c?.asserted ?? "", /did not enforce the agent ceiling/);
+    assert.equal(st(r, "A18.scope_grant_within")?.status, "pass");
+  });
+
+  it("fire-on-bad: an SDK that exposes scopeGrants on an agent call fails A18.scope_grant_agent_absent", async () => {
+    const r = await runG({ scopeGrantsOnAgent: true });
+    const c = st(r, "A18.scope_grant_agent_absent");
+    assert.equal(c?.status, "fail");
+    assert.match(c?.asserted ?? "", /scope_probe output\/scopeGrants = true/);
+    assert.equal(st(r, "A18.scope_grant_ceiling")?.status, "pass");
+  });
+
+  it("fire-on-bad: a grant row without source/grantedByOp fails A18.scope_grant_within", async () => {
+    const r = await runG({ scopeGrantNoSource: true });
+    assert.equal(st(r, "A18.scope_grant_within")?.status, "fail");
+    assert.match(st(r, "A18.scope_grant_within")?.asserted ?? "", /lists no scope row with source "app"/);
+  });
+
+  it("without an agentProbe the agent check still proves the agent route refuses the person op", async () => {
+    const c = parseConformanceConfig({ scopeGrantOp: { op: "scope_grant", input: { agent: "${tb.agentA}", id: "space-draft", access: "read_write" }, aboveCeiling: { agent: "${tb.agentA}", id: "space-draft", access: "manage" } } }, "test config");
+    const r = await runG({ scopeGrantsOnAgent: true }, c);
+    assert.equal(st(r, "A18.scope_grant_agent_absent")?.status, "pass");
+    assert.match(st(r, "A18.scope_grant_agent_absent")?.asserted ?? "", /no agentProbe configured/);
+  });
+
+  it("a scopeGrantOp that names no person op of the manifest fails with the config key named", async () => {
+    const r = await runG({}, cfg({ op: "item_get" }));
+    assert.equal(st(r, "A18.scope_grant_within")?.status, "fail");
+    assert.match(st(r, "A18.scope_grant_within")?.asserted ?? "", /scopeGrantOp\.op "item_get": not a person op/);
+  });
+
+  it("scopeGrantOp config keys are checked (usage error)", () => {
+    const base = { op: "scope_grant", input: {}, aboveCeiling: {} };
+    for (const bad of [[], {}, { op: "" }, { op: "x", input: {} }, { ...base, extra: 1 }, { ...base, agentProbe: [] }, { ...base, agentProbe: { op: "" } }, { ...base, agentProbe: { op: "p", path: "scopeGrants" } }, { ...base, input: { a: "${nope}" } }, { ...base, agentProbe: { op: "p", extra: 1 } }]) {
+      assert.throws(() => parseConformanceConfig({ scopeGrantOp: bad }, "test config"), /scopeGrantOp/, JSON.stringify(bad));
+    }
+    assert.deepEqual(parseConformanceConfig({ scopeGrantOp: { ...base, agentProbe: { op: "p", path: "/x" } } }, "t").scopeGrantOp, { ...base, agentProbe: { op: "p", path: "/x" } });
+  });
+});

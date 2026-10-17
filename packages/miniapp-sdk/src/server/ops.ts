@@ -21,6 +21,7 @@ import type {
   Receipt,
   ReceiptStatus,
   ScopeAccessView,
+  ScopeGrantApi,
   StandardOpId,
   VerifiedGrant,
 } from "@opt2-tealbrick/spec/sdk";
@@ -30,6 +31,7 @@ import { header, readJson, requestId, sendError, sendJson } from "./http.ts";
 import { type ClaimedJob, jobsView, type OpFireOutcome, unsealGrant } from "./jobs.ts";
 import { HOLD_TTL_MS, type NewReceipt, type Receipts } from "./receipts.ts";
 import type { Runtime } from "./runtime.ts";
+import { scopeGrantOps } from "./scopes.ts";
 import { resolveCallerProduct } from "./trust.ts";
 
 export const OP_TIMEOUT_MS = 30_000;
@@ -162,6 +164,26 @@ export function buildContext(
     // v0.1.21 (R1, SDK-1/SDK-2): ctx.jobs, ctx.schedule (fire-time authorize with THIS caller), ctx.paused
     ...jobsView(rt, rt.jobs, { caller, grant: grant ? { token: grant.token, iat: grant.claims.iat } : null }),
   };
+}
+
+/**
+ * v0.1.31 (SDK-INSTANCE-GRANT, spec 0.1.47): `ctx.scopeGrants` of a live PERSON op. Called from exactly one place
+ * (`handlePersonOp`, after the session and CSRF checks); agent, app, scheduled and public contexts never get it. Bounds and
+ * the audit row live in `ScopeGrantOps` (scopes.ts); the "has an edge to this app" check reads the verified slice.
+ */
+function personScopeGrants(rt: Runtime, principal: PersonPrincipal, opId: string, requestId: string): ScopeGrantApi {
+  const by = { principal, op: opId, callId: null, requestId, inSlice: (agent: string) => rt.trust.agent(agent) !== undefined };
+  const ops = scopeGrantOps(rt.scopes);
+  return {
+    grant: (agent, type, instanceId, access) => ops.appGrant(by, agent, type, instanceId, access),
+    revoke: (agent, type, instanceId) => ops.appRevoke(by, agent, type, instanceId),
+  };
+}
+
+/** v0.1.31 (SDK-INSTANCE-GRANT): `ctx.scopeSelfRevoke` of a live AGENT call: removes only the calling agent's OWN row. */
+function agentSelfRevoke(rt: Runtime, opId: string, agentId: string, callId: CallId | null): NonNullable<OpContext["scopeSelfRevoke"]> {
+  const ops = scopeGrantOps(rt.scopes);
+  return (type, instanceId) => ops.selfRevoke(agentId, opId, callId, type, instanceId);
 }
 
 /** AbortSignal for one handler run: client disconnect or 30 s op timeout (SDK-API §3.1). */
@@ -575,6 +597,8 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       const rh = receiptHelpers();
       const sig = opSignal(req, res);
       const ctx = buildContext(rt, op, caller, g, rt.scopes.view(callerId, viewAccess), callId, idemKey, body.context, rh.helpers, sig.signal);
+      // v0.1.31 (SDK-INSTANCE-GRANT): only a live AGENT call (caller type from the verified grant) may narrow its own access
+      if (caller.type === "agent") ctx.scopeSelfRevoke = agentSelfRevoke(rt, op.id, callerId, callId);
       const writeReceipt = approved !== null || op.receipt || (dyn !== null && eff.effect !== "read");
       const h = startHandler(rt, op, body.input, ctx, dyn);
       // the key and the slot end with the HANDLER, not with the answer: a run that outlives the 30 s timeout or the
@@ -943,6 +967,8 @@ export async function handlePersonOp(rt: Runtime, req: IncomingMessage, res: Ser
     try {
       sig = opSignal(req, res);
       const ctx = buildContext(rt, op, caller, null, rt.scopes.view(null, null), null, idemKey, {}, rh.helpers, sig.signal, { ...rt.extras(), workspace: principal.ws });
+      // v0.1.31 (SDK-INSTANCE-GRANT): THE one place ctx.scopeGrants is set: a live person op (verified session + CSRF + the owner's confirm)
+      ctx.scopeGrants = personScopeGrants(rt, principal, op.id, rid);
       const h = startHandler(rt, op, input, ctx, null);
       const lease = idem;
       idem = null;

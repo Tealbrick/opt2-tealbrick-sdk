@@ -111,6 +111,15 @@ INSERT INTO tb_cap_usage (id, caller_id, effect, op, state, created_at)
     name: "sdk_receipt_caller_product",
     sql: "ALTER TABLE tb_receipts ADD COLUMN caller_product TEXT;",
   },
+  {
+    // v0.1.31 (SDK-INSTANCE-GRANT, spec 0.1.47): `source` = who wrote the scope row ('default' manifest defaultGrants,
+    // 'owner' tb.scopes_set, 'app' ctx.scopeGrants.grant inside a person op), `granted_by_op` = that op id (source 'app').
+    // Additive and nullable; existing rows keep NULL (the writer is not known after the fact: ScopeGrantRow.source is
+    // then absent) and nothing is rewritten.
+    version: 7,
+    name: "sdk_scope_source",
+    sql: "ALTER TABLE tb_scopes ADD COLUMN source TEXT;\nALTER TABLE tb_scopes ADD COLUMN granted_by_op TEXT;",
+  },
 ];
 
 function sha256(text: string | Uint8Array): string {

@@ -113,6 +113,8 @@ export interface ConformanceConfig {
   dynamic: Record<string, { resolveTools: string[] }>;
   /** v0.1.23 (C115, package 0.1.14): the tag-filtered read A11.narrowing_empty_anyof sends (absent → not_applicable) */
   narrowing?: NarrowingFixture;
+  /** package 0.1.22 (SDK-INSTANCE-GRANT): the person op that grants an agent access to one scope instance (absent → the A18 checks are not_applicable) */
+  scopeGrantOp?: ScopeGrantFixture;
 }
 
 /**
@@ -129,18 +131,34 @@ export interface NarrowingFixture {
   itemsPath?: string;
 }
 
+/**
+ * `scopeGrantOp` (package 0.1.22, SDK-INSTANCE-GRANT, spec 0.1.47): `op` = a PERSON op of the app that calls
+ * `ctx.scopeGrants.grant`; `input` = its input for a grant WITHIN the manifest's agent ceiling (placeholders allowed, e.g.
+ * `${tb.agentA}`); `aboveCeiling` = its input for a grant ABOVE the ceiling (must be refused 400 `scope_grant_invalid`);
+ * `agentProbe` (optional) = an AGENT op whose output carries a boolean at `path` (JSON pointer, default `/scopeGrants`) that is
+ * `ctx.scopeGrants !== undefined`; the check requires `false`. Absent `scopeGrantOp` = the app does not use the API.
+ */
+export interface ScopeGrantFixture {
+  op: string;
+  input: Json;
+  aboveCeiling: Json;
+  agentProbe?: { op: string; input?: Json; path?: string };
+}
+
 export const EMPTY_CONFIG: ConformanceConfig = Object.freeze({ waivers: [], peers: [], contractOps: {}, setup: [], inputs: {}, inputsAs: {}, dynamic: {} });
 
 /** A whole-string placeholder `${name}`; any other string (also one that merely contains `${`) is a literal. */
 export const PLACEHOLDER_RE = /^\$\{([A-Za-z_][A-Za-z0-9_.]*)\}$/;
 const CAPTURE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const STEP_ID_RE = /^[A-Za-z0-9_.-]{1,64}$/;
-const TOP_KEYS = new Set(["waivers", "peers", "contractOps", "setup", "inputs", "inputsAs", "dynamic", "narrowing", "$schema", "$comment"]);
+const TOP_KEYS = new Set(["waivers", "peers", "contractOps", "setup", "inputs", "inputsAs", "dynamic", "narrowing", "scopeGrantOp", "$schema", "$comment"]);
 const PEER_KEYS = new Set(["product", "version", "channel", "settings"]);
 const PRODUCT_RE = /^[a-z][a-z0-9-]{1,31}$/;
 const SEMVER_RE = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/;
 const OP_RE = /^(?!tb_)[a-z][a-z0-9_]{1,39}$/;
 const NARROWING_KEYS = new Set(["op", "input", "tag", "itemsPath"]);
+const SCOPE_GRANT_KEYS = new Set(["op", "input", "aboveCeiling", "agentProbe"]);
+const SCOPE_PROBE_KEYS = new Set(["op", "input", "path"]);
 const STEP_KEYS = new Set(["id", "as", "op", "input", "capture"]);
 
 const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
@@ -158,7 +176,7 @@ export function placeholderNames(v: unknown, out: string[] = []): string[] {
 /** Validates a parsed `tealbrick-conformance.json` (`where` names the file in errors). */
 export function parseConformanceConfig(doc: unknown, where: string): ConformanceConfig {
   if (!isRecord(doc)) throw new WaiverError(`${where}: must be a JSON object`);
-  for (const k of Object.keys(doc)) if (!TOP_KEYS.has(k)) throw new WaiverError(`${where}: unknown key ${JSON.stringify(k)} (allowed: waivers, peers, contractOps, setup, inputs, inputsAs, dynamic, narrowing)`);
+  for (const k of Object.keys(doc)) if (!TOP_KEYS.has(k)) throw new WaiverError(`${where}: unknown key ${JSON.stringify(k)} (allowed: waivers, peers, contractOps, setup, inputs, inputsAs, dynamic, narrowing, scopeGrantOp)`);
   const waivers = parseWaivers(doc.waivers, where);
   const peers = parsePeers(doc.peers, where);
   const contractOps = parseContractOps(doc.contractOps, peers, where);
@@ -236,7 +254,29 @@ export function parseConformanceConfig(doc: unknown, where: string): Conformance
     if (n.input !== undefined) known(placeholderNames(n.input), "narrowing.input", "any setup step");
     narrowing = { op: n.op, ...(n.input !== undefined ? { input: n.input as Json } : {}), ...(typeof n.tag === "string" ? { tag: n.tag } : {}), ...(typeof n.itemsPath === "string" ? { itemsPath: n.itemsPath } : {}) };
   }
-  return { waivers, peers, contractOps, setup, inputs, inputsAs, dynamic, ...(narrowing ? { narrowing } : {}) };
+  let scopeGrantOp: ScopeGrantFixture | undefined;
+  if (doc.scopeGrantOp !== undefined) {
+    const g = doc.scopeGrantOp;
+    const shape = `${where}: scopeGrantOp must be {op: "<person op id>", input: <grant within the ceiling>, aboveCeiling: <grant above the ceiling>, agentProbe?: {op, input?, path?}}`;
+    if (!isRecord(g)) throw new WaiverError(shape);
+    for (const k of Object.keys(g)) if (!SCOPE_GRANT_KEYS.has(k)) throw new WaiverError(`${where}: scopeGrantOp: unknown key ${JSON.stringify(k)} (allowed: op, input, aboveCeiling, agentProbe)`);
+    if (typeof g.op !== "string" || g.op.length === 0) throw new WaiverError(`${shape}; op missing`);
+    if (g.input === undefined || g.aboveCeiling === undefined) throw new WaiverError(`${shape}; input and aboveCeiling are both required`);
+    known(placeholderNames(g.input), "scopeGrantOp.input", "any setup step");
+    known(placeholderNames(g.aboveCeiling), "scopeGrantOp.aboveCeiling", "any setup step");
+    let agentProbe: ScopeGrantFixture["agentProbe"];
+    if (g.agentProbe !== undefined) {
+      const p = g.agentProbe;
+      if (!isRecord(p)) throw new WaiverError(`${where}: scopeGrantOp.agentProbe must be {op, input?, path?}`);
+      for (const k of Object.keys(p)) if (!SCOPE_PROBE_KEYS.has(k)) throw new WaiverError(`${where}: scopeGrantOp.agentProbe: unknown key ${JSON.stringify(k)} (allowed: op, input, path)`);
+      if (typeof p.op !== "string" || p.op.length === 0) throw new WaiverError(`${where}: scopeGrantOp.agentProbe.op must be an agent operation id`);
+      if (p.path !== undefined && (typeof p.path !== "string" || !(p.path === "" || p.path.startsWith("/")))) throw new WaiverError(`${where}: scopeGrantOp.agentProbe.path must be a JSON pointer ("" or "/…")`);
+      if (p.input !== undefined) known(placeholderNames(p.input), "scopeGrantOp.agentProbe.input", "any setup step");
+      agentProbe = { op: p.op, ...(p.input !== undefined ? { input: p.input as Json } : {}), ...(typeof p.path === "string" ? { path: p.path } : {}) };
+    }
+    scopeGrantOp = { op: g.op, input: g.input as Json, aboveCeiling: g.aboveCeiling as Json, ...(agentProbe ? { agentProbe } : {}) };
+  }
+  return { waivers, peers, contractOps, setup, inputs, inputsAs, dynamic, ...(narrowing ? { narrowing } : {}), ...(scopeGrantOp ? { scopeGrantOp } : {}) };
 }
 
 /** `peers` (CONF-MULTIAPP): 0..MAX_PEERS entries `{product, version, channel?, settings?}`; an unknown key, a duplicate product or a malformed value is a usage error. */
