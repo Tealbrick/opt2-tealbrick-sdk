@@ -1814,6 +1814,411 @@
    "removed": [],
    "ok": true,
    "note": "plain document"
+  },
+  {
+   "file": "speculationrules-basic-scripts-off.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "speculationrules"
+   ],
+   "present": [
+    "kept text",
+    "after"
+   ],
+   "removed": [
+    "element:script"
+   ],
+   "ok": true,
+   "note": "plain"
+  },
+  {
+   "file": "speculationrules-basic-scripts-on.html",
+   "kind": "hostile",
+   "allowScripts": true,
+   "absent": [
+    "canary.invalid",
+    "speculationrules"
+   ],
+   "present": [
+    "kept text",
+    "after"
+   ],
+   "removed": [
+    "element:script"
+   ],
+   "ok": true,
+   "note": "plain: removed also with allowScripts"
+  },
+  {
+   "file": "speculationrules-mixed-case-scripts-off.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "speculationrules"
+   ],
+   "present": [
+    "kept text",
+    "after"
+   ],
+   "removed": [
+    "element:script"
+   ],
+   "ok": true,
+   "note": "mixed case"
+  },
+  {
+   "file": "speculationrules-mixed-case-scripts-on.html",
+   "kind": "hostile",
+   "allowScripts": true,
+   "absent": [
+    "canary.invalid",
+    "speculationrules"
+   ],
+   "present": [
+    "kept text",
+    "after"
+   ],
+   "removed": [
+    "element:script"
+   ],
+   "ok": true,
+   "note": "mixed case: removed also with allowScripts"
+  },
+  {
+   "file": "speculationrules-whitespace-scripts-off.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "speculationrules"
+   ],
+   "present": [
+    "kept text",
+    "after"
+   ],
+   "removed": [
+    "element:script"
+   ],
+   "ok": true,
+   "note": "white space around the type"
+  },
+  {
+   "file": "speculationrules-whitespace-scripts-on.html",
+   "kind": "hostile",
+   "allowScripts": true,
+   "absent": [
+    "canary.invalid",
+    "speculationrules"
+   ],
+   "present": [
+    "kept text",
+    "after"
+   ],
+   "removed": [
+    "element:script"
+   ],
+   "ok": true,
+   "note": "white space around the type: removed also with allowScripts"
+  },
+  {
+   "file": "speculationrules-parameter-scripts-off.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "speculationrules"
+   ],
+   "present": [
+    "kept text",
+    "after"
+   ],
+   "removed": [
+    "element:script"
+   ],
+   "ok": true,
+   "note": "parameter after a semicolon"
+  },
+  {
+   "file": "speculationrules-parameter-scripts-on.html",
+   "kind": "hostile",
+   "allowScripts": true,
+   "absent": [
+    "canary.invalid",
+    "speculationrules"
+   ],
+   "present": [
+    "kept text",
+    "after"
+   ],
+   "removed": [
+    "element:script"
+   ],
+   "ok": true,
+   "note": "parameter after a semicolon: removed also with allowScripts"
+  },
+  {
+   "file": "speculationrules-entity-scripts-off.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "speculationrules",
+    "speculation"
+   ],
+   "present": [
+    "kept text",
+    "after"
+   ],
+   "removed": [
+    "element:script"
+   ],
+   "ok": true,
+   "note": "character references in the attribute value"
+  },
+  {
+   "file": "speculationrules-entity-scripts-on.html",
+   "kind": "hostile",
+   "allowScripts": true,
+   "absent": [
+    "canary.invalid",
+    "speculationrules",
+    "speculation"
+   ],
+   "present": [
+    "kept text",
+    "after"
+   ],
+   "removed": [
+    "element:script"
+   ],
+   "ok": true,
+   "note": "character references in the attribute value: removed also with allowScripts"
+  },
+  {
+   "file": "speculationrules-svg-scripts-off.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "speculationrules"
+   ],
+   "present": [
+    "kept text",
+    "after"
+   ],
+   "removed": [
+    "element:script"
+   ],
+   "ok": true,
+   "note": "svg namespace script"
+  },
+  {
+   "file": "speculationrules-svg-scripts-on.html",
+   "kind": "hostile",
+   "allowScripts": true,
+   "absent": [
+    "canary.invalid",
+    "speculationrules"
+   ],
+   "present": [
+    "kept text",
+    "after"
+   ],
+   "removed": [
+    "element:script"
+   ],
+   "ok": true,
+   "note": "svg namespace script: removed also with allowScripts"
+  },
+  {
+   "file": "speculationrules-template-scripts-off.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "speculationrules"
+   ],
+   "present": [
+    "kept text",
+    "after"
+   ],
+   "removed": [
+    "element:script"
+   ],
+   "ok": true,
+   "note": "inside template and nested template"
+  },
+  {
+   "file": "speculationrules-template-scripts-on.html",
+   "kind": "hostile",
+   "allowScripts": true,
+   "absent": [
+    "canary.invalid",
+    "speculationrules"
+   ],
+   "present": [
+    "kept text",
+    "after"
+   ],
+   "removed": [
+    "element:script"
+   ],
+   "ok": true,
+   "note": "inside template and nested template: removed also with allowScripts"
+  },
+  {
+   "file": "speculationrules-head-scripts-off.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "speculationrules"
+   ],
+   "present": [
+    "kept text",
+    "after"
+   ],
+   "removed": [
+    "element:script"
+   ],
+   "ok": true,
+   "note": "in the head"
+  },
+  {
+   "file": "speculationrules-head-scripts-on.html",
+   "kind": "hostile",
+   "allowScripts": true,
+   "absent": [
+    "canary.invalid",
+    "speculationrules"
+   ],
+   "present": [
+    "kept text",
+    "after"
+   ],
+   "removed": [
+    "element:script"
+   ],
+   "ok": true,
+   "note": "in the head: removed also with allowScripts"
+  },
+  {
+   "file": "importmap-basic-scripts-off.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "importmap"
+   ],
+   "present": [
+    "kept text",
+    "after"
+   ],
+   "removed": [
+    "element:script"
+   ],
+   "ok": true,
+   "note": "import map"
+  },
+  {
+   "file": "importmap-basic-scripts-on.html",
+   "kind": "hostile",
+   "allowScripts": true,
+   "absent": [
+    "canary.invalid",
+    "importmap"
+   ],
+   "present": [
+    "kept text",
+    "after"
+   ],
+   "removed": [
+    "element:script"
+   ],
+   "ok": true,
+   "note": "import map: removed also with allowScripts"
+  },
+  {
+   "file": "importmap-mixed-case-parameter-scripts-off.html",
+   "kind": "hostile",
+   "allowScripts": false,
+   "absent": [
+    "canary.invalid",
+    "importmap"
+   ],
+   "present": [
+    "kept text",
+    "after"
+   ],
+   "removed": [
+    "element:script"
+   ],
+   "ok": true,
+   "note": "mixed case, parameter, svg, template, entity"
+  },
+  {
+   "file": "importmap-mixed-case-parameter-scripts-on.html",
+   "kind": "hostile",
+   "allowScripts": true,
+   "absent": [
+    "canary.invalid",
+    "importmap"
+   ],
+   "present": [
+    "kept text",
+    "after"
+   ],
+   "removed": [
+    "element:script"
+   ],
+   "ok": true,
+   "note": "mixed case, parameter, svg, template, entity: removed also with allowScripts"
+  },
+  {
+   "file": "speculationrules-beside-kept-scripts-on.html",
+   "kind": "hostile",
+   "allowScripts": true,
+   "absent": [
+    "canary.invalid",
+    "speculationrules",
+    "importmap"
+   ],
+   "present": [
+    "kept text",
+    "<script type=\"application/json\" id=\"d\">{\"a\":1}</script>",
+    "<script type=\"application/ld+json\">",
+    "window.go=1",
+    "src=\"/v/live-artifacts/_s/app.js\""
+   ],
+   "removed": [
+    "element:script-speculationrules",
+    "element:script-importmap"
+   ],
+   "ok": true,
+   "note": "only the two network-reaching types go; JSON data scripts, inline and asset scripts stay"
+  },
+  {
+   "file": "benign-scripts-json-and-lookalike-types-on.html",
+   "kind": "benign",
+   "allowScripts": true,
+   "absent": [],
+   "present": [],
+   "removed": [],
+   "ok": true,
+   "note": "JSON data scripts and a look-alike type stay when scripts are allowed"
+  },
+  {
+   "file": "benign-asset-prefix-and-data-image.html",
+   "kind": "benign",
+   "allowScripts": true,
+   "absent": [],
+   "present": [],
+   "removed": [],
+   "ok": true,
+   "note": "assetPrefix paths on a, img, script and a raster data: image on img are kept"
   }
  ]
 }
