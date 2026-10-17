@@ -78,7 +78,7 @@ describe("tb-conformance CLI", () => {
       const copy = join(dir, "app.manifest.json");
       writeFileSync(copy, readFileSync(manifest, "utf8"));
       const cases: [unknown, RegExp][] = [
-        [{ setup: [{ id: "s1", as: "robot", op: "item_create" }] }, /setup\[0\]\.as must be one of owner, agentA, agentB, app/],
+        [{ setup: [{ id: "s1", as: "robot", op: "item_create" }] }, /setup\[0\]\.as must be one of owner, agentA, agentB, app, capsAgent/],
         [{ setup: [{ id: "s1", as: "app", op: "area_create", capture: { area: "id" } }] }, /capture\.area must be a JSON pointer/],
         [{ setup: [{ id: "s1", as: "app", op: "a", input: { x: "${later}" } }, { id: "s2", as: "app", op: "b", capture: { later: "/id" } }] }, /setup\[0\]\.input: placeholder \$\{later\} is not captured by an earlier setup step/],
         [{ inputs: { item_create: { space: "${nope}" } } }, /inputs: placeholder \$\{nope\} is not captured by any setup step/],

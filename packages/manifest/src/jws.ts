@@ -61,6 +61,8 @@ const setOf = (vals: readonly string[]): Check => (v) => Array.isArray(v) && v.e
  *  shape-checked here and IGNORED by verifyGrant (an app cannot declare an unknown family, so ignoring is safe). */
 const heldC: Check = (v) => Array.isArray(v) && v.length <= 32 && v.every((x) => typeof x === "string" && /^[a-z][a-z0-9_]{1,31}$/.test(x)) && new Set(v).size === v.length;
 const strArr = (maxItems: number, maxLen: number): Check => (v) => Array.isArray(v) && v.length <= maxItems && v.every(str(maxLen));
+/** v0.1.23 (spec 0.1.46, GRANT-PRD): a companion grant's `prd` = the product id of its calling instance (`^[a-z][a-z0-9-]{1,31}$`, CORE §1). */
+const productC = re(/^[a-z][a-z0-9-]{1,31}$/);
 const digestC = re(/^sha256:[0-9a-f]{64}$/);
 const wsC = re(idRe("ws"));
 const ulidC = re(ULID_RE);
@@ -133,7 +135,8 @@ const CLAIM_SPECS: Record<ClaimTyp, ClaimSpec> = {
     sub: CALLER,
     aud: INS,
     required: { ws: wsC, cnf: cnfC, crud: setOf(CRUD_ACTIONS), mode: oneOf(AGENT_MODES), held: heldC, caps: capsC, wf: strArr(1024, 128), polrev: int },
-    optional: {},
+    // v0.1.23 (GRANT-PRD, spec 0.1.46): `prd` rides on companion grants; shape-checked here, read by the SDK only for an app caller
+    optional: { prd: productC },
     // companion grants are always bound (CREDENTIALS §11, CORE I8)
     cross: (c) => (String(c.sub).startsWith("tb:ins:") && c.mode !== "bound" ? "companion grant not bound" : null),
   },

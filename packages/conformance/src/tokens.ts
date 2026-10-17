@@ -79,6 +79,8 @@ export interface GrantSpec {
   brg?: BridgeId;
   key?: Ed25519KeyPair;
   iss?: GrantClaims["iss"];
+  /** spec 0.1.46 (GRANT-PRD): a companion grant's `prd` = the product of the calling instance (`sub`); never for an agent grant */
+  prd?: string;
 }
 
 export class Mint {
@@ -107,6 +109,7 @@ export class Mint {
         wf: s.wf ?? [],
         polrev: 1,
         iat,
+        ...(s.prd !== undefined ? { prd: s.prd } : {}),
         ...(s.exp !== undefined ? { exp: s.exp } : {}),
       },
       s.key ?? this.#w.portalKey(),

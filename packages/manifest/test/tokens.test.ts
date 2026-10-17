@@ -352,3 +352,28 @@ test("verifyGrant (C108, tolerant reader): unknown held families are ignored, kn
   await assert.rejects(signGrant(w.grantClaims({ held: ["Destructive!"] as never }), w.portal));
   await assert.rejects(signGrant(w.grantClaims({ held: ["money", "money"] as never }), w.portal));
 });
+
+test("verifyGrant (manifest 0.1.23, GRANT-PRD): a companion grant may carry prd (a product id); the claim is shape-checked and read back", async () => {
+  const w = await world();
+  const claims = w.grantClaims({}) as unknown as Record<string, unknown>;
+  const withPrd = await signGrant({ ...claims, prd: "observer" } as never, w.portal);
+  const r = verifyGrant(withPrd, w.trust);
+  assert.ok(r.ok);
+  assert.equal(r.ok && (r.claims as { prd?: string }).prd, "observer");
+  // a grant without prd (older Core) still verifies; a malformed prd is refused at signing and at verification
+  assert.ok(verifyGrant(await signGrant(claims as never, w.portal), w.trust).ok);
+  for (const bad of ["", "Observer", "a", 7, null, "x".repeat(40)]) await assert.rejects(signGrant({ ...claims, prd: bad } as never, w.portal), `prd ${JSON.stringify(bad)}`);
+});
+
+test("verifyGrant (manifest 0.1.23, GRANT-PRD): a hand-signed grant with a malformed prd or any other unknown claim is refused; a valid prd verifies", async () => {
+  const w = await world();
+  const { rawSign, payloadOf } = await import("./fixtures.ts");
+  const base = await signGrant(w.grantClaims({}), w.portal);
+  const header = JSON.parse(Buffer.from(base.split(".")[0] as string, "base64url").toString("utf8")) as unknown;
+  const claims = payloadOf(base);
+  const check = async (extra: Record<string, unknown>) => verifyGrant(await rawSign(header, { ...claims, ...extra }, w.portal), w.trust);
+  assert.ok((await check({ prd: "observer" })).ok, "valid prd");
+  for (const bad of [7, "", null, "Observer", "a", "x".repeat(40)]) assert.equal(code(await check({ prd: bad })), "grant_invalid", `prd ${JSON.stringify(bad)}`);
+  assert.equal(code(await check({ zzz: "observer" })), "grant_invalid", "an unknown other claim is still refused");
+  assert.equal(code(await check({ prd: "observer", zzz: 1 })), "grant_invalid");
+});

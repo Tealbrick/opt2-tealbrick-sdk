@@ -357,11 +357,11 @@ export class FakeBridge {
    * aud the target instance, mode bound, held = the workspace apps policy, wf = the declared ops); `over` changes `wf` /
    * `crud` / `aud` for the negative cases (a crud beyond the grant, another instance); `op` picks the companion entry that lists it.
    */
-  companionGrantFor(product: string, over: { op?: string; wf?: string[]; crud?: CrudAction[]; aud?: InstanceId } = {}): Promise<string> {
+  companionGrantFor(product: string, over: { op?: string; wf?: string[]; crud?: CrudAction[]; aud?: InstanceId; prd?: string } = {}): Promise<string> {
     const c = (this.manifest.companions ?? []).find((x) => x.product === product && (over.op === undefined || x.operations.includes(over.op)));
     const aud = over.aud ?? this.ids.peers[product];
     if (!c || !aud) throw new Error(`fake bridge: ${this.manifest.id} declares no companion ${product}`);
-    return this.mint.grant({ sub: `tb:ins:${this.ids.ins}`, aud: `tb:ins:${aud}`, crud: over.crud ?? c.crud, mode: "bound", held: [...this.appsPolicy.held], caps: {}, wf: over.wf ?? c.operations });
+    return this.mint.grant({ sub: `tb:ins:${this.ids.ins}`, aud: `tb:ins:${aud}`, crud: over.crud ?? c.crud, mode: "bound", held: [...this.appsPolicy.held], caps: {}, wf: over.wf ?? c.operations, ...(over.prd !== undefined ? { prd: over.prd } : {}) });
   }
 
   /** Signs a new slice (`rev` + 1) with the active Portal key and wakes the status long-polls. */
@@ -810,6 +810,11 @@ export class FakeBridgeControl {
   /** v0.1.14 (C102): lists an app caller in slice `companionCallers` and publishes the slice. */
   listCompanionCaller(caller: NonNullable<InstanceSlice["companionCallers"]>[number]): Promise<number> {
     this.#b.companionCallers = [...this.#b.companionCallers.filter((x) => x.ins !== caller.ins), caller];
+    return this.#b.rebuildSlice();
+  }
+  /** spec 0.1.46 (GRANT-PRD): removes an app caller from slice `companionCallers` (the slice lags behind a new edge) and publishes the slice. */
+  unlistCompanionCaller(ins: InstanceId): Promise<number> {
+    this.#b.companionCallers = this.#b.companionCallers.filter((x) => x.ins !== ins);
     return this.#b.rebuildSlice();
   }
   /** v0.1.15 (C105a): sets the workspace apps policy (companion grant `held` + slice `appsPolicy`) and publishes the slice. */

@@ -115,6 +115,7 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
     "B23.reserved_tb_namespace": "a context hook answering a tb.* key → hook_failed; the app is not called",
     "B24.app_initiated": "companion call without parentCall passes the whole pipeline; hooks see caller type app",
     "B24.no_grant": "app-initiated call without TB-Grant or for an undeclared op → refused; the target is not called",
+    "B28.hook_caller_product": "hooks of an app-initiated call see call.caller.product = the caller instance's product (signed config, never input); an agent call has none; bridges older than 0.2.2 are not_applicable by version",
   }),
   // spec 0.1.24 (C117, S1 fail-open: Rules hooks dropped after an update; bridge 0.1.22+): the bridge builds the chain from
   // the hooks DECLARED in the deployed apps' manifests; config hooks[] only switches them (enabled). An older bridge

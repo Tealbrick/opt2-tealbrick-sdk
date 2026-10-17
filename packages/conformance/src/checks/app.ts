@@ -21,7 +21,8 @@ import { SDK_COVERAGE } from "../sdk-coverage.ts";
 import { jsonPointer, resolvePlaceholders, runSetup } from "../setup.ts";
 import { bad, na, notRun, type Outcome, ok, refusedWith, type Suite, verdict } from "../suite.ts";
 import { Mint, newId, nowS, peek } from "../tokens.ts";
-import type { ConformanceConfig, InputCaller, NarrowingFixture, SetupStep } from "../waivers.ts";
+import { versionBelow } from "../version.ts";
+import { CAPS_AGENT_PLACEHOLDER, type ConformanceConfig, type InputCaller, type NarrowingFixture, type SetupStep } from "../waivers.ts";
 import { CHECK_IDS } from "./catalog.ts";
 
 export interface AppTargetContext {
@@ -97,6 +98,9 @@ function collectRows(v: unknown, out: ScopeRow[], depth = 0): void {
   }
 }
 
+/** First miniapp-sdk release that reads the grant's `prd` (spec 0.1.46, GRANT-PRD). */
+const GRANT_PRD_SINCE = "0.1.28";
+
 /** Runs every app-target check into `s`; returns the payload scan for the report. */
 export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<PayloadScan> {
   const b = ctx.bridge;
@@ -128,7 +132,9 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   const appCaller = newId("ins") as InstanceId;
   const callerKey = (id: string): InputCaller | null => (id === agentA.id ? "agentA" : id === agentB.id ? "agentB" : id === appCaller ? "app" : null);
   let setupSess: PersonSession | null = null;
-  const setup = await runSetup(ctx.setup ?? [], { "tb.agentA": agentA.id, "tb.agentB": agentB.id, "tb.app": appCaller, "tb.instance": b.ids.ins }, async (as, opId, input) => {
+  // package 0.1.21: `as: "capsAgent"` steps are deferred to A3.caps_count (the fresh caps agent does not exist yet)
+  const capsSteps = (ctx.setup ?? []).filter((st) => st.as === "capsAgent");
+  const setup = await runSetup((ctx.setup ?? []).filter((st) => st.as !== "capsAgent"), { "tb.agentA": agentA.id, "tb.agentB": agentB.id, "tb.app": appCaller, "tb.instance": b.ids.ins }, async (as, opId, input) => {
     if (as === "owner") {
       if (!setupSess) {
         setupSess = await c().signIn();
@@ -141,6 +147,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     const view = withStandardOps(m).find((o) => o.id === opId);
     const key = view && view.idempotency !== "none" ? `conf-setup-${ulid()}` : undefined;
     // a fixture call holds nothing (`held: []`): it prepares data, it does not probe the hold rules
+    if (as === "capsAgent") return { ok: false, output: undefined, shown: "capsAgent steps run inside A3.caps_count" };
     const a = await c().callOp(opId, input, { ...(as === "app" ? { caller: appCaller } : { agent: as === "agentA" ? agentA.id : agentB.id }), held: [], ...(key ? { idempotencyKey: key } : {}) });
     return { ok: isOk(a), output: isObj(a.body) ? a.body.output : undefined, shown: show(a) };
   });
@@ -634,10 +641,28 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
         await b.control.waitForSliceRevision(rev, T);
         // first sight without usage: a call whose grant crud is too narrow is refused before any run
         const narrow = (["read", "create", "update", "delete"] as CrudAction[]).filter((x) => !op.crud.includes(x)).slice(0, 1);
+        // the warm-up is refused before any run, so its input may name a capsAgent capture that does not exist yet: not a taint
+        const taint0 = taint.length;
         await c().callOp(op.id, inputFor(op, agent.id), { agent: agent.id, crud: narrow, held: [] });
+        taint.length = taint0;
         await refreshRows();
+        // package 0.1.21 (Connect waiver): `as: "capsAgent"` setup steps run AS this fresh agent, now that it exists and has
+        // seen its instance, before its capped calls (an op that acts on data the caps agent owns). Each successful step that
+        // takes a cap slot of the same effect (a run takes one, receipt or not) raises `max`, so the probe still sees "1 more".
+        let used = 0;
+        if (capsSteps.length) {
+          const before = setup.notes.length;
+          await runSetup(capsSteps, { [CAPS_AGENT_PLACEHOLDER]: agent.id }, async (_as, opId, input) => {
+            const view = withStandardOps(m).find((o) => o.id === opId);
+            const key = view && view.idempotency !== "none" ? `conf-setup-${ulid()}` : undefined;
+            const a = await c().callOp(opId, input, { agent: agent.id, held: [], ...(key ? { idempotencyKey: key } : {}) });
+            if (isOk(a) && view && !view.standard && view.effect === op.effect) used++;
+            return { ok: isOk(a), output: isObj(a.body) ? a.body.output : undefined, shown: show(a) };
+          }, setup);
+          ctx.notes?.push(...setup.notes.slice(before));
+        }
         const input = fixtureFor(op, agent.id) ?? sampleInput(op.input, fillFor(op, agent.id) ?? "conformance");
-        const caps = { [op.effect]: { max: 1, per: "hour" } };
+        const caps = { [op.effect]: { max: used + 1, per: "hour" } };
         const first = track(await c().callOp(op.id, input, { agent: agent.id, held: [], caps, idempotencyKey: idemKey(op) }));
         const second = track(await c().callOp(op.id, input, { agent: agent.id, held: [], caps, idempotencyKey: idemKey(op) }));
         const tag = `${op.id} (receipt ${op.receipt}): first ${show(first)}, second ${show(second)}`;
@@ -878,6 +903,68 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     const got = `caller.product ${JSON.stringify(caller?.product)}, caller.name ${JSON.stringify(caller?.name)}`;
     if (caller?.product === "tbconf-observer") return bad(`${shown}; ${got}: the product was taken from the caller NAME (the decoy "tbconf-observer" has the same name), not from the entry of the grant's caller instance`);
     return verdict(caller?.product === "tbconf-impostor" && caller?.name === name, `${shown}; row ${got} (expected product "tbconf-impostor" from the companionCallers entry of ${appCaller}, name "${name}")`);
+  });
+  // spec 0.1.46 (GRANT-PRD): a companion grant carries `prd` = the product of its calling instance, signed with the grant.
+  // `Caller.product` = the grant's `prd` FIRST, the slice companionCallers entry only when `prd` is absent (a grant minted
+  // before Core sends it); both present and different = the call is refused `grant_invalid` (never "pick one").
+  /** GRANT-PRD is an SDK >= 0.1.28 rule: an older SDK (version from its claim) is not_applicable by version, not a fail. */
+  const prdGate = (): Outcome | null => {
+    const v = b.claims[0]?.request.sdkVersion;
+    return versionBelow(v, GRANT_PRD_SINCE) ? na(`SDK ${v} predates ${GRANT_PRD_SINCE} (GRANT-PRD, spec 0.1.46): not applicable by version`) : null;
+  };
+  const prdOp = () => byRank(agentOps.filter((o) => o.receipt)).sort((x, y) => Number(x.effect === "money") - Number(y.effect === "money"))[0];
+  /** One app-caller call (nothing held: it probes the product, not the hold rules) and the product of its receipt row. */
+  const prdCall = async (op: Operation, prd: string | undefined) => {
+    const one = await appCall(appCaller, op, { held: [], ...(prd !== undefined ? { prd } : {}) });
+    const shown = `${op.id}: ${show(one.answer)} (${one.how})`;
+    const id = rowIdOf(one.answer);
+    const row = id ? (await receiptRows()).find((x) => x.id === id) : undefined;
+    const caller = row && isObj(row.caller) ? row.caller : undefined;
+    return { one, shown, id, product: caller?.product, hasRow: !!row };
+  };
+  const prdNoRow = (shown: string, a: OpAnswer) =>
+    AUTH_CODES.has(a.code ?? "") || a.code === "audience_not_agent" ? bad(shown) : notRun(`${shown} — no receipt row to read; supply an inputs fixture an app caller can run`);
+  await s.run("A12.grant_prd_first", "an app caller's product comes from the companion grant's prd when the slice has no entry for it yet (GRANT-PRD)", "the caller instance is NOT in companionCallers (the slice lags one revision behind the new edge); its companion grant carries prd = tbconf-prd; the caller runs a receipt op → its tb.receipts_list row has caller.product = tbconf-prd", async () => {
+    const gate = prdGate();
+    if (gate) return gate;
+    const op = prdOp();
+    if (!op) return na("no agent op with receipt: true");
+    if (!sess) return bad("no person session");
+    await b.control.waitForSliceRevision(await b.control.unlistCompanionCaller(appCaller), T);
+    const r = await prdCall(op, "tbconf-prd");
+    if (!r.id) return prdNoRow(r.shown, r.one.answer);
+    return verdict(r.product === "tbconf-prd", `${r.shown}; row caller.product ${JSON.stringify(r.product)} (expected "tbconf-prd" from the grant's prd, the slice has no entry for ${appCaller})`);
+  });
+  await s.run("A12.grant_prd_mismatch", "a grant prd that differs from the slice product of the same instance is refused grant_invalid (GRANT-PRD)", "the caller instance is listed in companionCallers with product tbconf-slice; its companion grant carries prd = tbconf-grant → the call is refused 403 grant_invalid, nothing runs and no receipt row names either product; the same instance with prd = tbconf-slice runs (quiet on good)", async () => {
+    const gate = prdGate();
+    if (gate) return gate;
+    const op = prdOp();
+    if (!op) return na("no agent op with receipt: true");
+    if (!sess) return bad("no person session");
+    await b.control.waitForSliceRevision(await b.control.listCompanionCaller({ product: "tbconf-slice" as ProductId, ins: appCaller, name: `Conformance caller ${ulid().slice(-6)}` }), T);
+    const good = await prdCall(op, "tbconf-slice");
+    const bad1 = await appCall(appCaller, op, { held: [], prd: "tbconf-grant" });
+    const shown = `${op.id}: equal ${show(good.one.answer)}; differing ${show(bad1.answer)} (${bad1.how})`;
+    if (!good.id) return prdNoRow(shown, good.one.answer);
+    if (good.product !== "tbconf-slice") return bad(`${shown}; a grant whose prd equals the slice product must run with caller.product "tbconf-slice", got ${JSON.stringify(good.product)}`);
+    if (isOk(bad1.answer) || isHeld(bad1.answer)) {
+      const id = rowIdOf(bad1.answer);
+      const row = id ? (await receiptRows()).find((x) => x.id === id) : undefined;
+      const got = row && isObj(row.caller) ? JSON.stringify(row.caller.product) : "no row";
+      return bad(`${shown}; the app ran/held a call whose grant prd (tbconf-grant) differs from the slice product (tbconf-slice); it took caller.product ${got} instead of refusing`);
+    }
+    return verdict(bad1.answer.status === 403 && bad1.answer.code === "grant_invalid", `${shown}; expected 403 grant_invalid`);
+  });
+  await s.run("A12.grant_prd_absent", "a grant without prd (an older Core) takes the product from the slice entry (GRANT-PRD)", "the caller instance is listed in companionCallers with product tbconf-slice-only; its companion grant carries no prd → the receipt row has caller.product = tbconf-slice-only", async () => {
+    const gate = prdGate();
+    if (gate) return gate;
+    const op = prdOp();
+    if (!op) return na("no agent op with receipt: true");
+    if (!sess) return bad("no person session");
+    await b.control.waitForSliceRevision(await b.control.listCompanionCaller({ product: "tbconf-slice-only" as ProductId, ins: appCaller, name: `Conformance caller ${ulid().slice(-6)}` }), T);
+    const r = await prdCall(op, undefined);
+    if (!r.id) return prdNoRow(r.shown, r.one.answer);
+    return verdict(r.product === "tbconf-slice-only", `${r.shown}; row caller.product ${JSON.stringify(r.product)} (expected "tbconf-slice-only" from the slice entry)`);
   });
   await s.run("A12.app_caller_held", "an app caller's first_contact call is held from the companion grant held (C105a); the approval runs once (C8)", "app caller with a companion grant held = appsPolicy.held (DEFAULT_HELD_FAMILIES) calls a first_contact op → 202 held + holdId; approve via the person session; same input + same idempotency key → ok (not held); same call with a new key → held again (new holdId)", async () => {
     const op = byRank(agentOps.filter((o) => o.holdFamily === "first_contact"))[0];
