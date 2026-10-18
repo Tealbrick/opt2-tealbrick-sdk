@@ -40,6 +40,8 @@ export interface SliceChange {
 }
 
 const nowS = (ms: number) => Math.floor(ms / 1000);
+/** spec 0.1.48 (SDK-COMPANION-CALLERS): a provider key of slice `companionCallers[].provider` */
+const PROVIDER_KEY = /^[a-z][a-z0-9_]{1,31}$/;
 
 export class TrustState {
   readonly self: InstanceRef;
@@ -172,11 +174,15 @@ export class TrustState {
   /**
    * v0.1.14 (C102): the apps holding companion grants that target this instance (slice `companionCallers`); the SDK
    * names app callers from it (matched by the verified grant `sub`). Malformed entries are skipped.
+   * v0.1.32 (SDK-COMPANION-CALLERS, spec 0.1.48): also carries `provider` (where that instance runs): a string matching
+   * `^[a-z][a-z0-9_]{1,31}$` is kept; null, absent or any other value reads as null (unknown).
    */
-  companionCallers(): { product: string; ins: string; name: string }[] {
+  companionCallers(): { product: string; ins: string; name: string; provider: string | null }[] {
     const raw = this.slice?.companionCallers;
     if (!Array.isArray(raw)) return [];
-    return raw.filter((e) => e && typeof e.product === "string" && typeof e.ins === "string" && typeof e.name === "string" && e.name !== "").map((e) => ({ product: e.product, ins: e.ins, name: e.name }));
+    return raw
+      .filter((e) => e && typeof e.product === "string" && typeof e.ins === "string" && typeof e.name === "string" && e.name !== "")
+      .map((e) => ({ product: e.product, ins: e.ins, name: e.name, provider: typeof e.provider === "string" && PROVIDER_KEY.test(e.provider) ? e.provider : null }));
   }
 
   /**
@@ -186,6 +192,15 @@ export class TrustState {
    */
   companionProduct(ins: string): string | undefined {
     return this.companionCallers().find((x) => x.ins === ins)?.product;
+  }
+
+  /**
+   * v0.1.32 (`Caller.listed`): is `ins` listed in the CURRENT slice `companionCallers` under `product`? false when the slice is
+   * missing or stale (checked at `nowMs`), when `product` is unknown, or when `ins` is listed under another product.
+   */
+  companionListed(ins: string, product: string | undefined, nowMs: number): boolean {
+    if (product === undefined || this.stale(nowMs)) return false;
+    return this.companionCallers().some((x) => x.ins === ins && x.product === product);
   }
 
   /** v0.1.18 (C106a): the slice's scopeRequest of `agt`, only when it targets `product` */

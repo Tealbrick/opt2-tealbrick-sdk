@@ -2,7 +2,7 @@
 // `publicUrl` (slice `bridge.publicUrl`), `viewUrl` (slice `bridge.viewUrl`, 0.1.26), `workspace`, `scopes.instances` and `secrets` (the ONE app-secret store).
 import type { ScopeRequest } from "@opt2-tealbrick/spec/bridge";
 import type { WorkspaceId } from "@opt2-tealbrick/spec/credentials";
-import type { AppDefinition, EventContext, HookContext, OpContext, PublicHandler, ScopeStore, SliceAgent, StartContext as SpecStartContext } from "@opt2-tealbrick/spec/sdk";
+import type { AppDefinition, Caller, EventContext, HookContext, OpContext, PublicHandler, ScopeStore, SliceAgent, StartContext as SpecStartContext } from "@opt2-tealbrick/spec/sdk";
 import type { AppSecrets } from "./app-secrets.ts";
 import type { JobHandler, JobSpec, JobsView } from "./jobs.ts";
 
@@ -20,7 +20,14 @@ export interface ContextExtras {
   scopes: Pick<ScopeStore, "instances">;
   secrets: AppSecrets;
 }
-export type SdkOpContext = OpContext & ContextExtras & CompanionTargetsView & JobsView;
+/**
+ * v0.1.32 (Coordinator decision for Connect): `listed` on APP callers = the verified caller instance is in the CURRENT signed
+ * slice `companionCallers` under the SAME verified product as `caller.product`; false when the slice is stale or the caller
+ * is not listed (or listed under another product). ABSENT (no key) on person and agent callers.
+ * SPEC-GAP: spec 0.1.49 Caller.listed - not in the 0.1.48 types; read it as `(ctx.caller as SdkCaller).listed`.
+ */
+export type SdkCaller = Caller & { listed?: boolean };
+export type SdkOpContext = OpContext & { caller: SdkCaller } & ContextExtras & CompanionTargetsView & JobsView;
 export type SdkHookContext = HookContext & { secrets: AppSecrets };
 export type SdkPublicContext = Parameters<PublicHandler>[1] & ContextExtras;
 export type { AppSecrets };

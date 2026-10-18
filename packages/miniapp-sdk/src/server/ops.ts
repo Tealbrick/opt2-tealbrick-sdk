@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { authorize, DECISION_REASON, digest, EFFECTS, HOLDS_PENDING_OP, opInGrantWorkflow, validateAgainstSchema, validateInput, verifyCallProof, verifyGrant } from "@opt2-tealbrick/manifest";
-import { BRIDGE_HEADERS, type OpCallBody, type OpResult } from "@opt2-tealbrick/spec/bridge";
+import { BRIDGE_HEADERS, type CompanionCaller, type OpCallBody, type OpResult } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, CallId, InstanceId, PersonId, Sha256Digest } from "@opt2-tealbrick/spec/credentials";
 import type { CrudAction, DynamicResolution, Effect, HoldFamily, Operation } from "@opt2-tealbrick/spec/manifest";
 import type {
@@ -139,7 +139,9 @@ export function buildContext(
 ): SdkOpContext {
   return {
     ...extras,
-    caller,
+    // v0.1.32 (`Caller.listed`, SPEC-GAP spec 0.1.49): app callers only, evaluated from the CURRENT slice when the context is built
+    // (a live call, a scheduled fire and a resumed held job each build their own); no key on person and agent callers
+    caller: caller.type === "app" ? { ...caller, listed: rt.trust.companionListed(caller.id, caller.product, Date.now()) } : caller,
     grant,
     op,
     scope,
@@ -221,6 +223,19 @@ function personScopeGrants(rt: Runtime, principal: PersonPrincipal, opId: string
       life.assertOpen();
       return ops.appRevoke(by, agent, type, instanceId);
     },
+  };
+}
+
+/**
+ * v0.1.32 (SDK-COMPANION-CALLERS, spec 0.1.48): `ctx.companionCallers` of a live PERSON op, set at the same single place as
+ * `ctx.scopeGrants`. Every call reads the CURRENT verified slice (never a snapshot from the start of the op) and returns a
+ * frozen array of frozen copies `{product, ins, name, provider}`; [] while the slice is missing or older than 12 h (the
+ * same stale check the op route uses). No grant material, no handle on the slice: display and binding data only.
+ */
+export function personCompanionCallers(rt: Pick<Runtime, "trust">): NonNullable<OpContext["companionCallers"]> {
+  return () => {
+    if (rt.trust.stale(Date.now())) return Object.freeze([]);
+    return Object.freeze(rt.trust.companionCallers().map((c) => Object.freeze({ product: c.product, ins: c.ins, name: c.name, provider: c.provider }))) as readonly CompanionCaller[];
   };
 }
 
@@ -1019,6 +1034,8 @@ export async function handlePersonOp(rt: Runtime, req: IncomingMessage, res: Ser
       // v0.1.31 (SDK-INSTANCE-GRANT): THE one place ctx.scopeGrants is set: a live person op (verified session + CSRF + the owner's confirm)
       const life = opLife(sig.signal);
       ctx.scopeGrants = personScopeGrants(rt, principal, op.id, rid, life);
+      // v0.1.32 (SDK-COMPANION-CALLERS): same place, person ops only; each call reads the current slice
+      ctx.companionCallers = personCompanionCallers(rt);
       const h = startHandler(rt, op, input, ctx, null);
       life.bind(h.actual);
       const lease = idem;

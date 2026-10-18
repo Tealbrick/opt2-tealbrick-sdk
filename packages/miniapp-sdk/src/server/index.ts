@@ -69,6 +69,7 @@ export type {
   ContextExtras,
   SdkAppDefinition,
   SdkAppEvents,
+  SdkCaller,
   SdkEventContext,
   SdkHookContext,
   SdkOpContext,

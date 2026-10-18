@@ -70,6 +70,9 @@ async function serve(): Promise<void> {
     }
   };
   const listed = new Set<string>();
+  // A stdio relay ends when its stdin closes (the runner ended or died). Without this the `--broken=listen` variant, whose open
+  // listener keeps the event loop alive, outlived a runner that was killed: an orphan under launchd.
+  process.stdin.once("close", () => setTimeout(() => process.exit(0), 500));
   createInterface({ input: process.stdin }).on("line", async (line) => {
     const m = JSON.parse(line) as { id?: unknown; method?: string; params?: { name?: string } };
     try {
