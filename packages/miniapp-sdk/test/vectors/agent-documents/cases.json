@@ -2219,6 +2219,46 @@
    "removed": [],
    "ok": true,
    "note": "assetPrefix paths on a, img, script and a raster data: image on img are kept"
+  },
+  {
+   "file": "benign-script-loop-lt.html",
+   "kind": "benign",
+   "allowScripts": true,
+   "absent": [],
+   "present": [],
+   "removed": [],
+   "ok": true,
+   "note": "C259: for(var i=0;i<n;i++) then 300 statements before any >: the context-free scan reads a tag-like token with 302 attributes (over the old cap of 256), cost 91,204"
+  },
+  {
+   "file": "benign-script-loop-lt-arrow.html",
+   "kind": "benign",
+   "allowScripts": true,
+   "absent": [],
+   "present": [],
+   "removed": [],
+   "ok": true,
+   "note": "C259: i<n then 300 spaced tokens and an arrow function: 305 attributes in one tag-like token"
+  },
+  {
+   "file": "benign-script-loop-lt-simple.html",
+   "kind": "benign",
+   "allowScripts": true,
+   "absent": [],
+   "present": [],
+   "removed": [],
+   "ok": true,
+   "note": "C259: a short i<n loop"
+  },
+  {
+   "file": "benign-style-comment-lt.html",
+   "kind": "benign",
+   "allowScripts": false,
+   "absent": [],
+   "present": [],
+   "removed": [],
+   "ok": true,
+   "note": "C259: a<b in a CSS comment followed by 400 words: 403 attributes in one tag-like token (over the old cap of 256)"
   }
  ]
 }
