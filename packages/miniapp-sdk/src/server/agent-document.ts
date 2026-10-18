@@ -327,9 +327,19 @@ function cssValueBad(value: string): boolean {
 
 // ------------------------------------------------------------------------------------------------------------ input guard
 
-/** Caps counted before parse5 runs (see AGENT_DOCUMENT_RULES). Exported so a later re-parse applies the same caps. */
-export const MAX_ATTRIBUTES_PER_TAG = R.maxAttributesPerTag;
+/** Caps counted before parse5 runs. Exported so a later re-parse applies the same caps (C259, 0.1.33).
+ *  parse5 checks each new attribute of a tag against the ones before it (quadratic per tag: 2,048 attributes in one tag cost
+ *  ~10 ms, 4,000 cost 34 ms, 36,000 cost 1.8 s), so the cost of a page is the SUM over its tags of attrs². The precheck bounds
+ *  that sum (MAX_ATTRIBUTE_BUDGET = 2,048²: the whole page may cost what one tag at the hard cap costs) and caps one tag at
+ *  MAX_ATTRIBUTES_PER_TAG. These replace AGENT_DOCUMENT_RULES.maxAttributesPerTag (256) for the SDK. */
+export const MAX_ATTRIBUTES_PER_TAG = 2048;
+export const MAX_ATTRIBUTE_BUDGET = 4_194_304;
 export const MAX_TAGS = R.maxTags;
+/** Most elements one parse may create (parsed AND copied by the parser: formatting elements it re-opens, adoption agency
+ *  clones). A page within MAX_TAGS creates at most ~1 element per tag plus a few implied ones (html, head, body, tbody, a `p`
+ *  for a stray `</p>`); measured on the corpus and the at-cap test pages: at most 1.01 elements per counted tag. The factor 2
+ *  leaves room for normal mis-nested formatting; above it the parser is multiplying elements (`<p><b><i><u><s>` + `<p>x` × N). */
+export const MAX_ELEMENTS = 2 * R.maxTags;
 
 // HTML tokenizer states of a tag, the ones that decide where an attribute starts.
 const TAG_NAME = 0;
@@ -344,10 +354,51 @@ const AFTER_QUOTED = 8;
 const SELF_CLOSING = 9;
 const END_OPEN = 10; // after "</", before the tag name
 const STATES = 11;
+// character classes inside a tag: 0 other, 1 white space, 2 "/", 3 ">", 4 "=", 5 '"', 6 "'"
+const CLASSES = 7;
+const CHAR_CLASS = new Uint8Array(0x80);
+for (const ws of [0x20, 0x09, 0x0a, 0x0c, 0x0d]) CHAR_CLASS[ws] = 1;
+CHAR_CLASS[0x2f] = 2;
+CHAR_CLASS[0x3e] = 3;
+CHAR_CLASS[0x3d] = 4;
+CHAR_CLASS[0x22] = 5;
+CHAR_CLASS[0x27] = 6;
+const isLetter = (x: number): boolean => (x >= 0x41 && x <= 0x5a) || (x >= 0x61 && x <= 0x7a);
+/** The tokenizer's tag states as a table: NEXT_STATE[state * CLASSES + class] (-1: the tag ends at this ">"), and
+ *  STARTS_ATTRIBUTE: 1 when that character starts a new attribute name. */
+const NEXT_STATE = new Int8Array(STATES * CLASSES);
+const STARTS_ATTRIBUTE = new Int8Array(STATES * CLASSES);
+{
+  const E = -1;
+  const A = 100; // marks "IN_NAME, and an attribute starts here"
+  //                 other         ws           /             >  =             "             '
+  const rows: number[][] = [];
+  rows[TAG_NAME] = [TAG_NAME, BEFORE_NAME, SELF_CLOSING, E, TAG_NAME, TAG_NAME, TAG_NAME];
+  rows[BEFORE_NAME] = [A, BEFORE_NAME, SELF_CLOSING, E, A, A, A];
+  rows[SELF_CLOSING] = rows[BEFORE_NAME];
+  rows[IN_NAME] = [IN_NAME, AFTER_NAME, SELF_CLOSING, E, BEFORE_VALUE, IN_NAME, IN_NAME];
+  rows[AFTER_NAME] = [A, AFTER_NAME, SELF_CLOSING, E, BEFORE_VALUE, A, A];
+  rows[BEFORE_VALUE] = [VALUE_UNQ, BEFORE_VALUE, VALUE_UNQ, E, VALUE_UNQ, VALUE_DQ, VALUE_SQ];
+  rows[VALUE_DQ] = [VALUE_DQ, VALUE_DQ, VALUE_DQ, VALUE_DQ, VALUE_DQ, AFTER_QUOTED, VALUE_DQ];
+  rows[VALUE_SQ] = [VALUE_SQ, VALUE_SQ, VALUE_SQ, VALUE_SQ, VALUE_SQ, VALUE_SQ, AFTER_QUOTED];
+  rows[VALUE_UNQ] = [VALUE_UNQ, BEFORE_NAME, VALUE_UNQ, E, VALUE_UNQ, VALUE_UNQ, VALUE_UNQ];
+  rows[END_OPEN] = [TAG_NAME, TAG_NAME, TAG_NAME, TAG_NAME, TAG_NAME, TAG_NAME, TAG_NAME];
+  rows[AFTER_QUOTED] = [A, BEFORE_NAME, SELF_CLOSING, E, A, A, A];
+  for (let st = 0; st < STATES; st++) {
+    for (let cl = 0; cl < CLASSES; cl++) {
+      const to = (rows[st] as number[])[cl] as number;
+      NEXT_STATE[st * CLASSES + cl] = to === A ? IN_NAME : to;
+      STARTS_ATTRIBUTE[st * CLASSES + cl] = to === A ? 1 : 0;
+    }
+  }
+}
 
 export interface AgentDocumentStats {
   /** The most attributes any candidate tag carries before it ends (or the source ends). */
   maxAttributes: number;
+  /** Sum over the candidate tags of (attributes)²: each `>` that ends one or more candidates charges the largest of their counts,
+   *  squared, and the source end charges the largest count still open, squared. Never below what parse5's tags cost. */
+  attributeCost: number;
   /** Count of `<` followed by a letter, `/` or `!`. */
   tags: number;
 }
@@ -359,105 +410,305 @@ export interface AgentDocumentStats {
  * tokenizer's own tag states (names, quoted and unquoted values), so a `>` in a quoted value does not hide attributes. The
  * automata are merged by state, keeping the highest attribute count per state, so the pass stays linear however many start.
  * The real tokenizer's count for any real tag is one of the candidates', so this never counts less than parse5 will see.
+ *
+ * Cost (C259): real tags never overlap, so at most one real tag ends at a given `>` and at most one is open at the end of the
+ * source. Charging, per `>`, the square of the LARGEST count among the candidates that end there, plus the square of the
+ * largest count still open at the end, is therefore never below the sum of squares of the real tags (a candidate merged into
+ * another one in the same state is covered by the survivor: same future, higher or equal count). A candidate cannot escape the
+ * charge by never closing: the end of the source closes it.
  */
 export function agentDocumentStats(s: string): AgentDocumentStats {
+  // the live candidates: `list[0..len)` holds their states, `cnt[state]` their counts (-1: no candidate in that state)
   let cnt = new Int32Array(STATES).fill(-1);
-  let next = new Int32Array(STATES);
-  let active = 0;
+  let nxt = new Int32Array(STATES).fill(-1);
+  let list = new Int8Array(STATES);
+  let nlist = new Int8Array(STATES);
+  let len = 0;
   let max = 0;
+  let cost = 0;
   let tags = 0;
   const n = s.length;
   for (let i = 0; i < n; i++) {
     const c = s.charCodeAt(i);
-    if (active > 0) {
-      next.fill(-1);
-      active = 0;
-      const ws = c === 0x20 || c === 0x09 || c === 0x0a || c === 0x0c || c === 0x0d;
-      for (let st = 0; st < STATES; st++) {
+    if (len > 0) {
+      const cls = c < 0x80 ? (CHAR_CLASS[c] as number) : 0;
+      let nlen = 0;
+      let ended = -1; // the largest count among the candidates that end at this character
+      for (let j = 0; j < len; j++) {
+        const st = list[j] as number;
         const k = cnt[st] as number;
-        if (k < 0) continue;
-        let to = -1; // -1: the tag ends
-        let inc = 0;
-        switch (st) {
-          case TAG_NAME:
-            to = ws ? BEFORE_NAME : c === 0x2f ? SELF_CLOSING : c === 0x3e ? -1 : TAG_NAME;
-            break;
-          case BEFORE_NAME:
-          case SELF_CLOSING:
-            if (ws) to = BEFORE_NAME;
-            else if (c === 0x2f) to = SELF_CLOSING;
-            else if (c === 0x3e) to = -1;
-            else {
-              to = IN_NAME;
-              inc = 1;
-            }
-            break;
-          case IN_NAME:
-            to = ws ? AFTER_NAME : c === 0x2f ? SELF_CLOSING : c === 0x3e ? -1 : c === 0x3d ? BEFORE_VALUE : IN_NAME;
-            break;
-          case AFTER_NAME:
-            if (ws) to = AFTER_NAME;
-            else if (c === 0x2f) to = SELF_CLOSING;
-            else if (c === 0x3d) to = BEFORE_VALUE;
-            else if (c === 0x3e) to = -1;
-            else {
-              to = IN_NAME;
-              inc = 1;
-            }
-            break;
-          case BEFORE_VALUE:
-            to = ws ? BEFORE_VALUE : c === 0x22 ? VALUE_DQ : c === 0x27 ? VALUE_SQ : c === 0x3e ? -1 : VALUE_UNQ;
-            break;
-          case VALUE_DQ:
-            to = c === 0x22 ? AFTER_QUOTED : VALUE_DQ;
-            break;
-          case VALUE_SQ:
-            to = c === 0x27 ? AFTER_QUOTED : VALUE_SQ;
-            break;
-          case VALUE_UNQ:
-            to = ws ? BEFORE_NAME : c === 0x3e ? -1 : VALUE_UNQ;
-            break;
-          case END_OPEN:
-            to = TAG_NAME;
-            break;
-          default: // AFTER_QUOTED
-            if (ws) to = BEFORE_NAME;
-            else if (c === 0x2f) to = SELF_CLOSING;
-            else if (c === 0x3e) to = -1;
-            else {
-              to = IN_NAME;
-              inc = 1;
-            }
+        cnt[st] = -1;
+        const e = st * CLASSES + cls;
+        const to = NEXT_STATE[e] as number;
+        const v = k + (STARTS_ATTRIBUTE[e] as number);
+        if (to < 0) {
+          if (v > ended) ended = v;
+          continue;
         }
-        if (to < 0) continue;
-        const v = k + inc;
-        if (v > (next[to] as number)) next[to] = v;
+        const p = nxt[to] as number;
+        if (p < 0) {
+          nlist[nlen++] = to;
+          nxt[to] = v;
+        } else if (v > p) nxt[to] = v;
         if (v > max) max = v;
       }
-      const swap = cnt;
-      cnt = next;
-      next = swap;
-      for (let st = 0; st < STATES; st++) if ((cnt[st] as number) >= 0) active++;
+      if (ended > 0) cost += ended * ended;
+      const sc = cnt;
+      cnt = nxt;
+      nxt = sc;
+      const sl = list;
+      list = nlist;
+      nlist = sl;
+      len = nlen;
     }
     if (c === 0x3c) {
       const d = s.charCodeAt(i + 1);
-      const letter = (x: number) => (x >= 0x41 && x <= 0x5a) || (x >= 0x61 && x <= 0x7a);
-      if (letter(d) || d === 0x2f || d === 0x21) tags++;
-      const spawn = letter(d) ? TAG_NAME : d === 0x2f && letter(s.charCodeAt(i + 2)) ? END_OPEN : -1;
+      if (isLetter(d) || d === 0x2f || d === 0x21) tags++;
+      const spawn = isLetter(d) ? TAG_NAME : d === 0x2f && isLetter(s.charCodeAt(i + 2)) ? END_OPEN : -1;
       if (spawn >= 0 && (cnt[spawn] as number) < 0) {
         cnt[spawn] = 0;
-        active++;
+        list[len++] = spawn;
       }
     }
   }
-  return { maxAttributes: max, tags };
+  // the end of the source closes every candidate still open (parse5 has already paid for its attributes)
+  let open = 0;
+  for (let j = 0; j < len; j++) open = Math.max(open, cnt[list[j] as number] as number);
+  cost += open * open;
+  return { maxAttributes: max, attributeCost: cost, tags };
 }
 
-/** True when the source is within the caps (MAX_ATTRIBUTES_PER_TAG attributes in any tag-like token, MAX_TAGS tags). Cheap,
- *  linear, runs before any parse. Apply it before every re-parse of agent HTML (`fillTextSlots` does). */
+/** True when the attribute caps hold: no tag-like token over MAX_ATTRIBUTES_PER_TAG, the cost within MAX_ATTRIBUTE_BUDGET. */
+const attributesWithin = (st: AgentDocumentStats): boolean => st.maxAttributes <= MAX_ATTRIBUTES_PER_TAG && st.attributeCost <= MAX_ATTRIBUTE_BUDGET;
+
+/** True when the source is within the caps (MAX_ATTRIBUTES_PER_TAG attributes in any tag-like token, the sum of attrs² within
+ *  MAX_ATTRIBUTE_BUDGET, MAX_TAGS tags). Cheap, linear, runs before any parse. Apply it before every re-parse of agent HTML
+ *  (`fillTextSlots` does). */
 export function agentDocumentPrecheck(html: string): boolean {
   const st = agentDocumentStats(html);
-  return st.maxAttributes <= MAX_ATTRIBUTES_PER_TAG && st.tags <= MAX_TAGS;
+  return attributesWithin(st) && st.tags <= MAX_TAGS;
+}
+
+// ------------------------------------------------------------------------------------------------------ bounded parse
+
+/** Thrown by the bounded tree adapter; private, so only the sanitiser's own catch sees it. */
+class ParseLimitExceeded extends Error {}
+
+/** Most elements the parser may COPY in one parse (formatting elements it re-opens, adoption agency clones): 20,000 plus twice
+ *  the elements parsed so far. Benign mis-nesting copies about one element per tag that crosses an open formatting element
+ *  (corpus: at most 1 copy per page; `<p><b><i><u>t` + 1,000 × `<p>x`: 3,000 copies for 1,004 tags). Formatting elements with
+ *  distinct attributes escape the parser's own limit of 3 (Noah's Ark), so `<font><p>x<b aN>` × N re-opens N elements per
+ *  unit: N²/2 copies, 300 ms at N = 400 (4.6 KB, found by the fuzz test) before this cap. */
+const MAX_COPIES_BASE = 20_000;
+const MAX_COPIES_PER_PARSED = 2;
+
+/** Most tree work one parse may spend beyond plain appends: child visits re-measuring the depth of subtrees the parser moves
+ *  (adoption agency, foster parenting) and 2 × the sibling entries read and shifted to insert before or detach (2 per
+ *  foster-parented node next to an open table). A benign page moves small subtrees a few times and foster-parents a few stray
+ *  texts; 4 × MAX_TAGS (200,000 foster-parented nodes) refuses `<br>` × 99,990 + `<table>` + `a ` × 700,000 in ~60 ms. */
+const MAX_TREE_WORK = 4 * R.maxTags;
+/** A child list longer than this has its leading children removed lazily (see detachNode). */
+const LAZY_HEAD_MIN = 64;
+
+/**
+ * A parse5 tree adapter that bounds the parse WHILE parse5 builds the tree (C259): parse5's tree builder is quadratic in the
+ * number of open elements (60,000 nested `<div>` cost 10 s before the post-parse depth check could refuse them).
+ *
+ * - Depth. Each element (and template content) gets a recorded depth on insertion: the parent's + 1, with the walk's numbering
+ *   (document 0, `html` 1; template content at its template's depth). Past R.maxDepth it throws at once. A node that is
+ *   inserted again (adoption agency, foster parenting) or that already has children when it is inserted (a clone that received
+ *   the furthest block's children) has its subtree measured again when it lands deeper than recorded; a node that lands at the
+ *   same depth or shallower keeps its larger recorded depth. Recorded depths therefore never fall below the real ones. The
+ *   re-measuring is bounded by MAX_TREE_WORK. The post-parse walk checks the final tree again.
+ * - Sibling lists. parse5's default adapter finds a foster-parenting reference with indexOf from the FRONT of a growing
+ *   child list (`<table>x<b></b>` × 32,000: 0.6 s per parse) and detaches leading children with splice(0, 1). Here the
+ *   reference is found from the END (it is the table, next to the end), leading children of a long list are removed lazily,
+ *   and the steps are charged to MAX_TREE_WORK.
+ * - Copied attributes. An element whose attribute list was already used by an earlier element is a copy made by the parser
+ *   (a formatting element re-opened, an adoption agency clone): parse5 did not tokenize it, but every re-parse will. It is
+ *   charged attrs² against what is left of MAX_ATTRIBUTE_BUDGET after the precheck's own charge.
+ * - `<html>` / `<body>` attribute merging (adoptAttributes): done with an incremental name set (parse5 rebuilds a set per call:
+ *   quadratic), the element capped at MAX_ATTRIBUTES_PER_TAG and its growth charged against the same budget.
+ * - Element count: at most MAX_ELEMENTS created per parse, of which at most MAX_COPIES_BASE + 2 × (parsed elements) copies.
+ *
+ * Provenance: reconciled with Live Artifacts `src/bounded-parse.ts` (opt2-tealbrick-live-artifacts, branch
+ * feat/C167-s6-hardening, commit c044698, 2026-10-18), which LA deletes after 0.1.33. Same bounds; taken from it: the 2 ×
+ * (entries read + shifted) charge for a search from the end. Kept here instead: leading children of a long list are removed
+ * lazily, so the adoption agency moving a block's 99,000 children is linear and the page passes (LA charges every detach the
+ * whole list and refuses it); template content at its template's depth (the walk's numbering; LA: one below); the attribute
+ * budget left after the precheck (LA: a fresh budget per parse); plain Map/Set (LA: WeakMap/WeakSet, slower at 10^5 nodes).
+ */
+/** Compacts every child list left with lazily removed leading children, once the parse is done. */
+const FINISH = new WeakMap<object, () => void>();
+function finishTree(adapter: object): void {
+  FINISH.get(adapter)?.();
+}
+
+function boundedTreeAdapter(budgetLeft: number): typeof defaultTreeAdapter {
+  // plain Map/Set, not Weak*: the adapter lives for one parse, and V8's ephemeron tables made the weak versions the most
+  // expensive part of a parse with 10^5 elements
+  const depthOf = new Map<object, number>();
+  const usedAttrs = new Set<object>();
+  const names = new Map<object, Set<string>>();
+  let left = budgetLeft;
+  let elements = 0;
+  let copies = 0;
+  let work = 0;
+  const step = (n: number): void => {
+    work += n;
+    if (work > MAX_TREE_WORK) over();
+  };
+  // parse5 moves every child of an adoption agency's furthest block with getFirstChild + detachNode: splice(0, 1) on a long
+  // child list is O(length), so 64,000 children cost 6 s. On a long list the leading children are removed lazily: `head`
+  // holds how many leading entries are already detached; every other access to that list compacts it first.
+  const head = new Map<ParentNode, number>();
+  const compact = (p: ParentNode): void => {
+    const k = head.get(p);
+    if (k !== undefined) {
+      head.delete(p);
+      p.childNodes.splice(0, k);
+    }
+  };
+  const over = (): never => {
+    throw new ParseLimitExceeded();
+  };
+  const charge = (cost: number): void => {
+    left -= cost;
+    if (left < 0) over();
+  };
+  const hasChildren = (n: object): n is ParentNode => "childNodes" in n;
+  /** Re-measures the subtree under `node` (recorded at depth d). */
+  const remeasure = (node: ParentNode, d: number): void => {
+    const content = (node as T.Template).content;
+    if (content) {
+      if (d > (depthOf.get(content) ?? -1)) depthOf.set(content, d);
+      remeasure(content, d);
+    }
+    for (const child of node.childNodes) {
+      step(1);
+      if (!hasChildren(child)) continue;
+      const cd = d + 1;
+      if (cd > R.maxDepth) over();
+      if (cd > (depthOf.get(child) ?? -1)) depthOf.set(child, cd);
+      remeasure(child, depthOf.get(child) as number);
+    }
+  };
+  const place = (parent: ParentNode, child: ChildNode): void => {
+    if (!hasChildren(child)) return; // text, comment, doctype: leaves
+    const d = (depthOf.get(parent) ?? 0) + 1;
+    if (d > R.maxDepth) over();
+    const old = depthOf.get(child);
+    if (old !== undefined && d <= old) return; // same depth or shallower: the recorded depth stays an upper bound
+    depthOf.set(child, d);
+    const content = (child as T.Template).content;
+    if (child.childNodes.length > 0 || (content && content.childNodes.length > 0)) remeasure(child, d);
+    else if (content) depthOf.set(content, d);
+  };
+  const adapter: typeof defaultTreeAdapter = {
+    ...defaultTreeAdapter,
+    createElement(tagName, namespaceURI, attrs) {
+      if (++elements > MAX_ELEMENTS) over();
+      if (usedAttrs.has(attrs)) {
+        if (++copies > MAX_COPIES_BASE + MAX_COPIES_PER_PARSED * (elements - copies)) over();
+        if (attrs.length > MAX_ATTRIBUTES_PER_TAG) over();
+        charge(attrs.length * attrs.length);
+      } else usedAttrs.add(attrs);
+      return defaultTreeAdapter.createElement(tagName, namespaceURI, attrs);
+    },
+    appendChild(parent, child) {
+      compact(parent);
+      place(parent, child);
+      defaultTreeAdapter.appendChild(parent, child);
+    },
+    insertBefore(parent, child, reference) {
+      compact(parent);
+      place(parent, child);
+      const list = parent.childNodes;
+      const at = list.lastIndexOf(reference);
+      step(2 * (list.length - at)); // the entries read from the end, and the entries the insert shifts
+      list.splice(at, 0, child);
+      child.parentNode = parent;
+    },
+    insertText(parent, text) {
+      compact(parent);
+      defaultTreeAdapter.insertText(parent, text);
+    },
+    insertTextBefore(parent, text, reference) {
+      compact(parent);
+      const list = parent.childNodes;
+      const at = list.lastIndexOf(reference);
+      step(2 * (list.length - at)); // the entries read from the end, and the entries the insert shifts
+      const prev = list[at - 1];
+      if (prev && defaultTreeAdapter.isTextNode(prev)) prev.value += text;
+      else {
+        const node = defaultTreeAdapter.createTextNode(text);
+        list.splice(at, 0, node);
+        node.parentNode = parent;
+      }
+    },
+    detachNode(node) {
+      const p = node.parentNode;
+      if (!p) return;
+      const list = p.childNodes;
+      const k = head.get(p) ?? 0;
+      if (list[k] === node && list.length >= LAZY_HEAD_MIN) {
+        node.parentNode = null;
+        if (k + 1 === list.length) {
+          head.delete(p);
+          list.length = 0;
+        } else head.set(p, k + 1);
+        return;
+      }
+      compact(p);
+      const at = list.lastIndexOf(node);
+      step(2 * (list.length - at));
+      list.splice(at, 1);
+      node.parentNode = null;
+    },
+    getFirstChild(node) {
+      return node.childNodes[head.get(node) ?? 0];
+    },
+    getChildNodes(node) {
+      compact(node);
+      return node.childNodes;
+    },
+    setDocumentType(document, name, publicId, systemId) {
+      compact(document);
+      defaultTreeAdapter.setDocumentType(document, name, publicId, systemId);
+    },
+    setTemplateContent(template, content) {
+      depthOf.set(content, depthOf.get(template) ?? 0);
+      defaultTreeAdapter.setTemplateContent(template, content);
+    },
+    adoptAttributes(recipient, attrs) {
+      let set = names.get(recipient);
+      if (!set) {
+        set = new Set(recipient.attrs.map((a) => a.name));
+        names.set(recipient, set);
+      }
+      const before = recipient.attrs.length;
+      for (const a of attrs) {
+        if (set.has(a.name)) continue;
+        set.add(a.name);
+        recipient.attrs.push(a);
+      }
+      const after = recipient.attrs.length;
+      if (after > MAX_ATTRIBUTES_PER_TAG) over();
+      charge(after * after - before * before);
+    },
+  };
+  FINISH.set(adapter, () => {
+    for (const p of [...head.keys()]) compact(p);
+  });
+  return adapter;
+}
+
+/** One parse through the bounded adapter. `parseFn` is parse5's `parse` (or the test seam); it must pass `treeAdapter` on. */
+function boundedParse(parseFn: ParseFn, html: string, scripting: boolean, budgetLeft: number): T.Document {
+  const treeAdapter = boundedTreeAdapter(budgetLeft);
+  const doc = parseFn(html, { scriptingEnabled: scripting, treeAdapter });
+  finishTree(treeAdapter);
+  return doc;
 }
 
 // ----------------------------------------------------------------------------------------------------------------- walk
@@ -468,6 +719,8 @@ type Element = T.Element;
 
 const isElement = (n: ChildNode): n is Element => "tagName" in n;
 const isText = (n: ChildNode): n is T.TextNode => n.nodeName === "#text";
+/** Where a script element takes its code from, besides its text (`src`; `href` / `xlink:href` on an SVG script). */
+const SCRIPT_SOURCE_ATTRIBUTES = new Set(["src", "href", "xlink:href"]);
 
 interface Ctx {
   allowScripts: boolean;
@@ -509,10 +762,39 @@ function removeElementReason(el: Element, tag: string, ctx: Ctx): string | null 
   return null;
 }
 
+/** Attribute names that no rule is about, on any element (most names on a page): kept as they are. A bounded cache of the
+ *  decision, so a page with many attributes pays the rule lookups once per name, not once per attribute and pass. */
+const PLAIN_NAMES = new Map<string, boolean>();
+const PLAIN_NAMES_MAX = 4096;
+function plainName(a: { name: string; prefix?: string | undefined }): boolean {
+  const key = a.prefix ? `${a.prefix}:${a.name}` : a.name;
+  let plain = PLAIN_NAMES.get(key);
+  if (plain === undefined) {
+    const full = key.toLowerCase();
+    const local = full.slice(full.lastIndexOf(":") + 1);
+    plain =
+      ATTRIBUTE_NAME_RE.test(full) &&
+      !full.startsWith(R.eventHandlerPrefix) &&
+      !local.startsWith(R.eventHandlerPrefix) &&
+      full !== TEXT_SLOT_ATTRIBUTE &&
+      local !== "target" &&
+      ![DENIED_ATTRIBUTES, URL_ATTRIBUTES, SRCSET_ATTRIBUTES, CSS_VALUE_ATTRIBUTES].some((set) => set.has(full) || set.has(local)) &&
+      !STYLE_ATTRIBUTES.has(full) &&
+      !SMIL_VALUE_ATTRIBUTES.has(local);
+    if (PLAIN_NAMES.size >= PLAIN_NAMES_MAX) PLAIN_NAMES.clear();
+    PLAIN_NAMES.set(key, plain);
+  }
+  return plain;
+}
+
 function sanitizeAttributes(el: Element, tag: string, ctx: Ctx): void {
   const kept: typeof el.attrs = [];
   let lostLink = false;
   for (const a of el.attrs) {
+    if (plainName(a)) {
+      kept.push(a);
+      continue;
+    }
     const full = fullName(a);
     const local = full.slice(full.lastIndexOf(":") + 1);
     const drop = (kind: string) => {
@@ -590,8 +872,18 @@ function walk(parent: ParentNode, ctx: Ctx, depth: number): void {
       ctx.counts.add(reason);
       continue;
     }
-    if (SCRIPT_ELEMENTS.has(tag)) ctx.runsScripts = true;
+    const scriptsBefore = ctx.runsScripts;
     sanitizeAttributes(child, tag, ctx);
+    if (SCRIPT_ELEMENTS.has(tag)) {
+      // S4 (0.1.33): a script with no source left (its src or href removed, or none) and no code runs nothing; it goes, and it
+      // does not make the page "run scripts" (an inline handler on it never fires either)
+      if (!child.attrs.some((a) => SCRIPT_SOURCE_ATTRIBUTES.has(fullName(a))) && child.childNodes.every((c) => isText(c) && c.value.trim() === "")) {
+        ctx.runsScripts = scriptsBefore;
+        ctx.counts.add(`element:${tag}-empty`);
+        continue;
+      }
+      ctx.runsScripts = true;
+    }
     if (tag === "style") {
       const text = child.childNodes.filter(isText);
       const first = text[0];
@@ -609,8 +901,8 @@ function walk(parent: ParentNode, ctx: Ctx, depth: number): void {
   parent.childNodes = kept;
 }
 
-function runPass(input: string, opts: SanitizeAgentDocumentOptions, scripting: boolean, parseFn: ParseFn): { html: string; runsScripts: boolean; removed: { kind: string; count: number }[] } {
-  const doc = parseFn(input, { scriptingEnabled: scripting });
+function runPass(input: string, opts: SanitizeAgentDocumentOptions, scripting: boolean, parseFn: ParseFn, budgetLeft: number): { html: string; runsScripts: boolean; removed: { kind: string; count: number }[] } {
+  const doc = boundedParse(parseFn, input, scripting, budgetLeft);
   const counts = new Counts();
   const ctx: Ctx = { allowScripts: opts.allowScripts, assetPrefix: opts.assetPrefix, counts, runsScripts: false };
   walk(doc, ctx, 0);
@@ -630,6 +922,11 @@ function runPass(input: string, opts: SanitizeAgentDocumentOptions, scripting: b
   return { html, runsScripts: ctx.runsScripts, removed: counts.list() };
 }
 
+/** The longest output accepted for an input of `n` characters (C259): max(4 × n, n + 1 MiB). Benign pages grow by the
+ *  marker, implied end tags and quoted attribute values (measured: at most 1.4× on the corpus); more is the parser multiplying
+ *  re-opened formatting elements. */
+const maxOutputLength = (n: number): number => Math.max(4 * n, n + 1024 * 1024);
+
 /**
  * Removes from agent-written HTML everything that can reach the network or the top window outside the CSP: `link`, `base`,
  * `meta[http-equiv]`, forms, frames, `object`/`embed`/`portal`, `noscript`, `<a ping>`, URL attributes that are not a
@@ -641,13 +938,19 @@ export function sanitizeAgentDocument(html: string, opts: SanitizeAgentDocumentO
     if (typeof html !== "string" || !opts || typeof opts.allowScripts !== "boolean" || typeof opts.assetPrefix !== "string" || !ASSET_PREFIX_RE.test(opts.assetPrefix)) return failed();
     if (opts.assetPrefix.split("/").some((s) => s === "." || s === "..")) return failed();
     if (html.length > R.maxInputBytes || Buffer.byteLength(html, "utf8") > R.maxInputBytes) return failed();
-    if (!agentDocumentPrecheck(html)) return failed();
+    const st = agentDocumentStats(html);
+    if (!attributesWithin(st) || st.tags > MAX_TAGS) return failed();
     const o: SanitizeAgentDocumentOptions = { allowScripts: opts.allowScripts, assetPrefix: opts.assetPrefix };
     const parseFn = deps?.parse ?? parse;
-    const first = runPass(html, o, true, parseFn);
+    const first = runPass(html, o, true, parseFn, MAX_ATTRIBUTE_BUDGET - st.attributeCost);
+    // the output is served, stored and parsed twice more: it may not grow past max(4 × input, input + 1 MiB) (the parser can
+    // multiply elements it re-opens), and its own attributes must be within the same budget (copies made by the parser count)
+    if (first.html.length > maxOutputLength(html.length)) return failed();
+    const out = agentDocumentStats(first.html);
+    if (!attributesWithin(out)) return failed();
     // a second pass, parsed with scripting on AND off, must find nothing to remove and change nothing
     for (const scripting of [true, false]) {
-      const again = runPass(first.html, o, scripting, parseFn);
+      const again = runPass(first.html, o, scripting, parseFn, MAX_ATTRIBUTE_BUDGET - out.attributeCost);
       if (again.removed.length > 0 || again.html !== first.html || again.runsScripts !== first.runsScripts) return failed();
     }
     return { ok: true, html: first.html, runsScripts: first.runsScripts, removed: first.removed };
@@ -661,13 +964,23 @@ export function sanitizeAgentDocument(html: string, opts: SanitizeAgentDocumentO
  * value as its only child, as a text node. The value is text, never markup: the serialiser escapes it (`<`, `&`, ...), so
  * `<img src=x onerror=...>` comes out as visible text. A slot on a raw-text or code element (`script`, `style`, `template`,
  * `noscript`, `iframe`, `xmp`, ...) or on a void element (`img`, `br`, ...) is left alone; so is a slot whose key is not in `values` or is not a
- * valid key. Values that are not strings are written with `String()`. Over the caps (size, attributes per tag, tags) it
- * returns AGENT_DOCUMENT_UNAVAILABLE_HTML without parsing. Run it AFTER `sanitizeAgentDocument`, on its `html`.
+ * valid key. Values that are not strings are written with `String()`. Over the caps (size, attributes per tag, attribute
+ * budget, tags) it returns AGENT_DOCUMENT_UNAVAILABLE_HTML without parsing; past a parse-time bound (depth, elements copied by
+ * the parser) it returns the same page. Run it AFTER `sanitizeAgentDocument`, on its `html`.
  */
 export function fillTextSlots(html: string, values: Readonly<Record<string, string | number | boolean>>, deps?: AgentDocumentDeps): string {
   // the same caps as the sanitiser, before any parse: over them, the inert page
-  if (typeof html !== "string" || html.length > R.maxInputBytes || Buffer.byteLength(html, "utf8") > R.maxInputBytes || !agentDocumentPrecheck(html)) return AGENT_DOCUMENT_UNAVAILABLE_HTML;
-  const doc = (deps?.parse ?? parse)(html, { scriptingEnabled: true });
+  if (typeof html !== "string" || html.length > R.maxInputBytes || Buffer.byteLength(html, "utf8") > R.maxInputBytes) return AGENT_DOCUMENT_UNAVAILABLE_HTML;
+  const st = agentDocumentStats(html);
+  if (!attributesWithin(st) || st.tags > MAX_TAGS) return AGENT_DOCUMENT_UNAVAILABLE_HTML;
+  let doc: T.Document;
+  try {
+    // the same bounded parse as the sanitiser (depth, copied attributes, element count): past a bound, the inert page
+    doc = boundedParse(deps?.parse ?? parse, html, true, MAX_ATTRIBUTE_BUDGET - st.attributeCost);
+  } catch (e) {
+    if (e instanceof ParseLimitExceeded) return AGENT_DOCUMENT_UNAVAILABLE_HTML;
+    throw e;
+  }
   const fill = (parent: ParentNode): void => {
     for (const child of parent.childNodes) {
       if (!isElement(child)) continue;

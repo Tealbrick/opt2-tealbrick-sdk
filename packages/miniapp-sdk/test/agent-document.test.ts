@@ -11,7 +11,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import { describe, test } from "node:test";
 import { AGENT_DOCUMENT_MARKER, AGENT_DOCUMENT_MAX_BYTES, AGENT_DOCUMENT_UNAVAILABLE_TEXT, AGENT_DOCUMENT_RULES as R, viewerDocumentCspOk } from "@opt2-tealbrick/manifest";
 import { parse, serialize, type DefaultTreeAdapterTypes as T } from "parse5";
-import { AGENT_DOCUMENT_UNAVAILABLE_HTML, agentDocumentPrecheck, agentDocumentStats, fillTextSlots, MAX_ATTRIBUTES_PER_TAG, MAX_TAGS, NO_SCRIPT_CSP, type SanitizeAgentDocumentResult, sanitizeAgentDocument } from "../src/server/index.ts";
+import { AGENT_DOCUMENT_UNAVAILABLE_HTML, agentDocumentPrecheck, agentDocumentStats, fillTextSlots, MAX_ATTRIBUTE_BUDGET, MAX_ATTRIBUTES_PER_TAG, MAX_ELEMENTS, MAX_TAGS, NO_SCRIPT_CSP, type SanitizeAgentDocumentResult, sanitizeAgentDocument } from "../src/server/index.ts";
+import { bodyPage, names, variants } from "./agent-document-shapes.ts";
 
 const DIR = new URL("./vectors/agent-documents/", import.meta.url);
 interface Case {
@@ -235,8 +236,8 @@ describe("fail closed", () => {
   test("a tag with more attributes than the rule list allows fails closed at once (the parser is quadratic in them)", () => {
     const attrs = (n: number, quoted = false) => Array.from({ length: n }, (_, i) => (quoted ? `a${i}="1>"` : `a${i}=1`)).join(" ");
     const page = (inner: string) => `<!DOCTYPE html><html><head></head><body>${inner}</body></html>`;
-    assert.equal(sanitizeAgentDocument(page(`<p ${attrs(R.maxAttributesPerTag)}>x</p>`), o).ok, true);
-    expectInert(sanitizeAgentDocument(page(`<p ${attrs(R.maxAttributesPerTag + 1)}>x</p>`), o), "one over");
+    assert.equal(sanitizeAgentDocument(page(`<p ${attrs(MAX_ATTRIBUTES_PER_TAG)}>x</p>`), o).ok, true);
+    expectInert(sanitizeAgentDocument(page(`<p ${attrs(MAX_ATTRIBUTES_PER_TAG + 1)}>x</p>`), o), "one over");
     expectInert(sanitizeAgentDocument(page(`<p ${attrs(60_000)}>x</p>`), o), "60 000 attributes");
     expectInert(sanitizeAgentDocument(page(`<p ${attrs(60_000, true)}>x</p>`), o), "a > inside quotes does not reset the count");
     expectInert(sanitizeAgentDocument(page(`</p ${attrs(60_000)}>`), o), "an end tag counts too");
@@ -523,32 +524,8 @@ describe("runsScripts, NO_SCRIPT_CSP, text slots (Live Artifacts S7)", () => {
 
 describe("pre-parse caps (L39): the HTML parser is quadratic in the attributes of one tag, so the caps run first", () => {
   const o = { allowScripts: false, assetPrefix: PREFIX };
-  const names = (n: number) => Array.from({ length: n }, (_, i) => `a${i.toString(36)}`).join(" ");
   /** wraps `attrs` in a tag the parser really reads as a tag, behind each hiding trick */
-  const variants: { name: string; real: boolean; make: (attrs: string) => string }[] = [
-    { name: "plain", real: true, make: (a) => `<p ${a}>x</p>` },
-    { name: "end tag", real: false, make: (a) => `</p ${a}>` },
-    { name: "unterminated at the end of the file", real: true, make: (a) => `<p ${a}` },
-    { name: "after <!-->", real: true, make: (a) => `<!--><p ${a}>x</p>` },
-    { name: "after <!--->", real: true, make: (a) => `<!---><p ${a}>x</p>` },
-    { name: "after a --!> closer", real: true, make: (a) => `<!-- c --!><p ${a}>x</p>` },
-    { name: "after a --!> closer with a decoy tag", real: true, make: (a) => `<!-- <q z=" --!><p ${a}>x</p>` },
-    { name: "svg style", real: true, make: (a) => `<svg><style><p ${a}>x</p></style></svg>` },
-    { name: "svg title", real: true, make: (a) => `<svg><title><p ${a}>x</p></title></svg>` },
-    { name: "svg desc", real: true, make: (a) => `<svg><desc><p ${a}>x</p></desc></svg>` },
-    { name: "math title", real: true, make: (a) => `<math><title><p ${a}>x</p></title></math>` },
-    { name: "math annotation-xml html", real: true, make: (a) => `<math><annotation-xml encoding="text/html"><p ${a}>x</p></annotation-xml></math>` },
-    { name: "after a quoted >", real: true, make: (a) => `<p z=">" ${a}>x</p>` },
-    { name: "after a quoted > behind a comment decoy", real: true, make: (a) => `<!-- <x z=" --><p y=">" ${a}>x</p>` },
-    { name: "after a quoted < and >", real: true, make: (a) => `<p z='<>' ${a}>x</p>` },
-    { name: "unquoted values", real: true, make: (a) => `<p ${a.replace(/ /g, "=1 ")}>x</p>` },
-    { name: "slash separated", real: true, make: (a) => `<p ${a.replace(/ /g, "/")}>x</p>` },
-    { name: "inside a comment", real: false, make: (a) => `<!-- <p ${a}> -->` },
-    { name: "inside a textarea", real: false, make: (a) => `<textarea><p ${a}></textarea>` },
-    { name: "inside a script", real: false, make: (a) => `<script><p ${a}></script>` },
-    { name: "inside a CDATA section", real: false, make: (a) => `<svg><![CDATA[<p ${a}>]]></svg>` },
-  ];
-  const page = (inner: string) => `<!DOCTYPE html><html><head></head><body>${inner}</body></html>`;
+  const page = bodyPage;
   const counting = () => {
     const calls = { n: 0 };
     return { calls, deps: { parse: ((...a: Parameters<typeof parse>) => {
@@ -581,9 +558,9 @@ describe("pre-parse caps (L39): the HTML parser is quadratic in the attributes o
     }
   });
 
-  test("the variants are real: at 300 attributes the parser itself reads a tag over the cap (and the count is never below it)", () => {
+  test("the variants are real: at 2,100 attributes the parser itself reads a tag over the cap (and the count is never below it)", () => {
     for (const v of variants.filter((x) => x.real)) {
-      const html = page(v.make(names(300)));
+      const html = page(v.make(names(MAX_ATTRIBUTES_PER_TAG + 52)));
       const real = maxElementAttrs(html);
       assert.ok(real > MAX_ATTRIBUTES_PER_TAG, `${v.name}: parse5 reads ${real} attributes; the variant does not hide a real tag`);
       assert.ok(agentDocumentStats(html).maxAttributes >= real, `${v.name}: the pre-parse count is below the parser's`);
@@ -625,7 +602,7 @@ describe("pre-parse caps (L39): the HTML parser is quadratic in the attributes o
     assert.equal(m("<!-- <p a b c> -->"), 3);
     assert.equal(m("text only, no tags"), 0);
     assert.equal(m("<p><q a></q></p>"), 1);
-    assert.deepEqual(agentDocumentStats("<!DOCTYPE html><p></p><!-- x --><? y ?> 1 < 2 <3"), { maxAttributes: 0, tags: 4 });
+    assert.deepEqual(agentDocumentStats("<!DOCTYPE html><p></p><!-- x --><? y ?> 1 < 2 <3"), { maxAttributes: 0, attributeCost: 0, tags: 4 });
     // attributes after a long quoted value still count
     assert.equal(m(`<p z="${"q ".repeat(5000)}" ${names(20)}>`), 21);
   });
@@ -649,7 +626,7 @@ describe("pre-parse caps (L39): the HTML parser is quadratic in the attributes o
     assert.equal(rb.ok, true);
     assert.equal(rb.html, AGENT_DOCUMENT_MARKER + big);
     // one over each cap
-    expectInertResult(sanitizeAgentDocument(page(`<p ${attrs} extra="1">x</p>`), o), "257 attributes");
+    expectInertResult(sanitizeAgentDocument(page(`<p ${attrs} extra="1">x</p>`), o), "2,049 attributes");
     expectInertResult(sanitizeAgentDocument(`${big}<b>`, o), "MAX_TAGS + 1");
     // the real parser is reached for a page under the caps: three passes
     const { calls, deps } = counting();
@@ -673,6 +650,236 @@ describe("pre-parse caps (L39): the HTML parser is quadratic in the attributes o
     assert.ok(Buffer.byteLength(worst) < AGENT_DOCUMENT_MAX_BYTES);
     expectInertResult(sanitizeAgentDocument(worst, o, deps), "nested candidate starts");
     assert.equal(calls.n, 0);
+  });
+
+  // ------------------------------------------------------------------------------------------------- C259 (0.1.33)
+
+  /** Median of a few runs (CI machines are shared: one slow run must not fail a ceiling). */
+  const medianMs = (f: () => void, runs = 5): number => {
+    const ts: number[] = [];
+    for (let r = 0; r < runs; r++) {
+      const t = performance.now();
+      f();
+      ts.push(performance.now() - t);
+    }
+    ts.sort((a, b) => a - b);
+    return ts[Math.floor(runs / 2)] as number;
+  };
+  const on = { allowScripts: true, assetPrefix: PREFIX };
+  const cost = (h: string) => agentDocumentStats(h).attributeCost;
+  const nest = (n: number) => page(`${"<div>".repeat(n)}x${"</div>".repeat(n)}`);
+
+  test("C259 caps: 2,048 attributes in one tag-like token, sum of attrs² within 4,194,304 (= 2,048²), 200,000 elements", () => {
+    assert.equal(MAX_ATTRIBUTES_PER_TAG, 2048);
+    assert.equal(MAX_ATTRIBUTE_BUDGET, 4_194_304);
+    assert.equal(MAX_ATTRIBUTE_BUDGET, MAX_ATTRIBUTES_PER_TAG ** 2, "the whole page may cost what one tag at the hard cap costs");
+    assert.equal(MAX_TAGS, 100_000);
+    assert.equal(MAX_ELEMENTS, 2 * MAX_TAGS);
+  });
+
+  test("attributeCost: each > charges the largest candidate ending there, squared; the end of the source charges the open one", () => {
+    assert.equal(cost("<p a b>"), 4);
+    assert.equal(cost("<p a b><q c>"), 5);
+    assert.equal(cost("<p a b></p>"), 4, "an end tag with no attributes costs 0");
+    assert.equal(cost("<p a b c"), 9, "a token that runs to the end of the source is still charged");
+    assert.equal(cost("x<y a b c d"), 16, "prose with a < is charged like a tag");
+    // two candidates end at the same >: only the larger is charged (real tags never overlap)
+    assert.equal(cost("<a b <c d e>"), 16);
+    // a candidate that starts inside a quoted value ends at the quoted >: both are charged (2² + 2²)
+    assert.equal(cost('<p a="<q b c>" d>'), 8);
+    // a candidate cannot avoid the charge by never closing, even behind a never-closed quote
+    assert.equal(cost(`<p ${names(100)} x="`), 101 * 101);
+    assert.equal(cost("no tags at all"), 0);
+  });
+
+  test("benign pages the old 256 cap refused now pass precheck and sanitise ok (C259 cases 1-3)", () => {
+    // 1. a script loop: `<n;i++){` is a tag-like token, the statements its attributes (302)
+    const loop = page(`<script>for(var i=0;i<n;i++){ ${Array.from({ length: 300 }, (_, i) => `t${i}++;`).join(" ")} }</script>`);
+    // 2. prose: parse5 itself reads `<b and ...` as an element "b" with 402 attributes
+    const prose = page(`<p>1 < 2 and a<b and ${"word ".repeat(400)}</p>`);
+    // 3. a CSS comment
+    const css = page(`<style>/* a<b ${"x ".repeat(400)}*/ p{color:red}</style>`);
+    for (const [name, h, o2] of [["script loop", loop, on], ["prose", prose, o], ["css comment", css, o]] as const) {
+      const st = agentDocumentStats(h);
+      assert.ok(st.maxAttributes > 256 && st.maxAttributes <= MAX_ATTRIBUTES_PER_TAG, `${name}: ${st.maxAttributes}`);
+      assert.equal(agentDocumentPrecheck(h), true, name);
+      const r = sanitizeAgentDocument(h, o2);
+      assert.equal(r.ok, true, name);
+      // the prose "element" b carries an attribute named "<" (from `</p`): removed as an invalid name, the text stays
+      if (name !== "prose") assert.deepEqual(r.removed, [], name);
+    }
+    assert.ok(sanitizeAgentDocument(prose, o).html.includes("<p>1 &lt; 2 and a<b and="), "the page is kept as parse5 reads it");
+  });
+
+  test("depth: at the limit a page comes back equal (quiet on good), one level deeper fails closed, in every parse", () => {
+    const at = nest(R.maxDepth - 2); // html 1, body 2, the deepest div at R.maxDepth
+    const r = sanitizeAgentDocument(at, o);
+    assert.equal(r.ok, true);
+    assert.equal(r.html, AGENT_DOCUMENT_MARKER + at);
+    assert.equal(fillTextSlots(r.html, {}), r.html);
+    expectInertResult(sanitizeAgentDocument(nest(R.maxDepth - 1), o), "one level over");
+    assert.equal(fillTextSlots(AGENT_DOCUMENT_MARKER + nest(R.maxDepth - 1), {}), AGENT_DOCUMENT_UNAVAILABLE_HTML, "fillTextSlots: one level over");
+    // template content counts at its template's depth, as the walk counts it: template at R.maxDepth - 1, <i> at R.maxDepth
+    const tmpl = page(`${"<div>".repeat(R.maxDepth - 4)}<template><i>x</i></template>${"</div>".repeat(R.maxDepth - 4)}`);
+    assert.equal(sanitizeAgentDocument(tmpl, o).ok, true);
+    const tmplOver = page(`${"<div>".repeat(R.maxDepth - 3)}<template><i>x</i></template>${"</div>".repeat(R.maxDepth - 3)}`);
+    expectInertResult(sanitizeAgentDocument(tmplOver, o), "template content one over");
+  });
+
+  test("depth is bounded DURING each parse: the first pass, both verification passes and fillTextSlots (test seam)", () => {
+    const deep = "<div>".repeat(60_000);
+    const benign = page("<p>x</p>");
+    for (const k of [1, 2, 3]) {
+      const calls = { n: 0, adapters: 0 };
+      const deps = {
+        parse: ((html: string, opts: Parameters<typeof parse>[1]) => {
+          calls.n++;
+          if (opts?.treeAdapter) calls.adapters++;
+          return parse(calls.n === k ? deep : html, opts);
+        }) as typeof parse,
+      };
+      let r: SanitizeAgentDocumentResult | undefined;
+      const ms = medianMs(() => {
+        calls.n = 0;
+        r = sanitizeAgentDocument(benign, o, deps);
+      }, 3);
+      expectInertResult(r as SanitizeAgentDocumentResult, `parse ${k}`);
+      assert.equal(calls.n, k, `parse ${k} is the one refused, no parse after it`);
+      assert.ok(calls.adapters >= k, "every parse gets the bounded tree adapter");
+      assert.ok(ms < 100, `parse ${k}: ${ms.toFixed(1)} ms`);
+    }
+    let n = 0;
+    const fill = {
+      parse: ((_h: string, opts: Parameters<typeof parse>[1]) => {
+        n++;
+        return parse(deep, opts);
+      }) as typeof parse,
+    };
+    const t = performance.now();
+    assert.equal(fillTextSlots(sanitizeAgentDocument(benign, o).html, {}, fill), AGENT_DOCUMENT_UNAVAILABLE_HTML);
+    assert.ok(performance.now() - t < 100);
+    assert.equal(n, 1);
+  });
+
+  test("depth under reparenting: a parse that passes the bounded adapter never holds a tree deeper than the limit", () => {
+    // adoption agency (mis-nested formatting) and foster parenting (content in tables) move subtrees after insertion; the
+    // adapter re-measures a subtree that lands deeper, so its recorded depths never fall below the real ones
+    let seed = 99;
+    const rnd = () => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x7fffffff;
+    };
+    const bits = ["<b>", "</b>", "<i>", "</i>", "<a>", "</a>", "<nobr>", "</nobr>", "<font>", "</font>", "<p>", "</p>", "<div>", "</div>", "<table>", "</table>", "<tr>", "<td>", "<template>", "</template>", "<span>", "<li>", "<button>", "x", "<em>", "</em>", "<s>", "</s>"];
+    const depth = (node: T.ParentNode, d: number): number => {
+      let m = d;
+      for (const c of node.childNodes) {
+        if (!("tagName" in c)) continue;
+        m = Math.max(m, depth(c, d + 1));
+        const content = (c as T.Template).content;
+        if (content) m = Math.max(m, depth(content, d + 1));
+      }
+      return m;
+    };
+    let passed = 0;
+    let refused = 0;
+    for (let doc = 0; doc < 150; doc++) {
+      let html = `<!DOCTYPE html><html><body>${"<div>".repeat(R.maxDepth - 40 - Math.floor(rnd() * 20))}`;
+      for (let i = 0; i < 40 + Math.floor(rnd() * 200); i++) html += bits[Math.floor(rnd() * bits.length)] as string;
+      const deps = {
+        parse: ((h: string, opts: Parameters<typeof parse>[1]) => {
+          const tree = parse(h, opts) as T.Document;
+          const d = depth(tree, 0);
+          assert.ok(d <= R.maxDepth, `doc #${doc}: the bounded parse let through a tree of depth ${d}`);
+          return tree;
+        }) as typeof parse,
+      };
+      const r = sanitizeAgentDocument(html, o, deps);
+      if (r.ok) passed++;
+      else refused++;
+    }
+    assert.ok(passed > 10 && refused > 10, `both sides explored (passed ${passed}, refused ${refused})`);
+  });
+
+  test("KNOWN FALSE REFUSAL (accepted for 0.1.33): a recorded depth is never lowered, so repeated adoption-agency moves over-count", () => {
+    // `<b><div><span></b>` × 350: the real tree is 354 deep, but each `</b>` moves the div under a new <b> clone, and the
+    // moved nodes keep their (larger) recorded depth. Fail closed, pathological pages only (Coordinator ruling, C259).
+    const shape = (k: number) => `<body>${"<b><div><span></b>".repeat(k)}`;
+    const realDepth = (node: T.ParentNode, d: number): number => {
+      let m = d;
+      for (const c of node.childNodes) if ("tagName" in c) m = Math.max(m, realDepth(c, d + 1));
+      return m;
+    };
+    assert.equal(realDepth(parse(shape(350)), 0), 354);
+    expectInertResult(sanitizeAgentDocument(shape(350), o), "known false refusal");
+    assert.equal(sanitizeAgentDocument(shape(100), o).ok, true, "a shorter run of the same shape passes");
+  });
+
+  test("benign mis-nested formatting still sanitises ok (quiet on good)", () => {
+    for (const h of ["<b><p>x</b>y</p>", "<p><b>bold<i>both</b>italic</i></p>", "<a href=\"#x\"><div>block</a>after</div>", "<table><tr><td>a</td></tr>stray</table>", "<p><b class=\"k\">one<p>two<p>three</b></p>"]) {
+      const r = sanitizeAgentDocument(page(h), o);
+      assert.equal(r.ok, true, h);
+      assert.deepEqual(r.removed, [], h);
+    }
+  });
+
+  test("elements the parser copies are charged: re-opened formatting elements with attributes, <html>/<body> attribute merging", () => {
+    // each `<p>x` re-opens a copy of <b> that shares the token's 100 attributes: 100² each, on top of the token's own 100²
+    const reopen = (k: number) => page(`<p><b ${names(100)}>${"<p>x".repeat(k)}`);
+    assert.equal(sanitizeAgentDocument(reopen(418), o).ok, true, "1 + 418 copies: 419 × 10,000 <= 4,194,304");
+    expectInertResult(sanitizeAgentDocument(reopen(419), o), "1 + 419 copies: over the budget");
+    // parse5 merges the attributes of every later <html> (and <body>) tag into the first one
+    const htmls = (k: number) => Array.from({ length: k }, (_, i) => `<html z${i}>`).join("");
+    const merged = sanitizeAgentDocument(htmls(1000), o);
+    assert.equal(merged.ok, true);
+    assert.equal((merged.html.match(/ z\d+=""/g) ?? []).length, 1000);
+    expectInertResult(sanitizeAgentDocument(htmls(2100), o), "<html> over 2,048 merged attributes");
+    expectInertResult(sanitizeAgentDocument(`<body>${Array.from({ length: 2100 }, (_, i) => `<body z${i}>`).join("")}`, o), "<body> over 2,048 merged attributes");
+  });
+
+  test("S4: a script with no source and no code is removed and does not set runsScripts", () => {
+    const outside = sanitizeAgentDocument(page('<script src="https://x.invalid/a.js"></script><p>t</p>'), on);
+    assert.equal(outside.ok, true);
+    assert.equal(outside.runsScripts, false);
+    assert.ok(!outside.html.includes("<script"), outside.html);
+    assert.deepEqual(outside.removed, [{ kind: "attribute:url:src", count: 1 }, { kind: "element:script-empty", count: 1 }]);
+    for (const empty of ["<script></script>", "<script> \n\t</script>", '<script src="//x.invalid/a.js" onload="go()"> </script>', '<svg><script href="https://x.invalid/a.js"></script></svg>']) {
+      const r = sanitizeAgentDocument(page(empty), on);
+      assert.equal(r.runsScripts, false, empty);
+      assert.ok(!r.html.includes("<script"), `${empty} -> ${r.html}`);
+      assert.ok(r.removed.some((x) => x.kind === "element:script-empty"), empty);
+    }
+    const inline = sanitizeAgentDocument(page('<script src="https://x.invalid/a.js">go()</script>'), on);
+    assert.equal(inline.runsScripts, true);
+    assert.ok(inline.html.includes("<script>go()</script>"), inline.html);
+    const asset = sanitizeAgentDocument(page(`<script src="${PREFIX}app.js"></script>`), on);
+    assert.equal(asset.runsScripts, true);
+    assert.ok(asset.html.includes(`<script src="${PREFIX}app.js"></script>`));
+    assert.deepEqual(asset.removed, []);
+    const frag = sanitizeAgentDocument(page('<svg><script href="#x"></script></svg>'), on);
+    assert.equal(frag.runsScripts, true, "a kept href on an svg script is a source");
+  });
+
+  test("(b) the benign S8 shape (a short script loop) passes", () => {
+    const r = sanitizeAgentDocument("<script>for(i=0;i<n;i++){ if(a>b) go(); } var s='a<b';</script>", on);
+    assert.equal(r.ok, true);
+    assert.equal(r.runsScripts, true);
+  });
+
+  test("(d) mutation check: the square matters (a linear charge would let a 2-second page through)", () => {
+    // 64 tags of 2,048 distinct attributes: each tag is AT the hard cap and the linear sum (131,072) is far below the budget, so
+    // only the square refuses it. parse5 needs ~10 ms per such tag, three passes: ~2 s per call (dev Mac). If someone drops
+    // the square (or charges max instead of sum), this test fails.
+    const h = Array.from({ length: 64 }, (_, k) => `<p ${names(2048).replace(/a/g, `t${k}_`)}>x</p>`).join("");
+    const st = agentDocumentStats(h);
+    assert.equal(st.maxAttributes, MAX_ATTRIBUTES_PER_TAG);
+    const linear = 64 * MAX_ATTRIBUTES_PER_TAG;
+    assert.ok(linear <= MAX_ATTRIBUTE_BUDGET, "a linear sum would pass the budget");
+    assert.equal(st.attributeCost, 64 * MAX_ATTRIBUTES_PER_TAG ** 2, "the cost is the sum of squares");
+    assert.equal(agentDocumentPrecheck(h), false);
+    // and the boundary: 1 tag at the cap passes, 2 do not
+    const two = Array.from({ length: 2 }, (_, k) => `<p ${names(2048).replace(/a/g, `t${k}_`)}>x</p>`).join("");
+    assert.equal(agentDocumentPrecheck(two), false);
+    assert.equal(agentDocumentPrecheck(two.slice(0, two.indexOf("</p>") + 4)), true);
   });
 });
 
