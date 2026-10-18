@@ -167,23 +167,70 @@ export function buildContext(
 }
 
 /**
+ * v0.1.31 (SDK-INSTANCE-GRANT): the life of the grant closures of ONE op run. They work only while the handler runs: they
+ * stop when the handler promise settles (`bind`), on the 30 s timeout and on a client disconnect (the signal aborts). A
+ * closure that app code stored in a global and calls later (another call, a timer) throws 409 `scope_grant_expired`.
+ */
+export interface OpLife {
+  assertOpen(): void;
+  close(): void;
+  /** closes when `handler` settles (either way) */
+  bind(handler: Promise<unknown>): void;
+}
+export function opLife(signal: AbortSignal): OpLife {
+  let open = true;
+  const close = () => {
+    open = false;
+  };
+  signal.addEventListener("abort", close, { once: true });
+  return {
+    assertOpen() {
+      if (!open || signal.aborted) throw new TbError("scope_grant_expired", "the operation that held this scope grant API has ended", 409);
+    },
+    close,
+    bind(handler) {
+      handler.then(close, close);
+    },
+  };
+}
+
+/** Why a grant may not go to `agent` right now, from the CURRENT verified slice (never a stale one); null = may. */
+export function grantRefusal(rt: Runtime, agent: string, now: number): { reason: string; message: string } | null {
+  if (rt.trust.stale(now)) throw new TbError("slice_stale", "instance slice missing or older than 12 h", 503);
+  const entry = rt.trust.agent(agent);
+  if (!entry) return { reason: "agent_not_in_slice", message: "the agent has no edge to this app" };
+  const p = rt.trust.paused(agent);
+  if (entry.status !== "active" || p.workspace || p.instance || p.agent) return { reason: "agent_paused", message: "the agent (or its workspace or this app) is paused or not active" };
+  return null;
+}
+
+/**
  * v0.1.31 (SDK-INSTANCE-GRANT, spec 0.1.47): `ctx.scopeGrants` of a live PERSON op. Called from exactly one place
  * (`handlePersonOp`, after the session and CSRF checks); agent, app, scheduled and public contexts never get it. Bounds and
  * the audit row live in `ScopeGrantOps` (scopes.ts); the "has an edge to this app" check reads the verified slice.
  */
-function personScopeGrants(rt: Runtime, principal: PersonPrincipal, opId: string, requestId: string): ScopeGrantApi {
-  const by = { principal, op: opId, callId: null, requestId, inSlice: (agent: string) => rt.trust.agent(agent) !== undefined };
+function personScopeGrants(rt: Runtime, principal: PersonPrincipal, opId: string, requestId: string, life: OpLife): ScopeGrantApi {
+  const by = { principal, op: opId, callId: null, requestId, refusal: (agent: string) => grantRefusal(rt, agent, Date.now()) };
   const ops = scopeGrantOps(rt.scopes);
   return {
-    grant: (agent, type, instanceId, access) => ops.appGrant(by, agent, type, instanceId, access),
-    revoke: (agent, type, instanceId) => ops.appRevoke(by, agent, type, instanceId),
+    grant: async (agent, type, instanceId, access) => {
+      life.assertOpen();
+      return ops.appGrant(by, agent, type, instanceId, access);
+    },
+    revoke: async (agent, type, instanceId) => {
+      life.assertOpen();
+      return ops.appRevoke(by, agent, type, instanceId);
+    },
   };
 }
 
 /** v0.1.31 (SDK-INSTANCE-GRANT): `ctx.scopeSelfRevoke` of a live AGENT call: removes only the calling agent's OWN row. */
-function agentSelfRevoke(rt: Runtime, opId: string, agentId: string, callId: CallId | null): NonNullable<OpContext["scopeSelfRevoke"]> {
+function agentSelfRevoke(rt: Runtime, opId: string, agentId: string, callId: CallId | null, life: OpLife): NonNullable<OpContext["scopeSelfRevoke"]> {
   const ops = scopeGrantOps(rt.scopes);
-  return (type, instanceId) => ops.selfRevoke(agentId, opId, callId, type, instanceId);
+  return async (type, instanceId) => {
+    life.assertOpen();
+    return ops.selfRevoke(agentId, opId, callId, type, instanceId);
+  };
 }
 
 /** AbortSignal for one handler run: client disconnect or 30 s op timeout (SDK-API §3.1). */
@@ -598,9 +645,11 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       const sig = opSignal(req, res);
       const ctx = buildContext(rt, op, caller, g, rt.scopes.view(callerId, viewAccess), callId, idemKey, body.context, rh.helpers, sig.signal);
       // v0.1.31 (SDK-INSTANCE-GRANT): only a live AGENT call (caller type from the verified grant) may narrow its own access
-      if (caller.type === "agent") ctx.scopeSelfRevoke = agentSelfRevoke(rt, op.id, callerId, callId);
+      const life = opLife(sig.signal);
+      if (caller.type === "agent") ctx.scopeSelfRevoke = agentSelfRevoke(rt, op.id, callerId, callId, life);
       const writeReceipt = approved !== null || op.receipt || (dyn !== null && eff.effect !== "read");
       const h = startHandler(rt, op, body.input, ctx, dyn);
+      life.bind(h.actual);
       // the key and the slot end with the HANDLER, not with the answer: a run that outlives the 30 s timeout or the
       // client keeps both reserved until it ends (a retry never starts a second run; SDK-07)
       handed = true;
@@ -968,8 +1017,10 @@ export async function handlePersonOp(rt: Runtime, req: IncomingMessage, res: Ser
       sig = opSignal(req, res);
       const ctx = buildContext(rt, op, caller, null, rt.scopes.view(null, null), null, idemKey, {}, rh.helpers, sig.signal, { ...rt.extras(), workspace: principal.ws });
       // v0.1.31 (SDK-INSTANCE-GRANT): THE one place ctx.scopeGrants is set: a live person op (verified session + CSRF + the owner's confirm)
-      ctx.scopeGrants = personScopeGrants(rt, principal, op.id, rid);
+      const life = opLife(sig.signal);
+      ctx.scopeGrants = personScopeGrants(rt, principal, op.id, rid, life);
       const h = startHandler(rt, op, input, ctx, null);
+      life.bind(h.actual);
       const lease = idem;
       idem = null;
       h.actual.then(

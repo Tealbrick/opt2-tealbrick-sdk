@@ -612,6 +612,7 @@ describe("A18 SDK-INSTANCE-GRANT (conformance 0.1.22)", () => {
     const c = st(r, "A18.scope_grant_ceiling");
     assert.equal(c?.status, "fail");
     assert.match(c?.asserted ?? "", /did not enforce the agent ceiling/);
+    assert.match(c?.asserted ?? "", /scope rows changed: .*none -> manage\|app\|scope_grant/);
     assert.equal(st(r, "A18.scope_grant_within")?.status, "pass");
   });
 
@@ -626,7 +627,45 @@ describe("A18 SDK-INSTANCE-GRANT (conformance 0.1.22)", () => {
   it("fire-on-bad: a grant row without source/grantedByOp fails A18.scope_grant_within", async () => {
     const r = await runG({ scopeGrantNoSource: true });
     assert.equal(st(r, "A18.scope_grant_within")?.status, "fail");
-    assert.match(st(r, "A18.scope_grant_within")?.asserted ?? "", /lists no scope row with source "app"/);
+    assert.match(st(r, "A18.scope_grant_within")?.asserted ?? "", /gained no row with source "app" and grantedByOp "scope_grant"/);
+  });
+
+  it("fire-on-bad: an SDK that clamps an above-ceiling grant to the ceiling and answers 200 fails A18.scope_grant_ceiling (levels compared)", async () => {
+    const r = await runG({ scopeGrantClamps: true });
+    const c = st(r, "A18.scope_grant_ceiling");
+    assert.equal(c?.status, "fail");
+    assert.match(c?.asserted ?? "", /200 ok.*scope rows changed:.*-> read_write\|app\|scope_grant/);
+  });
+
+  it("fire-on-bad: an SDK that writes another level than the one granted fails A18.scope_grant_within", async () => {
+    const r = await runG({ scopeGrantWrongLevel: true });
+    const c = st(r, "A18.scope_grant_within");
+    assert.equal(c?.status, "fail");
+    assert.match(c?.asserted ?? "", /access "read" but the input granted "read_write"/);
+  });
+
+  it("a grant row that already existed identically is not mistaken for a NEW row (not_run); an owner row it overwrites is put back (pass)", async () => {
+    const pre = parseConformanceConfig(
+      {
+        setup: [{ id: "pre", as: "owner", op: "scope_grant", input: { agent: "${tb.agentA}", id: "space-draft", access: "read_write" } }],
+        scopeGrantOp: { op: "scope_grant", input: { agent: "${tb.agentA}", id: "space-draft", access: "read_write" }, aboveCeiling: { agent: "${tb.agentA}", id: "space-draft", access: "manage" } },
+      },
+      "test config",
+    );
+    const r = await runG({}, pre);
+    assert.equal(st(r, "A18.scope_grant_within")?.status, "not_run", st(r, "A18.scope_grant_within")?.asserted);
+    assert.match(st(r, "A18.scope_grant_within")?.asserted ?? "", /already existed.*cannot be told from it/);
+    const owner = parseConformanceConfig(
+      {
+        setup: [{ id: "pre", as: "owner", op: "tb.scopes_set", input: { agent: "${tb.agentA}", type: "space", id: "space-draft", access: "read" } }],
+        scopeGrantOp: { op: "scope_grant", input: { agent: "${tb.agentA}", id: "space-draft", access: "read_write" }, aboveCeiling: { agent: "${tb.agentA}", id: "space-draft", access: "manage" } },
+      },
+      "test config",
+    );
+    const r2 = await runG({}, owner);
+    assert.equal(st(r2, "A18.scope_grant_within")?.status, "pass", st(r2, "A18.scope_grant_within")?.asserted);
+    assert.match(st(r2, "A18.scope_grant_within")?.asserted ?? "", /replaced read\|owner\|-/);
+    assert.equal(st(r2, "A18.scope_grant_ceiling")?.status, "pass", st(r2, "A18.scope_grant_ceiling")?.asserted);
   });
 
   it("without an agentProbe the agent check still proves the agent route refuses the person op", async () => {

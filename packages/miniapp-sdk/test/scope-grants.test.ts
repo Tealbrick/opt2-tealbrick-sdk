@@ -7,6 +7,7 @@ import type { Manifest, Scope } from "@opt2-tealbrick/spec/manifest";
 import type { Json, OpContext, PersonPrincipal, RunningApp } from "@opt2-tealbrick/spec/sdk";
 import { createAuditLog } from "../src/server/audit.ts";
 import { defineApp, startApp, TbError } from "../src/server/index.ts";
+import { grantRefusal, opLife } from "../src/server/ops.ts";
 import { createScopeStore, scopeGrantOps } from "../src/server/scopes.ts";
 import { openStore, SDK_MIGRATIONS } from "../src/server/store.ts";
 import { fixtureManifest } from "./fixtures/manifest.ts";
@@ -40,7 +41,7 @@ function manifestWithManage(port: number): Manifest {
     receipt: false,
     audience: "person" as const,
   });
-  m.operations.push(person("draft_start", "Start draft"), person("draft_unshare", "Unshare draft"), person("scope_probe_person", "Probe grants"));
+  m.operations.push(person("draft_start", "Start draft"), person("draft_unshare", "Unshare draft"), person("scope_probe_person", "Probe grants"), person("closure_stash", "Stash closures"));
   const agent = (id: string, title: string, effect: "read" | "write", crud: ("read" | "update")[]) => ({
     id,
     title,
@@ -56,6 +57,9 @@ function manifestWithManage(port: number): Manifest {
   m.operations.push(agent("scope_probe", "Probe agent ctx", "read", ["read"]), { ...agent("scope_leave", "Leave draft", "write", ["update"]), idempotency: "supported" as const });
   return m;
 }
+
+/** What a careless app could do: keep the grant closures (and the op signal) in a global and call them later. */
+const stash: { grants?: OpContext["scopeGrants"]; self?: OpContext["scopeSelfRevoke"]; signal?: AbortSignal; release?: () => void } = {};
 
 function testApp(port: number, migrations: string) {
   return defineApp({
@@ -77,9 +81,16 @@ function testApp(port: number, migrations: string) {
         await ctx.scopeGrants?.revoke(i.agent as never, "notebook", i.id);
         return { ok: true };
       },
+      closure_stash: async (input, ctx: OpContext) => {
+        stash.grants = ctx.scopeGrants;
+        stash.signal = ctx.signal;
+        if ((input as { hang?: boolean }).hang) await new Promise<void>((res) => (stash.release = res));
+        return { ok: true };
+      },
       scope_probe_person: async (_input, ctx: OpContext) => ({ grants: ctx.scopeGrants !== undefined, self: typeof ctx.scopeSelfRevoke }),
       scope_probe: async (_input, ctx: OpContext) => ({ grants: ctx.scopeGrants !== undefined, self: typeof ctx.scopeSelfRevoke, caller: ctx.caller.type }),
       scope_leave: async (input, ctx: OpContext) => {
+        stash.self = ctx.scopeSelfRevoke;
         await ctx.scopeSelfRevoke?.("notebook", (input as { id: string }).id);
         return { ok: ctx.scopeSelfRevoke !== undefined };
       },
@@ -274,15 +285,127 @@ describe("SDK-INSTANCE-GRANT", () => {
     assert.equal(await b.running.scopes.access(b.w.agents.a, "notebook", "d4"), null);
     assert.equal((await b.running.scopes.access(b.w.agents.b, "notebook", "d4"))?.access, "read", "another agent's row is untouched");
     const last = (await audit())[0];
-    assert.equal(last?.actor, "system");
+    assert.equal(last?.actor, b.w.agents.a, "S4b: the agent is the actor of its own narrowing");
     assert.equal(det(last).source, "agent_self");
     assert.equal((await audit()).length, before + 1);
+  });
+
+  // ── S3: the closures live only while the op runs ─────────────────────────────────────────────────────────────────
+  const held = (): typeof stash => stash;
+  const expired = (e: unknown) => e instanceof TbError && e.code === "scope_grant_expired" && e.httpStatus === 409;
+  test("S3: a person-op closure stored in a global throws scope_grant_expired after the op ended (grant and revoke)", async () => {
+    await personOp(b, s, "tb.scopes_set", { agent: b.w.agents.a, type: "notebook", id: "d5", access: null }); // no-op, session warm
+    stash.grants = undefined;
+    const r = await personOp(b, s, "closure_stash", {});
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.ok(stash.grants, "the closure existed during the op");
+    await b.running.scopes.instances.create("notebook", "d5", "D5");
+    const before = (await audit()).length;
+    await assert.rejects(held().grants?.grant(b.w.agents.a as never, "notebook", "d5", "read_write") as Promise<unknown>, expired);
+    await assert.rejects(held().grants?.revoke(b.w.agents.a as never, "notebook", "d5") as Promise<void>, expired);
+    // the agent's later call cannot use it either
+    await agentOp(b, "scope_probe", {}, { agent: b.w.agents.a });
+    await assert.rejects(held().grants?.grant(b.w.agents.a as never, "notebook", "d5", "read_write") as Promise<unknown>, expired);
+    assert.equal(await b.running.scopes.access(b.w.agents.a, "notebook", "d5"), null, "nothing was written");
+    assert.equal((await audit()).length, before, "nothing was audited");
+  });
+
+  test("S3: after a client disconnect the closure of the still-running handler throws scope_grant_expired", async () => {
+    stash.grants = undefined;
+    stash.release = undefined;
+    const ac = new AbortController();
+    const call = fetch(`${b.base}/a/${PRODUCT}/tb/v1/ops/closure_stash`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: s.cookie, "tb-csrf": s.csrf, origin: b.base },
+      body: JSON.stringify({ input: { hang: true } }),
+      signal: ac.signal,
+    }).catch(() => null);
+    await until(async () => (stash.release ? true : null));
+    // while the op runs the closure works
+    await b.running.scopes.instances.create("notebook", "d6", "D6");
+    const live = await held().grants?.grant(b.w.agents.b as never, "notebook", "d6", "read");
+    assert.equal(live?.access, "read");
+    ac.abort();
+    await call;
+    await until(async () => (held().signal?.aborted ? true : null));
+    await assert.rejects(held().grants?.grant(b.w.agents.b as never, "notebook", "d6", "read_write") as Promise<unknown>, expired);
+    await assert.rejects(held().grants?.revoke(b.w.agents.b as never, "notebook", "d6") as Promise<void>, expired);
+    assert.equal((await b.running.scopes.access(b.w.agents.b, "notebook", "d6"))?.access, "read", "the row from the live phase is untouched");
+    held().release?.();
+  });
+
+  test("S3: the agent closure scopeSelfRevoke throws scope_grant_expired after the agent call ended", async () => {
+    await personOp(b, s, "draft_start", { agent: b.w.agents.a, id: "d7", access: "read_write" });
+    stash.self = undefined;
+    const r = await agentOp(b, "scope_leave", { id: "d7" }, { agent: b.w.agents.a });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    await personOp(b, s, "draft_start", { agent: b.w.agents.a, id: "d7", create: false, access: "read_write" });
+    await assert.rejects(held().self?.("notebook", "d7") as Promise<void>, expired);
+    assert.equal((await b.running.scopes.access(b.w.agents.a, "notebook", "d7"))?.access, "read_write", "the late call removed nothing");
+  });
+
+  test("S3: opLife closes on the handler settling, on the timeout abort and on the disconnect abort", async () => {
+    const t = new AbortController();
+    const life = opLife(t.signal);
+    life.assertOpen();
+    t.abort(new TbError("app_timeout", "operation timed out", 504));
+    assert.throws(() => life.assertOpen(), expired);
+    const d = new AbortController();
+    const l2 = opLife(d.signal);
+    d.abort(new TbError("client_closed", "client disconnected", 499));
+    assert.throws(() => l2.assertOpen(), expired);
+    let done!: () => void;
+    const l3 = opLife(new AbortController().signal);
+    l3.bind(new Promise<void>((res) => (done = res)));
+    l3.assertOpen();
+    done();
+    await new Promise((r) => setImmediate(r));
+    assert.throws(() => l3.assertOpen(), expired);
+    const l4 = opLife(new AbortController().signal);
+    l4.bind(Promise.reject(new Error("handler failed")));
+    await new Promise((r) => setImmediate(r));
+    assert.throws(() => l4.assertOpen(), expired);
+  });
+
+  // ── S4a: no grant to an agent that is paused, not active or gone; the CURRENT slice decides ──────────────────────
+  const tryGrant = (agent: string, id: string) => personOp(b, s, "draft_start", { agent, id, access: "read" });
+  const setSlice = async (over: Parameters<typeof slice>[2], agent: string, want: (r: { status: number; body: Record<string, any> }) => boolean) => {
+    b.bridge.push(await slice(b.w, PRODUCT, over));
+    await until(async () => (want(await tryGrant(agent, "pz")) ? true : null));
+  };
+  const refusedWith = (reason: string) => (r: { status: number; body: Record<string, any> }) => r.status === 400 && r.body.error?.code === "scope_grant_invalid" && r.body.error?.details?.reason === reason;
+  const granted = (r: { status: number }) => r.status === 200;
+  const both = (statusB: "active" | "paused") => [
+    { id: b.w.agents.a, name: "Agent A", mode: "free" as const, status: "active" as const },
+    { id: b.w.agents.b, name: "Agent B", mode: "free" as const, status: statusB },
+  ];
+  test("S4a: an agent that is paused (status, pause list, instance pause, workspace pause) or removed gets no grant; a free agent still does", async () => {
+    try {
+      await setSlice({ agents: both("paused") }, b.w.agents.b, refusedWith("agent_paused"));
+      assert.equal(await b.running.scopes.access(b.w.agents.b, "notebook", "pz"), null);
+      await setSlice({ pause: { workspace: false, agents: [b.w.agents.b], instances: [] } }, b.w.agents.b, refusedWith("agent_paused"));
+      await setSlice({ pause: { workspace: false, agents: [], instances: [b.w.ins] } }, b.w.agents.b, refusedWith("agent_paused"));
+      await setSlice({ pause: { workspace: true, agents: [], instances: [] } }, b.w.agents.b, refusedWith("agent_paused"));
+      await setSlice({ agents: [{ id: b.w.agents.a, name: "Agent A", mode: "free", status: "active" }] }, b.w.agents.b, refusedWith("agent_not_in_slice"));
+      // quiet-on-good: agent A (active, edge, no pause) is granted under the same slice
+      assert.equal((await tryGrant(b.w.agents.a, "pz")).status, 200);
+    } finally {
+      await setSlice({}, b.w.agents.b, granted);
+    }
+    assert.equal((await b.running.scopes.access(b.w.agents.b, "notebook", "pz"))?.access, "read", "the free agent is granted again");
+  });
+
+  test("S4a: an expired slice refuses the grant (slice_stale 503), the decision never reads a stale slice", () => {
+    const rtStale = { trust: { stale: () => true, agent: () => ({ id: "agt_x", status: "active" }), paused: () => ({ workspace: false, instance: false, agent: false }) } } as never;
+    assert.throws(() => grantRefusal(rtStale, "agt_x", Date.now()), (e: unknown) => e instanceof TbError && e.code === "slice_stale" && e.httpStatus === 503);
+    const rtFresh = { trust: { stale: () => false, agent: () => ({ id: "agt_x", status: "active" }), paused: () => ({ workspace: false, instance: false, agent: false }) } } as never;
+    assert.equal(grantRefusal(rtFresh, "agt_x", Date.now()), null);
   });
 });
 
 describe("SDK-INSTANCE-GRANT: store level", () => {
   const person = { type: "person", id: "per_x", ws: "ws_x", instance: "ins_x" } as unknown as PersonPrincipal;
-  const by = (inSlice = true) => ({ principal: person, op: "o", callId: null, requestId: "req_1", inSlice: () => inSlice });
+  const by = (inSlice = true) => ({ principal: person, op: "o", callId: null, requestId: "req_1", refusal: () => (inSlice ? null : { reason: "agent_not_in_slice", message: "no edge" }) });
   function store(defaults: Scope["defaultGrants"]) {
     const t = tempDir();
     const db = openStore(t.dir);

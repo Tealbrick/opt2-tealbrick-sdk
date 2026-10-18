@@ -70,8 +70,11 @@ export interface GrantBy {
   callId: string | null;
   /** the request id of the person op call (a person op has no call id) */
   requestId: string | null;
-  /** true when the agent is in the verified slice (= has an edge to this app) */
-  inSlice(agent: string): boolean;
+  /**
+   * Why this agent may not be granted right now, from the CURRENT verified slice (null = may): not in the slice (no edge),
+   * or paused / not active (agent status or the workspace, instance or agent pause lists). Throws when the slice is expired.
+   */
+  refusal(agent: string): { reason: string; message: string } | null;
 }
 
 export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog, onChange: () => void): ScopeStoreInternals {
@@ -267,7 +270,8 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
       const cc = crudOf(type, ceiling);
       if (rank(type, access) > rank(type, ceiling) || !crudOf(type, access).every((c) => cc.includes(c)))
         throw bad("above_ceiling", `access level ${access} is above the agent ceiling ${ceiling}`);
-      if (!by.inSlice(agent)) throw bad("agent_not_in_slice", "the agent has no edge to this app");
+      const refused = by.refusal(agent);
+      if (refused) throw bad(refused.reason, refused.message);
       db.prepare(
         `INSERT INTO tb_scopes (agent, type, instance_id, access, source, granted_by_op) VALUES (?, ?, ?, ?, 'app', ?)
          ON CONFLICT (agent, type, instance_id) DO UPDATE SET access = excluded.access, source = 'app', granted_by_op = excluded.granted_by_op`,
@@ -299,7 +303,8 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
       const r = db.prepare("DELETE FROM tb_scopes WHERE agent = ? AND type = ? AND instance_id = ?").run(agent, type, instanceId);
       if (Number(r.changes ?? 0) === 0) return;
       await audit.record({
-        actor: "system",
+        // the agent narrowed its own access: it is the actor (AuditEntry.actor is typed for people, but the column is text)
+        actor: agent as never,
         action: "scope.set",
         target: agent,
         detail: { type, instance: instanceId, access: null, source: "agent_self", op, callId },

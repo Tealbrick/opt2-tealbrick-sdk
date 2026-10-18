@@ -129,6 +129,10 @@ export interface MiniAppFaults {
   scopeGrantNoCeiling?: boolean;
   /** spec 0.1.47: the agent probe op `scope_probe` reports ctx.scopeGrants on an AGENT call (fails A18.scope_grant_agent_absent) */
   scopeGrantsOnAgent?: boolean;
+  /** spec 0.1.47: a grant above the ceiling is not refused but clamped to the ceiling level and answered 200 (fails A18.scope_grant_ceiling: a level changed) */
+  scopeGrantClamps?: boolean;
+  /** spec 0.1.47: the grant row gets the lowest level whatever was asked (fails A18.scope_grant_within: wrong level) */
+  scopeGrantWrongLevel?: boolean;
   /** spec 0.1.47: the grant row is written without source / grantedByOp (fails A18.scope_grant_within) */
   scopeGrantNoSource?: boolean;
   /** package 0.1.15 (NOT a fault, Knowledge-like): the recall output also carries a status array `areas` next to `items` */
@@ -701,7 +705,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
         break;
       case "tb.scopes_set": {
         st.scopes = st.scopes.filter((r) => !(r.agent === input.agent && r.type === input.type && r.instanceId === input.id));
-        if (input.access !== null) st.scopes.push({ agent: String(input.agent), type: String(input.type), instanceId: String(input.id), access: String(input.access) });
+        if (input.access !== null) st.scopes.push({ agent: String(input.agent), type: String(input.type), instanceId: String(input.id), access: String(input.access), source: "owner" });
         out = { access: input.access as Json };
         break;
       }
@@ -710,9 +714,12 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
         const sc = manifest.scopes?.find((x) => x.type === "space");
         const rank = (lvl: string) => levelCrud("space", lvl).length * 1000 + (sc?.access.findIndex((a) => a.id === lvl) ?? -1);
         const ceiling = (sc?.defaultGrants ?? []).filter((g) => !g.callers || g.callers.includes("agent")).map((g) => g.access).sort((x, y) => rank(y) - rank(x))[0];
-        const lvl = String(input.access);
+        let lvl = String(input.access);
         if (!sc?.access.some((a) => a.id === lvl)) throw new E(400, "scope_grant_invalid");
-        if (!faults.scopeGrantNoCeiling && (ceiling === undefined || rank(lvl) > rank(ceiling))) throw new E(400, "scope_grant_invalid");
+        const above = ceiling === undefined || rank(lvl) > rank(ceiling);
+        if (above && faults.scopeGrantClamps && ceiling !== undefined) lvl = ceiling;
+        else if (!faults.scopeGrantNoCeiling && above) throw new E(400, "scope_grant_invalid");
+        if (faults.scopeGrantWrongLevel) lvl = sc?.access[0]?.id ?? lvl;
         if (!(slice?.agents ?? []).some((a) => a.id === input.agent)) throw new E(400, "scope_grant_invalid");
         st.scopes = st.scopes.filter((r) => !(r.agent === input.agent && r.type === "space" && r.instanceId === input.id));
         st.scopes.push({ agent: String(input.agent), type: "space", instanceId: String(input.id), access: lvl, ...(faults.scopeGrantNoSource ? {} : { source: "app", grantedByOp: "scope_grant" }) });
