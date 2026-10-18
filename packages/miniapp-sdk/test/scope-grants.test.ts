@@ -382,6 +382,9 @@ describe("SDK-INSTANCE-GRANT", () => {
   test("S4a: an agent that is paused (status, pause list, instance pause, workspace pause) or removed gets no grant; a free agent still does", async () => {
     try {
       await setSlice({ agents: both("paused") }, b.w.agents.b, refusedWith("agent_paused"));
+      // the polling above may have granted before the new slice arrived: clear, then prove a refused try writes nothing
+      await personOp(b, s, "tb.scopes_set", { agent: b.w.agents.b, type: "notebook", id: "pz", access: null });
+      assert.ok(refusedWith("agent_paused")(await tryGrant(b.w.agents.b, "pz")));
       assert.equal(await b.running.scopes.access(b.w.agents.b, "notebook", "pz"), null);
       await setSlice({ pause: { workspace: false, agents: [b.w.agents.b], instances: [] } }, b.w.agents.b, refusedWith("agent_paused"));
       await setSlice({ pause: { workspace: false, agents: [], instances: [b.w.ins] } }, b.w.agents.b, refusedWith("agent_paused"));
