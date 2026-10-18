@@ -24,9 +24,9 @@ export interface ContextExtras {
  * v0.1.32 (Coordinator decision for Connect): `listed` on APP callers = the verified caller instance is in the CURRENT signed
  * slice `companionCallers` under the SAME verified product as `caller.product`; false when the slice is stale or the caller
  * is not listed (or listed under another product). ABSENT (no key) on person and agent callers.
- * SPEC-GAP: spec 0.1.49 Caller.listed - not in the 0.1.48 types; read it as `(ctx.caller as SdkCaller).listed`.
+ * Typed in spec 0.1.49 (`Caller.listed`); `SdkCaller` stays exported as an alias for code written against the 0.1.48 types.
  */
-export type SdkCaller = Caller & { listed?: boolean };
+export type SdkCaller = Caller;
 export type SdkOpContext = OpContext & { caller: SdkCaller } & ContextExtras & CompanionTargetsView & JobsView;
 export type SdkHookContext = HookContext & { secrets: AppSecrets };
 export type SdkPublicContext = Parameters<PublicHandler>[1] & ContextExtras;
