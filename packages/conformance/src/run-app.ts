@@ -213,6 +213,7 @@ export async function runApp(opts: RunAppOptions): Promise<Report> {
       setup: config.setup,
       dynamic: config.dynamic,
       ...(config.narrowing ? { narrowing: config.narrowing } : {}),
+      ...(config.scopeGrantOp ? { scopeGrantOp: config.scopeGrantOp } : {}),
       ...(prepared.length > 0
         ? { multi: (driver) => runPeerChecks({ suite: s, deps, app: { manifest: manifest as Manifest, bridge, driver, timeoutMs }, prepared, config, testRoots, notes }) }
         : {}),
