@@ -16,6 +16,7 @@ Next release adds (C53):
 ## 0.1.36 (unreleased)
 
 - **Scheduled-op fire reads the op's `listing` (C283b item 2).** `fireScheduledOp` now passes the op's `listing` to `opInGrantWorkflow`, exactly like `gate()`: an op with `listing: "workflow"` fires only when the grant's `wf` names it, in any mode. Before, an agent with a Free grant and an empty `wf` could schedule such an op and it ran at fire time, while a live call of the same op was refused `not_in_workflow`. Now the fire is refused `not_in_workflow` (refused receipt, handler never runs). Ops without a `listing` are unchanged.
+- Tests: four gaps from the sdk#34 review. A stored scope authority that is not exactly `owner` (other case, other text, NULL) reads bounded (G1); a scheduled fire refuses `caller_unverified` (G2) and reads the scope row's authority like a live call, so a bounded row never lifts the stored grant (G3); `scope_summary` and the catalog mark nothing for an agent whose slice status is not `active` (G4). No change in `src/`.
 
 ## 0.1.35 (C283 A1): the owner-set access row is primary (spec 0.1.50, C277)
 

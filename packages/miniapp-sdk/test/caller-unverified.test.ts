@@ -5,11 +5,15 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, before, describe, test } from "node:test";
-import { signGrant, ulid } from "@opt2-tealbrick/manifest";
+import { keySetFrom, signGrant, ulid } from "@opt2-tealbrick/manifest";
 import type { InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { Json, OpContext, PersonPrincipal, RunningApp } from "@opt2-tealbrick/spec/sdk";
 import { decideHold, defineApp, startApp } from "../src/server/index.ts";
-import { CALLER_UNVERIFIED_MESSAGE, callerUnverified } from "../src/server/ops.ts";
+import type { ClaimedJob } from "../src/server/jobs.ts";
+import { CALLER_UNVERIFIED_MESSAGE, callerUnverified, fireScheduledOp } from "../src/server/ops.ts";
+import type { Runtime } from "../src/server/runtime.ts";
+import { applySdkMigrations, openDb } from "../src/server/store.ts";
+import { TrustState } from "../src/server/trust.ts";
 import { fixtureManifest } from "./fixtures/manifest.ts";
 import { callProof, FakeBridge, freePort, grant, migrationsDir, nowS, slice, tempDir, testRoots, until, type World, world } from "./helpers.ts";
 
@@ -32,24 +36,33 @@ async function boot(): Promise<Booted> {
   const bridge = new FakeBridge(w);
   const bridgeUrl = await bridge.start(await slice(w, PRODUCT));
   const ran = { note_delete: 0 };
-  const running = await startApp(
-    defineApp({
-      manifest: fixtureManifest(port),
-      migrations: migrationsDir(t.dir),
-      handlers: {
-        note_create: { scope: (input) => String((input as { notebook: string }).notebook), run: async () => ({ id: "n" }) },
-        note_get: async (_input, ctx: OpContext) => ({ type: ctx.caller.type, product: ctx.caller.product ?? null }) as Json,
-        note_delete: async () => {
-          ran.note_delete += 1;
-          return { deleted: true };
+  // a boot that fails must not leave the bridge or the app listening: an open handle would keep the test process alive for ever
+  let running: RunningApp | undefined;
+  try {
+    running = await startApp(
+      defineApp({
+        manifest: fixtureManifest(port),
+        migrations: migrationsDir(t.dir),
+        handlers: {
+          note_create: { scope: (input) => String((input as { notebook: string }).notebook), run: async () => ({ id: "n" }) },
+          note_get: async (_input, ctx: OpContext) => ({ type: ctx.caller.type, product: ctx.caller.product ?? null }) as Json,
+          note_delete: async () => {
+            ran.note_delete += 1;
+            return { deleted: true };
+          },
+          notebook_rename: async () => ({}),
         },
-        notebook_rename: async () => ({}),
-      },
-    }),
-    { TB_INSTANCE_ID: w.ins, TB_ENROL_CODE: "tbe_test", TB_BRIDGE_URL: bridgeUrl, TB_PORTAL_KEYS: JSON.stringify({ keys: [w.portal.publicJwk] }), TB_DATA_DIR: t.dir, TB_DATA_EPHEMERAL: "1", TB_LOG_LEVEL: "error" },
-    testRoots(w),
-  );
-  await until(async () => running.status() === "ok");
+      }),
+      { TB_INSTANCE_ID: w.ins, TB_ENROL_CODE: "tbe_test", TB_BRIDGE_URL: bridgeUrl, TB_PORTAL_KEYS: JSON.stringify({ keys: [w.portal.publicJwk] }), TB_DATA_DIR: t.dir, TB_DATA_EPHEMERAL: "1", TB_LOG_LEVEL: "error" },
+      testRoots(w),
+    );
+    await until(async () => running?.status() === "ok");
+  } catch (e) {
+    await running?.stop().catch(() => {});
+    await bridge.stop();
+    t.cleanup();
+    throw e;
+  }
   return {
     w,
     bridge,
@@ -210,5 +223,99 @@ describe("C261 caller_unverified", () => {
     assert.equal(callerUnverified(rt("verified"), { type: "person" }), false);
     assert.equal(callerUnverified(rt(undefined), { type: "app" }), false);
     assert.equal(callerUnverified(rt("lenient"), { type: "app" }), false);
+  });
+});
+
+// v0.1.36 gap G2 (sdk#34 review): fireScheduledOp refuses `caller_unverified` itself. Through a whole app the line cannot be reached
+// from outside: a fire first needs the caller in the slice `companionCallers` (else `grant_revoked`), and a listed caller always has a
+// product (the entry's own). So the guard is tested where it lives: fireScheduledOp with a real grant, a real TrustState and a runtime
+// stub that stops the run (a sentinel) at the first thing the fire does AFTER the guard. The only way to see the product missing at
+// that point is a trust state that lists the caller but answers no product, which is what the guard defends against.
+describe("C261 caller_unverified: a scheduled fire (v0.1.36 gap G2)", { timeout: 60_000 }, () => {
+  const PAST_GUARD = new Error("past the caller_unverified guard");
+  const BRG = "brg_00000000000000000000000000";
+
+  async function fire(opts: { verified: boolean; product: string | undefined; prd?: string }) {
+    const w = await world();
+    const t = tempDir();
+    try {
+      const db = openDb(t.dir);
+      applySdkMigrations(db);
+      const ins = `ins_${ulid()}` as InstanceId;
+      class T extends TrustState {
+        // a trust context that accepts the Portal-signed grant below (what a slice would give), without a slice
+        override context(nowMs: number) {
+          return { now: Math.floor(nowMs / 1000), self: this.self, ws: w.ws, bridge: BRG as never, issuers: keySetFrom({ keys: [w.portal.publicJwk] }, "tb:portal"), bridgeKeys: { keys: [] }, revokedJtis: new Set<string>() };
+        }
+        override appCallersVerified(): boolean {
+          return opts.verified;
+        }
+        // the caller IS listed (the grant_revoked check passes) ...
+        override companionCallers() {
+          return [{ product: "listed", ins, name: "Evolution", provider: null }];
+        }
+        // ... but the trust state answers no product for it (what the guard defends against)
+        override companionProduct(): string | undefined {
+          return opts.product;
+        }
+      }
+      const trust = new T(db, w.ins, { bootstrap: null, alone: { ws: w.ws, ownKey: w.portal.publicJwk } });
+      const token = await signGrant(
+        { iss: "tb:portal", sub: `tb:ins:${ins}`, aud: `tb:ins:${w.ins}`, iat: nowS(), ws: w.ws, cnf: { brg: BRG }, crud: ["read", "delete"], mode: "bound", held: [], caps: {}, wf: ["note_delete"], polrev: 1, ...(opts.prd ? { prd: opts.prd } : {}) } as never,
+        w.portal,
+      );
+      const op = { id: "note_delete", title: "Delete note", standard: false, crud: ["delete"], effect: "destructive", audience: "agent", receipt: true };
+      const receipts: { status: string; meta: { reason?: string; scheduled?: string }; caller: { id: string; type: string } }[] = [];
+      let ran = 0;
+      let pastGuard = 0;
+      const rt = {
+        cfg: { standalone: true },
+        trust,
+        ops: new Map([["note_delete", op]]),
+        def: { handlers: { note_delete: async () => { ran += 1; return {}; } } },
+        sealer: { unsealText: () => token },
+        log: { warn: () => {} },
+        statusChanged: () => {},
+        receipts: {
+          insert: (r: never) => receipts.push(r),
+          // the first thing the fire touches after the guard, the workflow check and the scope step
+          findApproved: () => {
+            pastGuard += 1;
+            throw PAST_GUARD;
+          },
+        },
+      } as unknown as Runtime;
+      const job = { id: "job_1", op: "note_delete", input: { id: "x" }, key: "k_scheduled_1", caller: { type: "app", id: ins, name: "Evolution" }, callerMode: "bound", grantSealed: "sealed", holdId: null } as unknown as ClaimedJob;
+      const outcome = await fireScheduledOp(rt, job, new AbortController().signal).then((o) => ({ o }), (e: unknown) => ({ e }));
+      db.close();
+      return { outcome, receipts, ran, pastGuard, ins };
+    } finally {
+      t.cleanup();
+    }
+  }
+
+  test("fires on bad: with appCallers: verified and no product for the app caller, the fire is refused caller_unverified, the handler never runs, one refused receipt", { timeout: 60_000 }, async () => {
+    const r = await fire({ verified: true, product: undefined });
+    assert.equal("e" in r.outcome ? String(r.outcome.e) : "", "", "the fire returned an outcome (the guard stopped it before anything else ran)");
+    assert.deepEqual("o" in r.outcome ? r.outcome.o : null, { kind: "refused", reason: "caller_unverified" });
+    assert.equal(r.pastGuard, 0);
+    assert.equal(r.ran, 0, "the handler never ran");
+    assert.equal(r.receipts.length, 1);
+    assert.equal(r.receipts[0]?.status, "refused");
+    assert.deepEqual(r.receipts[0]?.meta, { reason: "caller_unverified", scheduled: "job_1" });
+    assert.equal(r.receipts[0]?.caller.id, r.ins);
+  });
+
+  test("quiet on good: the same fire proceeds past the guard with a product (slice), with a product (grant prd), and without the flag", { timeout: 60_000 }, async () => {
+    for (const c of [
+      { verified: true, product: "listed" },
+      { verified: true, product: undefined, prd: "listed" },
+      { verified: false, product: undefined },
+    ]) {
+      const r = await fire(c);
+      assert.equal(r.pastGuard, 1, `${JSON.stringify(c)} reaches the step after the guard`);
+      assert.ok("e" in r.outcome && r.outcome.e === PAST_GUARD, "stopped by the sentinel, not by a refusal");
+      assert.equal(r.receipts.length, 0);
+    }
   });
 });
