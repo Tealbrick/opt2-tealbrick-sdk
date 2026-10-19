@@ -1,6 +1,7 @@
 // Client state without React: the session store (GET …/tb/v1/session → principal + CSRF; POST …/tb/v1/logout) and
 // the standard person ops behind useHolds / useScopes / useAgents (SDK-API §6, §14).
 import type { AgentId, Ulid } from "@opt2-tealbrick/spec/credentials";
+import type { CrudAction } from "@opt2-tealbrick/spec/manifest";
 import type { Json, PersonPrincipal, Receipt, ScopeGrantRow, SessionInfo, SliceAgent } from "@opt2-tealbrick/spec/sdk";
 import { TbError } from "../server/errors.ts";
 import { callOp, setCsrf, setCsrfLoader, setIdempotencyRequired, tbFetch } from "./fetch.ts";
@@ -112,4 +113,9 @@ export function scopeRows(agents: readonly AgentWithAccess[], agent?: AgentId): 
 /** `tb.scopes_set` (`access: null` removes the row). */
 export async function setScope(agent: AgentId, type: string, instanceId: string, access: string | null): Promise<void> {
   await callOp("tb.scopes_set", { agent, type, id: instanceId, access });
+}
+
+/** `tb.scopes_set` with `acceptOffer` (v0.1.52): accept a row's `offer.adds` at the SAME level. Call it only on the owner's click. */
+export async function acceptScopeOffer(agent: AgentId, type: string, instanceId: string, level: string, adds: CrudAction[]): Promise<void> {
+  await callOp("tb.scopes_set", { agent, type, id: instanceId, access: level, acceptOffer: { adds } });
 }

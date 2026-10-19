@@ -30,7 +30,7 @@
   },
   "dependencies": {
     "@opt2-tealbrick/manifest": "workspace:*",
-    "@opt2-tealbrick/spec": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.50/opt2-tealbrick-spec-0.1.50.tgz",
+    "@opt2-tealbrick/spec": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.52/opt2-tealbrick-spec-0.1.52.tgz",
     "parse5": "8.0.1"
   },
   "peerDependencies": {

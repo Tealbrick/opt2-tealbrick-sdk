@@ -21,7 +21,7 @@
     "test": "node --test 'test/**/*.test.ts'"
   },
   "dependencies": {
-    "@opt2-tealbrick/spec": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.50/opt2-tealbrick-spec-0.1.50.tgz",
+    "@opt2-tealbrick/spec": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.52/opt2-tealbrick-spec-0.1.52.tgz",
     "ajv": "8.18.0"
   },
   "devDependencies": {
