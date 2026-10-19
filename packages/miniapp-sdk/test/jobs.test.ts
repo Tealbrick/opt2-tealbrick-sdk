@@ -157,6 +157,7 @@ async function boot(opts: { handlers?: Handlers; jobsDrainMs?: number; dir?: str
   const bridgeUrl = await bridge.start(await slice(w, PRODUCT, opts.sliceOver ?? {}));
   const b = { w, bridge, base: `http://127.0.0.1:${port}`, dir: t.dir, ticks: {}, ran: { note_delete: [] }, stopCalls: 0 } as unknown as Booted;
   let running: Awaited<ReturnType<typeof startApp>>;
+  let started: { stop(): Promise<void> } | undefined;
   const start = async () => {
     const jobs: Record<string, { run: (i: Json, c: JobContext) => Promise<never>; maxAttempts?: number; leaseMs?: number; backoffMs: { base: number; max: number } }> = {};
     for (const [kind, h] of Object.entries(opts.handlers ?? {})) {
@@ -212,10 +213,19 @@ async function boot(opts: { handlers?: Handlers; jobsDrainMs?: number; dir?: str
       },
       { ...testRoots(w), port, jobs: { pollMs: 40, drainMs: opts.jobsDrainMs ?? 300 } },
     );
+    started = running;
     b.jobs = running.jobs;
     await until(async () => running.status() === "ok");
   };
-  await start();
+  // a boot that fails must not leave the bridge or the app listening: an open handle would keep the test process alive for ever
+  try {
+    await start();
+  } catch (e) {
+    await started?.stop().catch(() => {});
+    await bridge.stop();
+    t.cleanup();
+    throw e;
+  }
   b.push = async (over = {}) => {
     const before = bridge.statuses.length;
     bridge.push(await slice(w, PRODUCT, over));
@@ -670,13 +680,13 @@ describe("scheduled ops: a `listing: \"workflow\"` op at fire time", () => {
 
 // v0.1.36 gap G3 (sdk#34 review): the fire path reads the caller's scope row with ITS authority. A BOUNDED row (default, app or
 // bounded-written) never lifts the stored Portal grant at fire time; only an OWNER row does, exactly like a live call.
-describe("scheduled ops: scope row authority at fire time", () => {
+describe("scheduled ops: scope row authority at fire time", { timeout: 60_000 }, () => {
   let b: Booted;
   before(async () => {
     // note_delete becomes a scoped op (notebook); the fixture's `read_write` level includes delete, the stored grant below does not
     b = await boot({ manifest: (m) => ({ ...m, operations: m.operations.map((o) => (o.id === "note_delete" ? { ...o, scopeType: "notebook" } : o)) as Manifest["operations"] }) });
-  });
-  after(async () => b.cleanup());
+  }, { timeout: 60_000 });
+  after(async () => b.cleanup(), { timeout: 60_000 });
 
   /** the stored grant: read + create only, so a delete is ABOVE the Portal grant (the row's level read_write would admit it) */
   const NARROW = { crud: ["read", "create"] as ("read" | "create")[] };
@@ -700,7 +710,7 @@ describe("scheduled ops: scope row authority at fire time", () => {
     }
   };
 
-  test("fires on bad: a BOUNDED row whose level grants delete does not lift the narrow grant at fire time: refused scope_denied (the live call's code), never runs", async () => {
+  test("fires on bad: a BOUNDED row whose level grants delete does not lift the narrow grant at fire time: refused scope_denied (the live call's code), never runs", { timeout: 60_000 }, async () => {
     const agent = b.w.agents.a;
     const g = await grant(b.w, agent, NARROW);
     // the agent's first call applies the default rows: its OWN notebook instance (id = the agent) at read_write, authority bounded
@@ -718,7 +728,7 @@ describe("scheduled ops: scope row authority at fire time", () => {
     assert.equal(JSON.parse(String(rs.at(-1)?.meta)).reason, "scope_denied");
   });
 
-  test("quiet on good: the SAME row made an OWNER row admits the scheduled delete above the grant (run receipt, admitted by app_owner_row); a bounded row inside the grant also runs", async () => {
+  test("quiet on good: the SAME row made an OWNER row admits the scheduled delete above the grant (run receipt, admitted by app_owner_row); a bounded row inside the grant also runs", { timeout: 60_000 }, async () => {
     const agent = b.w.agents.b;
     const g = await grant(b.w, agent, NARROW);
     // first sight applies the defaults (a refused live call is enough)

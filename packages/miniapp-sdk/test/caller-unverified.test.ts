@@ -36,24 +36,33 @@ async function boot(): Promise<Booted> {
   const bridge = new FakeBridge(w);
   const bridgeUrl = await bridge.start(await slice(w, PRODUCT));
   const ran = { note_delete: 0 };
-  const running = await startApp(
-    defineApp({
-      manifest: fixtureManifest(port),
-      migrations: migrationsDir(t.dir),
-      handlers: {
-        note_create: { scope: (input) => String((input as { notebook: string }).notebook), run: async () => ({ id: "n" }) },
-        note_get: async (_input, ctx: OpContext) => ({ type: ctx.caller.type, product: ctx.caller.product ?? null }) as Json,
-        note_delete: async () => {
-          ran.note_delete += 1;
-          return { deleted: true };
+  // a boot that fails must not leave the bridge or the app listening: an open handle would keep the test process alive for ever
+  let running: RunningApp | undefined;
+  try {
+    running = await startApp(
+      defineApp({
+        manifest: fixtureManifest(port),
+        migrations: migrationsDir(t.dir),
+        handlers: {
+          note_create: { scope: (input) => String((input as { notebook: string }).notebook), run: async () => ({ id: "n" }) },
+          note_get: async (_input, ctx: OpContext) => ({ type: ctx.caller.type, product: ctx.caller.product ?? null }) as Json,
+          note_delete: async () => {
+            ran.note_delete += 1;
+            return { deleted: true };
+          },
+          notebook_rename: async () => ({}),
         },
-        notebook_rename: async () => ({}),
-      },
-    }),
-    { TB_INSTANCE_ID: w.ins, TB_ENROL_CODE: "tbe_test", TB_BRIDGE_URL: bridgeUrl, TB_PORTAL_KEYS: JSON.stringify({ keys: [w.portal.publicJwk] }), TB_DATA_DIR: t.dir, TB_DATA_EPHEMERAL: "1", TB_LOG_LEVEL: "error" },
-    testRoots(w),
-  );
-  await until(async () => running.status() === "ok");
+      }),
+      { TB_INSTANCE_ID: w.ins, TB_ENROL_CODE: "tbe_test", TB_BRIDGE_URL: bridgeUrl, TB_PORTAL_KEYS: JSON.stringify({ keys: [w.portal.publicJwk] }), TB_DATA_DIR: t.dir, TB_DATA_EPHEMERAL: "1", TB_LOG_LEVEL: "error" },
+      testRoots(w),
+    );
+    await until(async () => running?.status() === "ok");
+  } catch (e) {
+    await running?.stop().catch(() => {});
+    await bridge.stop();
+    t.cleanup();
+    throw e;
+  }
   return {
     w,
     bridge,
@@ -222,7 +231,7 @@ describe("C261 caller_unverified", () => {
 // product (the entry's own). So the guard is tested where it lives: fireScheduledOp with a real grant, a real TrustState and a runtime
 // stub that stops the run (a sentinel) at the first thing the fire does AFTER the guard. The only way to see the product missing at
 // that point is a trust state that lists the caller but answers no product, which is what the guard defends against.
-describe("C261 caller_unverified: a scheduled fire (v0.1.36 gap G2)", () => {
+describe("C261 caller_unverified: a scheduled fire (v0.1.36 gap G2)", { timeout: 60_000 }, () => {
   const PAST_GUARD = new Error("past the caller_unverified guard");
   const BRG = "brg_00000000000000000000000000";
 
@@ -285,7 +294,7 @@ describe("C261 caller_unverified: a scheduled fire (v0.1.36 gap G2)", () => {
     }
   }
 
-  test("fires on bad: with appCallers: verified and no product for the app caller, the fire is refused caller_unverified, the handler never runs, one refused receipt", async () => {
+  test("fires on bad: with appCallers: verified and no product for the app caller, the fire is refused caller_unverified, the handler never runs, one refused receipt", { timeout: 60_000 }, async () => {
     const r = await fire({ verified: true, product: undefined });
     assert.equal("e" in r.outcome ? String(r.outcome.e) : "", "", "the fire returned an outcome (the guard stopped it before anything else ran)");
     assert.deepEqual("o" in r.outcome ? r.outcome.o : null, { kind: "refused", reason: "caller_unverified" });
@@ -297,7 +306,7 @@ describe("C261 caller_unverified: a scheduled fire (v0.1.36 gap G2)", () => {
     assert.equal(r.receipts[0]?.caller.id, r.ins);
   });
 
-  test("quiet on good: the same fire proceeds past the guard with a product (slice), with a product (grant prd), and without the flag", async () => {
+  test("quiet on good: the same fire proceeds past the guard with a product (slice), with a product (grant prd), and without the flag", { timeout: 60_000 }, async () => {
     for (const c of [
       { verified: true, product: "listed" },
       { verified: true, product: undefined, prd: "listed" },

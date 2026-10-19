@@ -131,13 +131,22 @@ async function boot(): Promise<Booted> {
   const port = await freePort();
   const bridge = new FakeBridge(w);
   const bridgeUrl = await bridge.start(await slice(w, PRODUCT));
-  const running = await startApp(
-    testApp(port, migrationsDir(t.dir)),
-    { TB_INSTANCE_ID: w.ins, TB_ENROL_CODE: "tbe_test", TB_BRIDGE_URL: bridgeUrl, TB_PORTAL_KEYS: JSON.stringify({ keys: [w.portal.publicJwk] }), TB_DATA_DIR: t.dir, TB_DATA_EPHEMERAL: "1", TB_LOG_LEVEL: "error" },
-    testRoots(w),
-  );
-  holder.running = running;
-  await until(async () => running.status() === "ok");
+  // a boot that fails must not leave the bridge or the app listening: an open handle would keep the test process alive for ever
+  let running: RunningApp | undefined;
+  try {
+    running = await startApp(
+      testApp(port, migrationsDir(t.dir)),
+      { TB_INSTANCE_ID: w.ins, TB_ENROL_CODE: "tbe_test", TB_BRIDGE_URL: bridgeUrl, TB_PORTAL_KEYS: JSON.stringify({ keys: [w.portal.publicJwk] }), TB_DATA_DIR: t.dir, TB_DATA_EPHEMERAL: "1", TB_LOG_LEVEL: "error" },
+      testRoots(w),
+    );
+    holder.running = running;
+    await until(async () => running?.status() === "ok");
+  } catch (e) {
+    await running?.stop().catch(() => {});
+    await bridge.stop();
+    t.cleanup();
+    throw e;
+  }
   return {
     w,
     bridge,
@@ -466,7 +475,7 @@ describe("C283 A1: owner-set access is primary, everything else is bounded (HTTP
 
   // v0.1.36 gap G1 (sdk#34 review): toRow reads ONLY the exact stored value 'owner' as primary. The column is NOT NULL DEFAULT 'bounded',
   // so a "corrupted" value is a different string; the store level below covers NULL.
-  test("G1: a stored authority that is not exactly 'owner' (Owner, OWNER, x, empty, padded) reads as bounded and the Portal grant stays the ceiling", async () => {
+  test("G1: a stored authority that is not exactly 'owner' (Owner, OWNER, x, empty, padded) reads as bounded and the Portal grant stays the ceiling", { timeout: 60_000 }, async () => {
     const setRaw = (agent: string, id: string, value: string) => {
       const db = new DatabaseSync(join(b.dataDir, "app.db"));
       try {
@@ -497,7 +506,7 @@ describe("C283 A1: owner-set access is primary, everything else is bounded (HTTP
   // v0.1.36 gap G4 (sdk#34 review): markable() requires status "active" itself. The slice type allows "active" | "paused", and
   // `paused` is also caught by trust.paused(), so only a status outside the pair separates the two checks. The slice is signed by Portal
   // (the test pushes a value the types do not list, as a newer Portal might); the SDK must fail closed and mark nothing.
-  test("G4: an agent in the slice whose status is not 'active' gets no `admitted` marks in catalog and no admittedOps in scope_summary, owner rows or not", async () => {
+  test("G4: an agent in the slice whose status is not 'active' gets no `admitted` marks in catalog and no admittedOps in scope_summary, owner rows or not", { timeout: 60_000 }, async () => {
     const agent = b.w.agents.b;
     assert.equal((await agentOp(b, "note_create", { notebook: agent, title: "t" }, { agent })).status, 200);
     for (const r of await b.running.scopes.list(agent as never)) await setOwner(agent, r.instanceId, "manage");
@@ -672,7 +681,7 @@ describe("C283 A1: store rows feed authorize()", () => {
   });
 
   // v0.1.36 gap G1: a NULL authority (a database whose column lost its NOT NULL, or a row written by other code) is bounded too
-  test("a NULL or foreign stored authority reads bounded in resolve / access / list, and ownerAdmits is false", async () => {
+  test("a NULL or foreign stored authority reads bounded in resolve / access / list, and ownerAdmits is false", { timeout: 60_000 }, async () => {
     const t = tempDir();
     try {
       const db = openDb(t.dir);
