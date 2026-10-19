@@ -115,6 +115,12 @@ export interface ConformanceConfig {
   narrowing?: NarrowingFixture;
   /** package 0.1.22 (SDK-INSTANCE-GRANT): the person op that grants an agent access to one scope instance (absent → the A18 checks are not_applicable) */
   scopeGrantOp?: ScopeGrantFixture;
+  /** package 0.1.23 (SDK-COMPANION-CALLERS): the person op whose output is `ctx.companionCallers()` (absent → the A19 checks are not_applicable) */
+  companionCallersOp?: CompanionCallersFixture;
+  /** package 0.1.23 (HOOK-CALLER-PRODUCT): a product-keyed before hook (absent → A2.hook_app_caller_fail_closed is not_applicable) */
+  hookCallerProduct?: HookCallerProductFixture;
+  /** package 0.1.23 (Caller.listed, SPEC-GAP spec 0.1.49): a static agent op whose output exposes `ctx.caller.listed` (absent → A19.caller_listed is not_applicable) */
+  callerListedOp?: CallerListedFixture;
 }
 
 /**
@@ -145,18 +151,59 @@ export interface ScopeGrantFixture {
   agentProbe?: { op: string; input?: Json; path?: string };
 }
 
+/**
+ * `companionCallersOp` (package 0.1.23, SDK-COMPANION-CALLERS, spec 0.1.48): `op` = a PERSON op of the app that returns what
+ * `ctx.companionCallers()` gave it, at `path` (JSON pointer into the op output, default `/companionCallers`); `input` (optional)
+ * = its input (placeholders allowed). `agentProbe` (optional) = a static AGENT op whose output carries the same value at its
+ * `path` (default `/companionCallers`); the check requires it ABSENT (undefined, null or false): any list on an agent call fails.
+ */
+export interface CompanionCallersFixture {
+  op: string;
+  path?: string;
+  input?: Json;
+  agentProbe?: { op: string; path?: string; input?: Json };
+}
+
+/**
+ * `hookCallerProduct` (package 0.1.23, HOOK-CALLER-PRODUCT, spec 0.1.45): `hook` = the id of a BEFORE hook of the app whose
+ * criteria key on the calling app's product; `product` = a product those criteria name; `op` / `input` (optional) = the
+ * target op and call input of the probe request. With that product the hook answers per the app's rule (recorded, must be
+ * valid); the SAME caller WITHOUT `product` must fail CLOSED (allow false, or a hold verdict).
+ */
+export interface HookCallerProductFixture {
+  hook: string;
+  product: string;
+  op?: string;
+  input?: Json;
+}
+
+/**
+ * `callerListedOp` (package 0.1.23, `Caller.listed`, SPEC-GAP spec 0.1.49): `op` = a static AGENT op an app caller may run
+ * (the suite's `as: app` caller; `inputsAs.app` fixtures apply) whose output carries `ctx.caller.listed` at `path` (JSON pointer,
+ * default `/listed`). `input` (optional) = its input for the app caller (placeholders allowed).
+ */
+export interface CallerListedFixture {
+  op: string;
+  path?: string;
+  input?: Json;
+}
+
 export const EMPTY_CONFIG: ConformanceConfig = Object.freeze({ waivers: [], peers: [], contractOps: {}, setup: [], inputs: {}, inputsAs: {}, dynamic: {} });
 
 /** A whole-string placeholder `${name}`; any other string (also one that merely contains `${`) is a literal. */
 export const PLACEHOLDER_RE = /^\$\{([A-Za-z_][A-Za-z0-9_.]*)\}$/;
 const CAPTURE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const STEP_ID_RE = /^[A-Za-z0-9_.-]{1,64}$/;
-const TOP_KEYS = new Set(["waivers", "peers", "contractOps", "setup", "inputs", "inputsAs", "dynamic", "narrowing", "scopeGrantOp", "$schema", "$comment"]);
+const TOP_KEYS = new Set(["waivers", "peers", "contractOps", "setup", "inputs", "inputsAs", "dynamic", "narrowing", "scopeGrantOp", "companionCallersOp", "hookCallerProduct", "callerListedOp", "$schema", "$comment"]);
 const PEER_KEYS = new Set(["product", "version", "channel", "settings"]);
 const PRODUCT_RE = /^[a-z][a-z0-9-]{1,31}$/;
 const SEMVER_RE = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/;
 const OP_RE = /^(?!tb_)[a-z][a-z0-9_]{1,39}$/;
 const NARROWING_KEYS = new Set(["op", "input", "tag", "itemsPath"]);
+const COMPANION_CALLERS_KEYS = new Set(["op", "path", "input", "agentProbe"]);
+const COMPANION_PROBE_KEYS = new Set(["op", "path", "input"]);
+const CALLER_LISTED_KEYS = new Set(["op", "path", "input"]);
+const HOOK_CALLER_PRODUCT_KEYS = new Set(["hook", "product", "op", "input"]);
 const SCOPE_GRANT_KEYS = new Set(["op", "input", "aboveCeiling", "agentProbe"]);
 const SCOPE_PROBE_KEYS = new Set(["op", "input", "path"]);
 const STEP_KEYS = new Set(["id", "as", "op", "input", "capture"]);
@@ -176,7 +223,7 @@ export function placeholderNames(v: unknown, out: string[] = []): string[] {
 /** Validates a parsed `tealbrick-conformance.json` (`where` names the file in errors). */
 export function parseConformanceConfig(doc: unknown, where: string): ConformanceConfig {
   if (!isRecord(doc)) throw new WaiverError(`${where}: must be a JSON object`);
-  for (const k of Object.keys(doc)) if (!TOP_KEYS.has(k)) throw new WaiverError(`${where}: unknown key ${JSON.stringify(k)} (allowed: waivers, peers, contractOps, setup, inputs, inputsAs, dynamic, narrowing, scopeGrantOp)`);
+  for (const k of Object.keys(doc)) if (!TOP_KEYS.has(k)) throw new WaiverError(`${where}: unknown key ${JSON.stringify(k)} (allowed: waivers, peers, contractOps, setup, inputs, inputsAs, dynamic, narrowing, scopeGrantOp, companionCallersOp, hookCallerProduct, callerListedOp)`);
   const waivers = parseWaivers(doc.waivers, where);
   const peers = parsePeers(doc.peers, where);
   const contractOps = parseContractOps(doc.contractOps, peers, where);
@@ -276,7 +323,51 @@ export function parseConformanceConfig(doc: unknown, where: string): Conformance
     }
     scopeGrantOp = { op: g.op, input: g.input as Json, aboveCeiling: g.aboveCeiling as Json, ...(agentProbe ? { agentProbe } : {}) };
   }
-  return { waivers, peers, contractOps, setup, inputs, inputsAs, dynamic, ...(narrowing ? { narrowing } : {}), ...(scopeGrantOp ? { scopeGrantOp } : {}) };
+  let companionCallersOp: CompanionCallersFixture | undefined;
+  if (doc.companionCallersOp !== undefined) {
+    const g = doc.companionCallersOp;
+    const shape = `${where}: companionCallersOp must be {op: "<person op id>", path?: "<JSON pointer, default /companionCallers>", input?, agentProbe?: {op: "<agent op id>", path?, input?}}`;
+    if (!isRecord(g)) throw new WaiverError(shape);
+    for (const k of Object.keys(g)) if (!COMPANION_CALLERS_KEYS.has(k)) throw new WaiverError(`${where}: companionCallersOp: unknown key ${JSON.stringify(k)} (allowed: op, path, input, agentProbe)`);
+    if (typeof g.op !== "string" || g.op.length === 0) throw new WaiverError(`${shape}; op missing`);
+    if (g.path !== undefined && (typeof g.path !== "string" || !(g.path === "" || g.path.startsWith("/")))) throw new WaiverError(`${where}: companionCallersOp.path must be a JSON pointer ("" or "/…")`);
+    if (g.input !== undefined) known(placeholderNames(g.input), "companionCallersOp.input", "any setup step");
+    let agentProbe: CompanionCallersFixture["agentProbe"];
+    if (g.agentProbe !== undefined) {
+      const p = g.agentProbe;
+      if (!isRecord(p)) throw new WaiverError(`${where}: companionCallersOp.agentProbe must be {op, path?, input?}`);
+      for (const k of Object.keys(p)) if (!COMPANION_PROBE_KEYS.has(k)) throw new WaiverError(`${where}: companionCallersOp.agentProbe: unknown key ${JSON.stringify(k)} (allowed: op, path, input)`);
+      if (typeof p.op !== "string" || p.op.length === 0) throw new WaiverError(`${where}: companionCallersOp.agentProbe.op must be an agent operation id`);
+      if (p.path !== undefined && (typeof p.path !== "string" || !(p.path === "" || p.path.startsWith("/")))) throw new WaiverError(`${where}: companionCallersOp.agentProbe.path must be a JSON pointer ("" or "/…")`);
+      if (p.input !== undefined) known(placeholderNames(p.input), "companionCallersOp.agentProbe.input", "any setup step");
+      agentProbe = { op: p.op, ...(typeof p.path === "string" ? { path: p.path } : {}), ...(p.input !== undefined ? { input: p.input as Json } : {}) };
+    }
+    companionCallersOp = { op: g.op, ...(typeof g.path === "string" ? { path: g.path } : {}), ...(g.input !== undefined ? { input: g.input as Json } : {}), ...(agentProbe ? { agentProbe } : {}) };
+  }
+  let hookCallerProduct: HookCallerProductFixture | undefined;
+  if (doc.hookCallerProduct !== undefined) {
+    const h = doc.hookCallerProduct;
+    const shape = `${where}: hookCallerProduct must be {hook: "<before hook id>", product: "<product the criteria key on>", op?: "<target op id>", input?: <json>}`;
+    if (!isRecord(h)) throw new WaiverError(shape);
+    for (const k of Object.keys(h)) if (!HOOK_CALLER_PRODUCT_KEYS.has(k)) throw new WaiverError(`${where}: hookCallerProduct: unknown key ${JSON.stringify(k)} (allowed: hook, product, op, input)`);
+    if (typeof h.hook !== "string" || h.hook.length === 0) throw new WaiverError(`${shape}; hook missing`);
+    if (typeof h.product !== "string" || !PRODUCT_RE.test(h.product)) throw new WaiverError(`${where}: hookCallerProduct.product must be a product id (${PRODUCT_RE})`);
+    if (h.op !== undefined && (typeof h.op !== "string" || h.op.length === 0)) throw new WaiverError(`${where}: hookCallerProduct.op must be an operation id`);
+    if (h.input !== undefined) known(placeholderNames(h.input), "hookCallerProduct.input", "any setup step");
+    hookCallerProduct = { hook: h.hook, product: h.product, ...(typeof h.op === "string" ? { op: h.op } : {}), ...(h.input !== undefined ? { input: h.input as Json } : {}) };
+  }
+  let callerListedOp: CallerListedFixture | undefined;
+  if (doc.callerListedOp !== undefined) {
+    const g = doc.callerListedOp;
+    const shape = `${where}: callerListedOp must be {op: "<agent op id>", path?: "<JSON pointer, default /listed>", input?}`;
+    if (!isRecord(g)) throw new WaiverError(shape);
+    for (const k of Object.keys(g)) if (!CALLER_LISTED_KEYS.has(k)) throw new WaiverError(`${where}: callerListedOp: unknown key ${JSON.stringify(k)} (allowed: op, path, input)`);
+    if (typeof g.op !== "string" || g.op.length === 0) throw new WaiverError(`${shape}; op missing`);
+    if (g.path !== undefined && (typeof g.path !== "string" || !(g.path === "" || g.path.startsWith("/")))) throw new WaiverError(`${where}: callerListedOp.path must be a JSON pointer ("" or "/…")`);
+    if (g.input !== undefined) known(placeholderNames(g.input), "callerListedOp.input", "any setup step");
+    callerListedOp = { op: g.op, ...(typeof g.path === "string" ? { path: g.path } : {}), ...(g.input !== undefined ? { input: g.input as Json } : {}) };
+  }
+  return { waivers, peers, contractOps, setup, inputs, inputsAs, dynamic, ...(narrowing ? { narrowing } : {}), ...(scopeGrantOp ? { scopeGrantOp } : {}), ...(companionCallersOp ? { companionCallersOp } : {}), ...(hookCallerProduct ? { hookCallerProduct } : {}), ...(callerListedOp ? { callerListedOp } : {}) };
 }
 
 /** `peers` (CONF-MULTIAPP): 0..MAX_PEERS entries `{product, version, channel?, settings?}`; an unknown key, a duplicate product or a malformed value is a usage error. */

@@ -135,6 +135,28 @@ export interface MiniAppFaults {
   scopeGrantWrongLevel?: boolean;
   /** spec 0.1.47: the grant row is written without source / grantedByOp (fails A18.scope_grant_within) */
   scopeGrantNoSource?: boolean;
+  /** spec 0.1.48 (SDK-COMPANION-CALLERS): the agent probe op `companion_callers_probe` carries the list on an AGENT call (fails A19.companion_callers_agent_absent) */
+  companionCallersOnAgent?: boolean;
+  /** spec 0.1.48: the person op `companion_callers` drops `provider` (fails A19.companion_callers_person) */
+  companionCallersNoProvider?: boolean;
+  /** spec 0.1.48: the person op answers the slice list as of the FIRST slice (a snapshot, not the current slice; fails A19.companion_callers_person) */
+  companionCallersSnapshot?: boolean;
+  /** spec 0.1.48: the person op leaks the companion grant material next to each entry (fails A19.companion_callers_person) */
+  companionCallersLeaksGrant?: boolean;
+  /** Caller.listed (SPEC-GAP spec 0.1.49): the probe op `caller_listed` answers listed true whatever the slice says (fails A19.caller_listed) */
+  callerListedAlwaysTrue?: boolean;
+  /**
+   * spec 0.1.45 (HOOK-CALLER-PRODUCT, NOT a fault): the before hooks key on the calling app's product. A call from an app caller
+   * with THIS product is refused (the app's rule); from an app with another product it is allowed; an app caller without
+   * `call.caller.product` is refused too (fail closed). Other callers are allowed.
+   */
+  hookKeyedOnProduct?: string;
+  /** spec 0.1.45: an app caller without `call.caller.product` is ALLOWED by a product-keyed hook (fails A2.hook_app_caller_fail_closed) */
+  hookOpenWithoutProduct?: boolean;
+  /** spec 0.1.45: an app caller WITH a product gets an invalid before answer (fails A2.hook_app_caller_product) */
+  hookBadShapeWithProduct?: boolean;
+  /** spec 0.1.45: an app caller WITHOUT a product gets an invalid before answer (fails A2.hook_app_caller_no_product) */
+  hookBadShapeNoProduct?: boolean;
   /** package 0.1.15 (NOT a fault, Knowledge-like): the recall output also carries a status array `areas` next to `items` */
   recallStatusArray?: boolean;
 }
@@ -271,6 +293,8 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
   }
 
   let slice: InstanceSlice | null = st.slice ? (peek(st.slice) as unknown as InstanceSlice) : null;
+  /** the first slice this process installed (companionCallersSnapshot fault) */
+  let firstSlice: InstanceSlice | null = null;
   let keysRev = 0;
   const keyCache = new Map<string, string>();
   const declaredKeys = (manifest.settings?.keys ?? []).filter((k) => k.source === "account_default" && k.usedBy.includes("app"));
@@ -322,6 +346,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
     if (slice && r.slice.rev <= slice.rev) return true;
     if (t) st.kss = { seq: t.seq, kss: t.kss, keys: t.keys.keys.map((k) => ({ jwk: k.jwk, status: k.status })) };
     slice = r.slice;
+    firstSlice ??= r.slice;
     st.slice = token;
     for (const a of slice.agents) ensureAgent(a.id);
     if (slice.pause.workspace || slice.pause.instances.includes(ins)) keyCache.clear();
@@ -645,7 +670,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
     }
     // read ops also read the companion product (app→app through the bridge)
     const companion = op.crud.includes("read") ? await callCompanion(callId) : null;
-    const output: Json = { ok: true, op: op.id, ...(companion ? { companion } : {}), ...(op.id === "scope_probe" ? { scopeGrants: faults.scopeGrantsOnAgent === true } : {}) };
+    const output: Json = { ok: true, op: op.id, ...(companion ? { companion } : {}), ...(op.id === "scope_probe" ? { scopeGrants: faults.scopeGrantsOnAgent === true } : {}), ...(op.id === "caller_listed" ? { listed: callerType === "app" && (faults.callerListedAlwaysTrue || (callerProduct !== undefined && listed.some((x) => x.ins === callerId && x.product === callerProduct))) } : {}), ...(op.id === "companion_callers_probe" && faults.companionCallersOnAgent ? { companionCallers: (slice?.companionCallers ?? []) as unknown as Json } : {}) };
     if (faults.postsPerAgent && op.id === "post_create") {
       const id = newId("post");
       st.posts = { ...(st.posts ?? {}), [id]: callerId };
@@ -726,6 +751,20 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
         out = { ok: true };
         break;
       }
+      case "companion_callers": {
+        // spec 0.1.48 (SDK-COMPANION-CALLERS): what ctx.companionCallers() gave the handler = the CURRENT slice list
+        const list = (faults.companionCallersSnapshot ? firstSlice : slice)?.companionCallers ?? [];
+        out = {
+          companionCallers: list.map((e) => ({
+            product: e.product,
+            ins: e.ins,
+            name: e.name,
+            ...(faults.companionCallersNoProvider ? {} : { provider: e.provider ?? null }),
+            ...(faults.companionCallersLeaksGrant ? { grant: "tbg.leak" } : {}),
+          })) as unknown as Json,
+        };
+        break;
+      }
       case "tb.export": {
         const files = [
           { file: "receipts.jsonl", data: Buffer.from(st.receipts.map((r) => JSON.stringify(r)).join("\n")) },
@@ -762,10 +801,20 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
         if (!t) throw new E(503, "slice_stale");
         const hook = manifest.hooks?.find((h) => h.id === path.slice(13));
         if (!hook) throw new E(404, "unknown_hook");
-        const b = JSON.parse(raw) as { phase: string; call: { input?: Json }; context: Json };
+        const b = JSON.parse(raw) as { phase: string; call: { input?: Json; caller?: unknown }; context: Json };
         const p = verifyHookProof(String(req.headers["tb-call"] ?? ""), t, { hook: hook.id, phase: hook.phase, contextDigest: digest(b.context), ...(b.call.input !== undefined ? { inputDigest: digest(b.call.input) } : {}) }, replay);
         if (!p.ok) throw new E(401, "call_proof_invalid");
         if (b.phase !== hook.phase) throw new E(400, "input_invalid");
+        if (hook.phase === "before") {
+          const caller = (b.call as unknown as { caller?: { type?: string; product?: string } }).caller;
+          if (caller?.type === "app") {
+            if (caller.product !== undefined ? faults.hookBadShapeWithProduct : faults.hookBadShapeNoProduct) return json(res, 200, { allow: "yes" });
+            if (faults.hookKeyedOnProduct !== undefined) {
+              if (caller.product === undefined) return json(res, 200, faults.hookOpenWithoutProduct ? { allow: true } : { allow: false, reason: "caller product unknown" });
+              if (caller.product === faults.hookKeyedOnProduct) return json(res, 200, { allow: false, reason: "calls from this product are refused" });
+            }
+          }
+        }
         return json(res, 200, hook.phase === "before" ? { allow: true, ...(faults.badHookShape ? { tb_extra: 1 } : {}) } : hook.phase === "context" ? { add: { [`${product}.seen`]: true } } : {});
       }
       if (req.method === "POST" && path.startsWith("/tb/v1/bridge/")) {

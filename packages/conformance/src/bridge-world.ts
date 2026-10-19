@@ -464,7 +464,7 @@ export class BridgeWorld {
     const callers: { ins: InstanceId; manifest: Manifest }[] = [...this.apps, ...(real ? [real] : [])];
     /** v0.1.14 (C90 / C102): per instance, the targets it holds a companion grant for and the callers that hold one to it */
     const targetsOf = new Map<string, { product: string; ins: InstanceId }[]>();
-    const callersOf = new Map<string, { product: string; ins: InstanceId; name: string }[]>();
+    const callersOf = new Map<string, { product: string; ins: InstanceId; name: string; provider: string }[]>();
     for (const caller of callers)
       for (const comp of caller.manifest.companions ?? []) {
         const target = this.apps.find((a) => a.product === comp.product);
@@ -475,7 +475,11 @@ export class BridgeWorld {
         targetsOf.set(caller.ins, [{ product: target.product, ins: target.ins }]);
       }
     for (const caller of callers)
-      for (const t of targetsOf.get(caller.ins) ?? []) callersOf.set(t.ins, [...(callersOf.get(t.ins) ?? []), { product: caller.manifest.id, ins: caller.ins, name: caller.manifest.name.slice(0, 80) }]);
+      for (const t of targetsOf.get(caller.ins) ?? []) {
+        const list = callersOf.get(t.ins) ?? [];
+        // spec 0.1.48 (SDK-COMPANION-CALLERS): `provider` = where the caller runs; the world alternates "railway" and "own_infra"
+        callersOf.set(t.ins, [...list, { product: caller.manifest.id, ins: caller.ins, name: caller.manifest.name.slice(0, 80), provider: list.length % 2 === 0 ? "railway" : "own_infra" }]);
+      }
     const portalKeys = o.standalone ? [] : p.keys.map((k) => ({ jwk: k.key.publicJwk, status: k.status }));
     // §9.5 Standalone: the FINAL Portal-signed document (the one that carries `standalone`) is verified under the KSS rule,
     // so it carries the current statement; only the later bridge-issued documents drop it (Lead · Bridge request, 0.1.8)

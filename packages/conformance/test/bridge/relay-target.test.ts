@@ -2,6 +2,7 @@
 // filter tools/list, write the token to disk, present a person credential upstream or refuse calls locally fail the
 // matching check. Without a login the relay has no credential and the run fails.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { RELAY_CHECKS, type Report, runRelayTarget } from "../../src/index.ts";
@@ -37,5 +38,18 @@ describe("relay target", () => {
     const r = await run("", false);
     assert.equal(status(r, "B10.key_connection"), "not_run");
     assert.equal(r.ok, false);
+  });
+
+  // test hygiene: a run must leave no relay process behind, whatever the variant (the listener variant keeps its event loop alive)
+  it("leaves no relay process running after a run, also for the variant that opens a listener", async () => {
+    const count = () => {
+      const r = spawnSync("pgrep", ["-f", `${relay} serve --broken=listen`], { encoding: "utf8" });
+      return r.error ? null : r.stdout.split("\n").filter(Boolean).length;
+    };
+    const before = count();
+    await run("listen");
+    const after = count();
+    if (before === null || after === null) return; // no pgrep on this machine
+    assert.equal(after, before, "a mini-relay serve --broken=listen process was left behind");
   });
 });

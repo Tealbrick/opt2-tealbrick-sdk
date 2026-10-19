@@ -689,3 +689,214 @@ describe("A18 SDK-INSTANCE-GRANT (conformance 0.1.22)", () => {
     assert.deepEqual(parseConformanceConfig({ scopeGrantOp: { ...base, agentProbe: { op: "p", path: "/x" } } }, "t").scopeGrantOp, { ...base, agentProbe: { op: "p", path: "/x" } });
   });
 });
+
+// ── spec 0.1.48 (SDK-COMPANION-CALLERS, conformance 0.1.23): A19 ─────────────────────────────────────────────────────
+describe("A19 SDK-COMPANION-CALLERS (conformance 0.1.23)", () => {
+  const cm = structuredClone(manifest) as Manifest;
+  const opOf = (id: string, audience: "person" | "agent"): Manifest["operations"][number] =>
+    ({
+      id,
+      title: id,
+      description: `Probe ${id}.`,
+      input: { type: "object" },
+      output: { type: "object" },
+      crud: audience === "agent" ? ["read"] : ["update"],
+      effect: audience === "agent" ? "read" : "write",
+      idempotency: audience === "agent" ? "none" : "supported",
+      receipt: false,
+      audience,
+    }) as Manifest["operations"][number];
+  cm.operations.push(opOf("companion_callers", "person"), opOf("companion_callers_probe", "agent"));
+  const cfg = (over: Record<string, unknown> = {}) => parseConformanceConfig({ companionCallersOp: { op: "companion_callers", agentProbe: { op: "companion_callers_probe" }, ...over } }, "test config");
+  const runC = (faults: MiniAppFaults = {}, config: ConformanceConfig | null = cfg()) => runApp({ manifest: cm, manifestPath: path, config, start: (env) => startMiniApp(cm, env, faults), deployTemplate: template, timeoutMs: 8000 });
+  const ids = ["A19.companion_callers_person", "A19.companion_callers_agent_absent"];
+  const st = (r: Report, id: string) => r.checks.find((c) => c.id === id);
+
+  it("a correct app passes both checks (and every other check); the callers the check listed are removed again", async () => {
+    const r = await runC();
+    assert.deepEqual(failing(r), [], renderMarkdown(r));
+    for (const id of ids) assert.equal(st(r, id)?.status, "pass", `${id}: ${st(r, id)?.asserted}`);
+    assert.match(st(r, "A19.companion_callers_person")?.asserted ?? "", /output\/companionCallers = the slice list \(\d+: .*tbconf-cc-a\/railway.*tbconf-cc-b\/own_infra.*tbconf-cc-c\/null/);
+    assert.match(st(r, "A19.companion_callers_agent_absent")?.asserted ?? "", /output\/companionCallers is absent/);
+  });
+
+  it("without a companionCallersOp fixture both checks are not_applicable", async () => {
+    const r = await run();
+    for (const id of ids) {
+      assert.equal(st(r, id)?.status, "not_applicable", id);
+      assert.match(st(r, id)?.asserted ?? "", /no companionCallersOp/);
+    }
+  });
+
+  it("an SDK older than 0.1.32 gets not_applicable by version, whatever it does", async () => {
+    const r = await runC({ reportedSdkVersion: "0.1.31", companionCallersNoProvider: true, companionCallersOnAgent: true });
+    for (const id of ids) {
+      assert.equal(st(r, id)?.status, "not_applicable", `${id}: ${st(r, id)?.asserted}`);
+      assert.match(st(r, id)?.asserted ?? "", /predates 0\.1\.32.*not applicable by version/);
+    }
+    const ok = await runC({ reportedSdkVersion: "0.1.32", companionCallersNoProvider: true });
+    assert.equal(st(ok, "A19.companion_callers_person")?.status, "fail");
+  });
+
+  it("without an agentProbe the agent check is not_applicable (not observable black-box); the person check still runs", async () => {
+    const r = await runC({ companionCallersOnAgent: true }, parseConformanceConfig({ companionCallersOp: { op: "companion_callers" } }, "test config"));
+    assert.equal(st(r, "A19.companion_callers_agent_absent")?.status, "not_applicable");
+    assert.match(st(r, "A19.companion_callers_agent_absent")?.asserted ?? "", /no companionCallersOp\.agentProbe/);
+    assert.equal(st(r, "A19.companion_callers_person")?.status, "pass");
+  });
+
+  it("fire-on-bad: a list on an agent call fails A19.companion_callers_agent_absent", async () => {
+    const r = await runC({ companionCallersOnAgent: true });
+    const c = st(r, "A19.companion_callers_agent_absent");
+    assert.equal(c?.status, "fail");
+    assert.match(c?.asserted ?? "", /companion caller list is exposed to an AGENT call/);
+    assert.equal(st(r, "A19.companion_callers_person")?.status, "pass");
+  });
+
+  it("fire-on-bad: an entry without its provider fails A19.companion_callers_person (the slice list is compared with provider)", async () => {
+    const r = await runC({ companionCallersNoProvider: true });
+    const c = st(r, "A19.companion_callers_person");
+    assert.equal(c?.status, "fail");
+    assert.match(c?.asserted ?? "", /differs from the slice list.*tbconf-cc-a\/railway/);
+    assert.equal(st(r, "A19.companion_callers_agent_absent")?.status, "pass");
+  });
+
+  it("fire-on-bad: a list taken from the FIRST slice (a snapshot, not the current slice) fails A19.companion_callers_person", async () => {
+    const r = await runC({ companionCallersSnapshot: true });
+    assert.equal(st(r, "A19.companion_callers_person")?.status, "fail", st(r, "A19.companion_callers_person")?.asserted);
+    assert.match(st(r, "A19.companion_callers_person")?.asserted ?? "", /differs from the slice list/);
+  });
+
+  it("fire-on-bad: grant material next to an entry fails A19.companion_callers_person", async () => {
+    const r = await runC({ companionCallersLeaksGrant: true });
+    assert.equal(st(r, "A19.companion_callers_person")?.status, "fail");
+    assert.match(st(r, "A19.companion_callers_person")?.asserted ?? "", /carries grant \(only product, ins, name, provider are allowed/);
+  });
+
+  it("a custom path is followed; a wrong path fails with the value named", async () => {
+    const r = await runC({}, cfg({ path: "/nope" }));
+    assert.equal(st(r, "A19.companion_callers_person")?.status, "fail");
+    assert.match(st(r, "A19.companion_callers_person")?.asserted ?? "", /output\/nope: undefined is not an array/);
+  });
+
+  it("a companionCallersOp that names no person op / a probe that is no agent op fails with the config key named", async () => {
+    const r = await runC({}, cfg({ op: "item_get" }));
+    assert.equal(st(r, "A19.companion_callers_person")?.status, "fail");
+    assert.match(st(r, "A19.companion_callers_person")?.asserted ?? "", /companionCallersOp\.op "item_get": not a person op/);
+    const r2 = await runC({}, cfg({ agentProbe: { op: "companion_callers" } }));
+    assert.equal(st(r2, "A19.companion_callers_agent_absent")?.status, "fail");
+    assert.match(st(r2, "A19.companion_callers_agent_absent")?.asserted ?? "", /agentProbe\.op "companion_callers": not a static agent op/);
+  });
+
+  describe("A19.caller_listed (Caller.listed)", () => {
+    const lm = structuredClone(cm) as Manifest;
+    lm.operations.push({ ...opOf("caller_listed", "agent"), idempotency: "none" } as Manifest["operations"][number]);
+    const lcfg = (over: Record<string, unknown> = {}) => parseConformanceConfig({ callerListedOp: { op: "caller_listed", ...over } }, "test config");
+    const runL = (faults: MiniAppFaults = {}, config: ConformanceConfig | null = lcfg()) => runApp({ manifest: lm, manifestPath: path, config, start: (env) => startMiniApp(lm, env, faults), deployTemplate: template, timeoutMs: 8000 });
+
+    it("a correct app: true while listed, false after the slice drops the caller", async () => {
+      const r = await runL();
+      assert.equal(st(r, "A19.caller_listed")?.status, "pass", st(r, "A19.caller_listed")?.asserted);
+      assert.match(st(r, "A19.caller_listed")?.asserted ?? "", /output\/listed true; slice dropped the instance → false/);
+      assert.deepEqual(failing(r), [], renderMarkdown(r));
+    });
+    it("without a callerListedOp fixture, or for an SDK older than 0.1.32: not_applicable", async () => {
+      assert.equal(st(await run(), "A19.caller_listed")?.status, "not_applicable");
+      const r = await runL({ reportedSdkVersion: "0.1.31", callerListedAlwaysTrue: true });
+      assert.equal(st(r, "A19.caller_listed")?.status, "not_applicable");
+    });
+    it("fire-on-bad: listed true although the slice dropped the caller fails A19.caller_listed", async () => {
+      const r = await runL({ callerListedAlwaysTrue: true });
+      assert.equal(st(r, "A19.caller_listed")?.status, "fail");
+      assert.match(st(r, "A19.caller_listed")?.asserted ?? "", /slice dropped the instance → true \(expected true, then false\)/);
+    });
+    it("an op that is no static agent op fails with the config key named; config keys are checked", async () => {
+      const r = await runL({}, lcfg({ op: "companion_callers" }));
+      assert.match(st(r, "A19.caller_listed")?.asserted ?? "", /callerListedOp\.op "companion_callers": not a static agent op/);
+      for (const bad of [[], {}, { op: "" }, { op: "x", extra: 1 }, { op: "x", path: "listed" }, { op: "x", input: { a: "${nope}" } }]) {
+        assert.throws(() => parseConformanceConfig({ callerListedOp: bad }, "test config"), /callerListedOp/, JSON.stringify(bad));
+      }
+    });
+  });
+
+  it("companionCallersOp config keys are checked (usage error)", () => {
+    for (const bad of [[], {}, { op: "" }, { op: "x", extra: 1 }, { op: "x", path: "companionCallers" }, { op: "x", agentProbe: [] }, { op: "x", agentProbe: { op: "" } }, { op: "x", agentProbe: { op: "p", path: "x" } }, { op: "x", agentProbe: { op: "p", extra: 1 } }, { op: "x", input: { a: "${nope}" } }]) {
+      assert.throws(() => parseConformanceConfig({ companionCallersOp: bad }, "test config"), /companionCallersOp/, JSON.stringify(bad));
+    }
+    const good = { op: "x", path: "/a", input: { k: 1 }, agentProbe: { op: "p", path: "/b" } };
+    assert.deepEqual(parseConformanceConfig({ companionCallersOp: good }, "t").companionCallersOp, good);
+  });
+});
+
+// ── spec 0.1.45 (HOOK-CALLER-PRODUCT, conformance 0.1.23): hooks called by an APP caller ──────────────────────────────
+describe("A2 hook probes from an app caller (conformance 0.1.23)", () => {
+  const ids = ["A2.hook_app_caller_product", "A2.hook_app_caller_no_product", "A2.hook_app_caller_fail_closed"];
+  const st = (r: Report, id: string) => r.checks.find((c) => c.id === id);
+  const fx = { hookCallerProduct: { hook: "guard", product: "tbconf-blocked" } };
+  const runH = (faults: MiniAppFaults = {}, config: Record<string, unknown> | null = fx) => run(faults, { config: config ? parseConformanceConfig(config, "test config") : null });
+
+  it("a correct app: both valid-answer checks pass, without the fixture the fail-closed part is not_applicable", async () => {
+    const r = await run();
+    assert.equal(st(r, "A2.hook_app_caller_product")?.status, "pass", st(r, "A2.hook_app_caller_product")?.asserted);
+    assert.equal(st(r, "A2.hook_app_caller_no_product")?.status, "pass", st(r, "A2.hook_app_caller_no_product")?.asserted);
+    assert.equal(st(r, "A2.hook_app_caller_fail_closed")?.status, "not_applicable");
+    assert.match(st(r, "A2.hook_app_caller_fail_closed")?.asserted ?? "", /no hookCallerProduct/);
+  });
+
+  it("a product-keyed hook that follows its rule and fails closed passes all three; the rule's answer is recorded", async () => {
+    const r = await runH({ hookKeyedOnProduct: "tbconf-blocked" });
+    assert.deepEqual(failing(r), [], renderMarkdown(r));
+    for (const id of ids) assert.equal(st(r, id)?.status, "pass", `${id}: ${st(r, id)?.asserted}`);
+    assert.match(st(r, "A2.hook_app_caller_product")?.asserted ?? "", /guard: 200 refuse \(calls from this product are refused\) \(the app's rule for product "tbconf-blocked"\)/);
+    assert.match(st(r, "A2.hook_app_caller_no_product")?.asserted ?? "", /guard: 200 refuse \(caller product unknown\)/);
+    assert.match(st(r, "A2.hook_app_caller_fail_closed")?.asserted ?? "", /without product → refuse/);
+  });
+
+  it("fire-on-bad: a product-keyed hook that ALLOWS an app caller without a product fails A2.hook_app_caller_fail_closed", async () => {
+    const r = await runH({ hookKeyedOnProduct: "tbconf-blocked", hookOpenWithoutProduct: true });
+    const c = st(r, "A2.hook_app_caller_fail_closed");
+    assert.equal(c?.status, "fail");
+    assert.match(c?.asserted ?? "", /allow true for an app caller the bridge could not map to a product/);
+    assert.equal(st(r, "A2.hook_app_caller_product")?.status, "pass");
+    assert.equal(st(r, "A2.hook_app_caller_no_product")?.status, "pass");
+  });
+
+  it("fire-on-bad: an invalid answer for an app caller WITH a product fails A2.hook_app_caller_product only", async () => {
+    const r = await run({ hookBadShapeWithProduct: true });
+    assert.equal(st(r, "A2.hook_app_caller_product")?.status, "fail");
+    assert.match(st(r, "A2.hook_app_caller_product")?.asserted ?? "", /guard: allow not boolean/);
+    assert.equal(st(r, "A2.hook_app_caller_no_product")?.status, "pass");
+  });
+
+  it("fire-on-bad: an invalid answer for an app caller WITHOUT a product fails A2.hook_app_caller_no_product (and the fail-closed check)", async () => {
+    const r = await runH({ hookBadShapeNoProduct: true });
+    assert.equal(st(r, "A2.hook_app_caller_no_product")?.status, "fail");
+    assert.match(st(r, "A2.hook_app_caller_no_product")?.asserted ?? "", /guard: allow not boolean/);
+    assert.equal(st(r, "A2.hook_app_caller_product")?.status, "pass");
+    assert.equal(st(r, "A2.hook_app_caller_fail_closed")?.status, "fail");
+    assert.match(st(r, "A2.hook_app_caller_fail_closed")?.asserted ?? "", /an invalid hook answer/);
+  });
+
+  it("a manifest without hooks: not_applicable", async () => {
+    const nm = structuredClone(manifest) as Manifest;
+    delete nm.hooks;
+    const r = await runApp({ manifest: nm, manifestPath: path, start: (env) => startMiniApp(nm, env, {}), deployTemplate: template, timeoutMs: 8000 });
+    for (const id of ["A2.hook_app_caller_product", "A2.hook_app_caller_no_product"]) assert.equal(st(r, id)?.status, "not_applicable", id);
+  });
+
+  it("a hookCallerProduct that names no before hook of the manifest fails with the config key named", async () => {
+    const r = await runH({}, { hookCallerProduct: { hook: "nope", product: "tbconf-blocked" } });
+    for (const id of ids) {
+      assert.equal(st(r, id)?.status, "fail", id);
+      assert.match(st(r, id)?.asserted ?? "", /hookCallerProduct\.hook "nope": not a before hook/);
+    }
+  });
+
+  it("hookCallerProduct config keys are checked (usage error)", () => {
+    for (const bad of [[], {}, { hook: "" , product: "evolution" }, { hook: "g" }, { hook: "g", product: "Not A Product" }, { hook: "g", product: "evolution", extra: 1 }, { hook: "g", product: "evolution", op: "" }, { hook: "g", product: "evolution", input: { a: "${nope}" } }]) {
+      assert.throws(() => parseConformanceConfig({ hookCallerProduct: bad }, "test config"), /hookCallerProduct/, JSON.stringify(bad));
+    }
+    const good = { hook: "g", product: "evolution", op: "item_create", input: { a: 1 } };
+    assert.deepEqual(parseConformanceConfig({ hookCallerProduct: good }, "t").hookCallerProduct, good);
+  });
+});

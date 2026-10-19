@@ -29,6 +29,47 @@ export interface RunRelayOptions {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Every target process this module started and has not stopped yet. They run detached (own process group, so `stop` can
+ * signal the whole group), which means a terminal signal or the death of the runner does NOT reach them. This set is the
+ * safety net for every runner exit path other than `stop` itself: a normal or `process.exit` end, SIGINT and SIGTERM.
+ * (A SIGKILL of the runner cannot be caught; the relay then ends by itself when its stdin pipe closes.)
+ */
+const live = new Set<ChildProcess>();
+let guarded = false;
+
+function killLive(): void {
+  for (const child of live) {
+    if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) continue;
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
+  }
+  live.clear();
+}
+
+function track(child: ChildProcess): ChildProcess {
+  live.add(child);
+  child.once("exit", () => live.delete(child));
+  if (!guarded) {
+    guarded = true;
+    process.once("exit", killLive);
+    for (const sig of ["SIGINT", "SIGTERM"] as const) {
+      process.once(sig, () => {
+        killLive();
+        process.exit(128 + (sig === "SIGINT" ? 2 : 15));
+      });
+    }
+  }
+  return child;
+}
+
 function stop(child: ChildProcess): Promise<void> {
   return new Promise((resolve) => {
     if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) return resolve();
@@ -88,7 +129,7 @@ export async function runRelayTarget(opts: RunRelayOptions): Promise<Report> {
       const agt = newId("agt") as AgentId;
       portal.agents.push({ agt, name: "Conformance relay agent", mode: "free" });
       const out: string[] = [];
-      const login = spawnCommand(opts.loginCmd, { env, cwd: home, stdio: ["ignore", "pipe", "pipe"], detached: true });
+      const login = track(spawnCommand(opts.loginCmd, { env, cwd: home, stdio: ["ignore", "pipe", "pipe"], detached: true }));
       login.stdout?.on("data", (d: Buffer) => out.push(d.toString("utf8")));
       login.stderr?.on("data", (d: Buffer) => out.push(d.toString("utf8")));
       const exited = new Promise<number | null>((r) => login.once("exit", (code) => r(code)));
@@ -107,7 +148,7 @@ export async function runRelayTarget(opts: RunRelayOptions): Promise<Report> {
     const issuedBefore = upstream.issued.size;
     // ── 2. relay over stdio ──
     const before = snapshot(home, [heapDir]);
-    relay = spawnCommand(opts.cmd, { env: { ...env, NODE_OPTIONS: "--heapsnapshot-signal=SIGUSR2" }, cwd: heapDir, stdio: ["pipe", "pipe", "pipe"], detached: true });
+    relay = track(spawnCommand(opts.cmd, { env: { ...env, NODE_OPTIONS: "--heapsnapshot-signal=SIGUSR2" }, cwd: heapDir, stdio: ["pipe", "pipe", "pipe"], detached: true }));
     const child = relay;
     const received: Record<string, unknown>[] = [];
     const waiters = new Set<() => void>();

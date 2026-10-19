@@ -214,6 +214,9 @@ export async function runApp(opts: RunAppOptions): Promise<Report> {
       dynamic: config.dynamic,
       ...(config.narrowing ? { narrowing: config.narrowing } : {}),
       ...(config.scopeGrantOp ? { scopeGrantOp: config.scopeGrantOp } : {}),
+      ...(config.companionCallersOp ? { companionCallersOp: config.companionCallersOp } : {}),
+      ...(config.hookCallerProduct ? { hookCallerProduct: config.hookCallerProduct } : {}),
+      ...(config.callerListedOp ? { callerListedOp: config.callerListedOp } : {}),
       ...(prepared.length > 0
         ? { multi: (driver) => runPeerChecks({ suite: s, deps, app: { manifest: manifest as Manifest, bridge, driver, timeoutMs }, prepared, config, testRoots, notes }) }
         : {}),

@@ -6,7 +6,7 @@ import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { digest, type Ed25519KeyPair, HOLDS_PENDING_OP, hookResponseProblem, KNOWN_HOLD_FAMILIES, manifestDigest, normalizeTag, opaqueDigest, PUBLIC_ROUTE_PURPOSES, ulid, validateInput, withStandardOps } from "@opt2-tealbrick/manifest";
 import { type HoldVerdictClaim, type InstanceId, TYP } from "@opt2-tealbrick/spec/credentials";
-import type { CrudAction, Hook, Manifest, Operation, ProductId } from "@opt2-tealbrick/spec/manifest";
+import type { CrudAction, HoldFamily, Hook, Manifest, Operation, ProductId } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 import type { AppClient, CallOptions, OpAnswer, PersonSession } from "../app-client.ts";
 import { tamperValue } from "../app-client.ts";
@@ -22,7 +22,7 @@ import { jsonPointer, resolvePlaceholders, runSetup } from "../setup.ts";
 import { bad, na, notRun, type Outcome, ok, refusedWith, type Suite, verdict } from "../suite.ts";
 import { Mint, newId, nowS, peek } from "../tokens.ts";
 import { versionBelow } from "../version.ts";
-import { CAPS_AGENT_PLACEHOLDER, type ConformanceConfig, type InputCaller, type NarrowingFixture, type ScopeGrantFixture, type SetupStep } from "../waivers.ts";
+import { CAPS_AGENT_PLACEHOLDER, type CallerListedFixture, type CompanionCallersFixture, type ConformanceConfig, type HookCallerProductFixture, type InputCaller, type NarrowingFixture, type ScopeGrantFixture, type SetupStep } from "../waivers.ts";
 import { CHECK_IDS } from "./catalog.ts";
 
 export interface AppTargetContext {
@@ -52,6 +52,12 @@ export interface AppTargetContext {
   narrowing?: NarrowingFixture;
   /** package 0.1.22 (SDK-INSTANCE-GRANT): the person op that grants an agent one scope instance (`scopeGrantOp` in tealbrick-conformance.json) */
   scopeGrantOp?: ScopeGrantFixture;
+  /** package 0.1.23 (SDK-COMPANION-CALLERS): the person op whose output is `ctx.companionCallers()` (`companionCallersOp` in tealbrick-conformance.json) */
+  companionCallersOp?: CompanionCallersFixture;
+  /** package 0.1.23 (HOOK-CALLER-PRODUCT): a product-keyed before hook (`hookCallerProduct` in tealbrick-conformance.json) */
+  hookCallerProduct?: HookCallerProductFixture;
+  /** package 0.1.23 (Caller.listed, SPEC-GAP spec 0.1.49): an agent op exposing `ctx.caller.listed` (`callerListedOp` in tealbrick-conformance.json) */
+  callerListedOp?: CallerListedFixture;
   /** report notes (setup step results are appended) */
   notes?: string[];
   /**
@@ -105,6 +111,9 @@ const GRANT_PRD_SINCE = "0.1.28";
 
 /** First miniapp-sdk release with `ctx.scopeGrants` / `ctx.scopeSelfRevoke` (spec 0.1.47, SDK-INSTANCE-GRANT). */
 const SCOPE_GRANT_SINCE = "0.1.31";
+
+/** First miniapp-sdk release with `ctx.companionCallers` (spec 0.1.48, SDK-COMPANION-CALLERS). */
+const COMPANION_CALLERS_SINCE = "0.1.32";
 
 /** Runs every app-target check into `s`; returns the payload scan for the report. */
 export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<PayloadScan> {
@@ -510,21 +519,21 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   // proof binds `in`) and the context an unknown namespaced field (CORE §8: context is extensible).
   const hooks = m.hooks ?? [];
   const HOOK_INPUT: Json = { probe: "tb-conformance" };
-  const hookReq = (h: Hook): { call: Record<string, Json>; context: Record<string, Json>; output?: Json } => {
+  const hookReq = (h: Hook, over: { caller?: Record<string, Json>; op?: string; input?: Json } = {}): { call: Record<string, Json>; context: Record<string, Json>; output?: Json } => {
     const effect = h.match.effects?.[0] ?? "write";
     return {
       call: {
         id: newId("call"),
         ws: b.ids.ws,
-        caller: { type: "agent", id: agentA.id, mode: "free" },
+        caller: over.caller ?? { type: "agent", id: agentA.id, mode: "free" },
         target: {
           instance: newId("ins"),
           product: h.match.products.find((x) => x !== "*") ?? "tb-conformance-target",
-          op: h.match.operations?.[0] ?? "probe_op",
+          op: over.op ?? h.match.operations?.[0] ?? "probe_op",
           crud: effect === "read" ? ["read"] : ["create"],
           effect,
         },
-        input: HOOK_INPUT,
+        input: over.input ?? HOOK_INPUT,
       },
       context: { "tb-conformance.probe": true },
       ...(h.phase === "after" ? { output: { probe: "tb-conformance" } } : {}),
@@ -544,6 +553,69 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     }
     return verdict(pass, seen.join("; "));
   });
+  // ── hooks called by an APP caller (package 0.1.23, HOOK-CALLER-PRODUCT, spec 0.1.45; bridge >= 0.2.2) ──
+  // The bridge sends call.caller {type: "app", id: <caller instance>, product: <its product>} for an app-initiated call, and
+  // WITHOUT `product` for a caller it cannot map (treat as unverified). Every declared BEFORE hook is called both ways with a
+  // proper hook proof; both answers must be valid. A hook whose criteria key on the caller's product (`hookCallerProduct`
+  // fixture) must answer per its rule with the product and must fail CLOSED without it (allow false or a hold verdict).
+  const beforeHooks = hooks.filter((h) => h.phase === "before");
+  const hookFx = ctx.hookCallerProduct;
+  const FX_HOOK_PROBLEM = hookFx ? (beforeHooks.some((h) => h.id === hookFx.hook) ? null : `tealbrick-conformance.json hookCallerProduct.hook ${JSON.stringify(hookFx.hook)}: not a before hook of this manifest`) : null;
+  const appHookAs = (h: Hook, withProduct: boolean) => {
+    const fx = hookFx && hookFx.hook === h.id ? hookFx : undefined;
+    const caller: Record<string, Json> = { type: "app", id: appCaller, ...(withProduct ? { product: fx?.product ?? "tbconf-caller-app" } : {}) };
+    const input = fx?.input !== undefined ? resolvePlaceholders(fx.input, setup) : undefined;
+    if (input) taint.push(...input.blocked);
+    return hookReq(h, { caller, ...(fx?.op !== undefined ? { op: fx.op } : {}), ...(input ? { input: input.value } : {}) });
+  };
+  const verdictOf = (body: unknown): string => {
+    if (!isObj(body)) return "?";
+    if (body.allow === true) return "allow";
+    if (isObj(body.hold)) return `hold ${String(body.hold.family)}`;
+    return `refuse${typeof body.reason === "string" ? ` (${body.reason.slice(0, 60)})` : ""}`;
+  };
+  for (const [id, title, withProduct] of [
+    ["A2.hook_app_caller_product", "every declared before hook answers a valid hook call from an APP caller with call.caller.product", true],
+    ["A2.hook_app_caller_no_product", "every declared before hook answers a valid hook call from an APP caller WITHOUT call.caller.product", false],
+  ] as const) {
+    await s.run(
+      id,
+      title,
+      `each before hook called with call.caller {type: app, id: <an instance id>${withProduct ? ", product: <a product>" : ""}} (a proper hook proof) → 200 with a valid before answer (the A2.hook_valid shape rule)${withProduct ? "; the answer of the hookCallerProduct hook is recorded" : ""}`,
+      async () => {
+        if (beforeHooks.length === 0) return na("manifest declares no before hooks");
+        if (FX_HOOK_PROBLEM) return bad(FX_HOOK_PROBLEM);
+        const seen: string[] = [];
+        let pass = true;
+        for (const h of beforeHooks) {
+          const a = await c().callHook(h.id, h.phase, appHookAs(h, withProduct));
+          const problem = a.status !== 200 ? show(a) : hookResponseProblem(h.phase, a.body, product);
+          pass &&= problem === null;
+          const fx = hookFx && hookFx.hook === h.id;
+          seen.push(`${h.id}: ${problem ?? `200 ${verdictOf(a.body)}${fx && withProduct ? ` (the app's rule for product ${JSON.stringify(hookFx?.product)})` : ""}`}`);
+        }
+        return verdict(pass, seen.join("; "));
+      },
+    );
+  }
+  await s.run(
+    "A2.hook_app_caller_fail_closed",
+    "a product-keyed before hook fails CLOSED when the app caller carries no product (HOOK-CALLER-PRODUCT)",
+    "the hookCallerProduct hook called by {type: app, id} WITHOUT product → 200 allow false (or a hold verdict, allow false + hold); allow true without a product = fail; the same call WITH the fixture product must be a valid answer",
+    async () => {
+      if (!hookFx) return na("no hookCallerProduct in tealbrick-conformance.json (the app has no hook keyed on the calling app's product)");
+      if (FX_HOOK_PROBLEM) return bad(FX_HOOK_PROBLEM);
+      const h = beforeHooks.find((x) => x.id === hookFx.hook) as Hook;
+      const withP = await c().callHook(h.id, h.phase, appHookAs(h, true));
+      const withProblem = withP.status !== 200 ? show(withP) : hookResponseProblem(h.phase, withP.body, product);
+      const without = await c().callHook(h.id, h.phase, appHookAs(h, false));
+      const withoutProblem = without.status !== 200 ? show(without) : hookResponseProblem(h.phase, without.body, product);
+      const shown = `${h.id}: with product ${JSON.stringify(hookFx.product)} → ${withProblem ?? verdictOf(withP.body)}; without product → ${withoutProblem ?? verdictOf(without.body)}`;
+      if (withProblem !== null || withoutProblem !== null) return bad(`${shown} (an invalid hook answer)`);
+      if ((without.body as { allow: boolean }).allow === true) return bad(`${shown}: allow true for an app caller the bridge could not map to a product; a hook keyed on the caller's product must fail closed (allow false or a hold verdict)`);
+      return ok(shown);
+    },
+  );
   // SPEC-GAP: SDK-API §3.2 names `call_proof_invalid` for /tb/v1/ops only; the same code is expected on hook and bridge-op routes.
   for (const [id, title, tamper] of [
     ["A2.hook_no_proof", "hook call without proof", "no_proof"],
@@ -1268,6 +1340,125 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
         }
       }
       return withRestore(before, o);
+    },
+  );
+
+  // ── A19 SDK-COMPANION-CALLERS (spec 0.1.48, SDK >= 0.1.32): `ctx.companionCallers()` on owner pages ──
+  // `companionCallersOp {op, path?, input?, agentProbe?}` (tealbrick-conformance.json) names a PERSON op whose output carries
+  // what `ctx.companionCallers()` gave it. Without it, and for an SDK older than 0.1.32, the checks are not_applicable.
+  const ccCfg = ctx.companionCallersOp;
+  const ccGate = (): Outcome | null => {
+    const v = b.claims[0]?.request.sdkVersion;
+    if (versionBelow(v, COMPANION_CALLERS_SINCE)) return na(`SDK ${v} predates ${COMPANION_CALLERS_SINCE} (SDK-COMPANION-CALLERS, spec 0.1.48): not applicable by version`);
+    if (!ccCfg) return na("no companionCallersOp in tealbrick-conformance.json (the app does not read ctx.companionCallers)");
+    return null;
+  };
+  type CcRow = { product: string; ins: string; name: string; provider: string | null };
+  const ccNorm = (v: unknown): CcRow[] | string => {
+    if (!Array.isArray(v)) return `${JSON.stringify(v) ?? "undefined"} is not an array`;
+    const out: CcRow[] = [];
+    for (const e of v) {
+      if (!isObj(e) || typeof e.product !== "string" || typeof e.ins !== "string" || typeof e.name !== "string") return `entry ${JSON.stringify(e)} is not {product, ins, name, provider}`;
+      const extra = Object.keys(e).filter((k) => k !== "product" && k !== "ins" && k !== "name" && k !== "provider");
+      if (extra.length) return `entry ${e.ins} carries ${extra.join(", ")} (only product, ins, name, provider are allowed: nothing from the grant)`;
+      if (e.provider !== undefined && e.provider !== null && typeof e.provider !== "string") return `entry ${e.ins} has a provider that is not a string or null`;
+      out.push({ product: e.product, ins: e.ins, name: e.name, provider: typeof e.provider === "string" ? e.provider : null });
+    }
+    return out.sort((x, y) => (x.ins < y.ins ? -1 : x.ins > y.ins ? 1 : 0));
+  };
+  const ccShow = (rows: CcRow[]) => (rows.length ? rows.map((r) => `${r.product}/${r.provider ?? "null"}`).join(", ") : "[]");
+  await s.run(
+    "A19.companion_callers_person",
+    "a person op sees the slice's companion callers with their provider through ctx.companionCallers() (SDK-COMPANION-CALLERS)",
+    "three callers are listed in the slice companionCallers (provider railway, own_infra and null) and the slice is published; the configured companionCallersOp as the owner → 200 and its output at path (default /companionCallers) equals the whole slice list {product, ins, name, provider} (provider null = unknown); no other member",
+    async () => {
+      const gate = ccGate();
+      if (gate || !ccCfg) return gate ?? na("no companionCallersOp");
+      const op = personOps.find((o) => o.id === ccCfg.op);
+      if (!op) return bad(`tealbrick-conformance.json companionCallersOp.op ${JSON.stringify(ccCfg.op)}: not a person op of this manifest`);
+      if (!sess) return bad("no person session");
+      const added: InstanceId[] = [];
+      try {
+        const tag = ulid().slice(-6);
+        for (const [i, provider] of [["a", "railway"], ["b", "own_infra"], ["c", null]] as const) {
+          const ins = newId("ins") as InstanceId;
+          added.push(ins);
+          await b.control.waitForSliceRevision(await b.control.listCompanionCaller({ product: `tbconf-cc-${i}` as ProductId, ins, name: `Conformance callers ${i} ${tag}`, provider }), T);
+        }
+        const want = ccNorm(b.companionCallers) as CcRow[];
+        const raw = ccCfg.input !== undefined ? grantInput(ccCfg.input) : {};
+        const r = await c().personOp(sess, ccCfg.op, raw);
+        if (r.status !== 200) return bad(`${ccCfg.op}: ${show(r)} (expected 200 ok)`);
+        const path = ccCfg.path ?? "/companionCallers";
+        const got = ccNorm(jsonPointer(r.output, path));
+        if (typeof got === "string") return bad(`${ccCfg.op}: output${path}: ${got}`);
+        const same = got.length === want.length && got.every((g, i) => JSON.stringify(g) === JSON.stringify(want[i]));
+        return verdict(same, same ? `${ccCfg.op}: 200 ok; output${path} = the slice list (${got.length}: ${ccShow(got)})` : `${ccCfg.op}: output${path} (${got.length}: ${ccShow(got)}) differs from the slice list (${want.length}: ${ccShow(want)})`);
+      } finally {
+        let rev = 0;
+        for (const ins of added) rev = await b.control.unlistCompanionCaller(ins);
+        if (rev) await b.control.waitForSliceRevision(rev, T);
+      }
+    },
+  );
+  await s.run(
+    "A19.companion_callers_agent_absent",
+    "an agent call has no ctx.companionCallers (SDK-COMPANION-CALLERS)",
+    "with companionCallersOp.agentProbe: agent A calls the probe agent op while the slice lists companion callers → its output at path (default /companionCallers) is absent (undefined, null or false); any list = fail",
+    async () => {
+      const gate = ccGate();
+      if (gate || !ccCfg) return gate ?? na("no companionCallersOp");
+      const probeCfg = ccCfg.agentProbe;
+      if (!probeCfg) return na("no companionCallersOp.agentProbe: ctx.companionCallers on agent calls is not observable black-box");
+      const probe = m.operations.find((x) => x.id === probeCfg.op);
+      if (probe?.audience !== "agent" || probe.dynamic) return bad(`tealbrick-conformance.json companionCallersOp.agentProbe.op ${JSON.stringify(probeCfg.op)}: not a static agent op of this manifest`);
+      const ins = newId("ins") as InstanceId;
+      try {
+        await b.control.waitForSliceRevision(await b.control.listCompanionCaller({ product: "tbconf-cc-agent" as ProductId, ins, name: `Conformance callers agent ${ulid().slice(-6)}`, provider: "railway" }), T);
+        const a = track(await c().callOp(probe.id, probeCfg.input !== undefined ? grantInput(probeCfg.input) : inputFor(probe), { agent: agentA.id, ...(idemKey(probe) ? { idempotencyKey: idemKey(probe) } : {}) }));
+        const path = probeCfg.path ?? "/companionCallers";
+        if (!isOk(a)) return bad(`${probe.id} as agent A: ${show(a)} (expected 200 ok)`);
+        const v = jsonPointer(isObj(a.body) ? a.body.output : undefined, path);
+        const absent = v === undefined || v === null || v === false;
+        return verdict(absent, absent ? `${probe.id} as agent A: output${path} is ${v === undefined ? "absent" : JSON.stringify(v)} (ctx.companionCallers is undefined on an agent call)` : `${probe.id} as agent A: output${path} = ${JSON.stringify(v).slice(0, 160)}: the companion caller list is exposed to an AGENT call (expected absent)`);
+      } finally {
+        await b.control.waitForSliceRevision(await b.control.unlistCompanionCaller(ins), T);
+      }
+    },
+  );
+
+  // `Caller.listed` (miniapp-sdk 0.1.32, SPEC-GAP spec 0.1.49): on an APP caller, true when its instance is in the current slice
+  // companionCallers under the caller's verified product, else false. `callerListedOp {op, path?}` names a static agent op the
+  // suite's app caller runs and whose output carries the value. Listed → true, then dropped from the slice → false.
+  await s.run(
+    "A19.caller_listed",
+    "ctx.caller.listed of an app caller is true while the slice lists it and false after the slice drops it (Caller.listed)",
+    "the suite's app caller (companion grant with prd = tbconf-listed) runs the configured callerListedOp.op while the slice lists its instance under tbconf-listed → the output at path (default /listed) is true; the slice drops the instance and the SAME call runs again → false",
+    async () => {
+      const v = b.claims[0]?.request.sdkVersion;
+      if (versionBelow(v, COMPANION_CALLERS_SINCE)) return na(`SDK ${v} predates ${COMPANION_CALLERS_SINCE} (Caller.listed): not applicable by version`);
+      const cfg = ctx.callerListedOp;
+      if (!cfg) return na("no callerListedOp in tealbrick-conformance.json (the app does not read ctx.caller.listed)");
+      const op = agentOps.find((o) => o.id === cfg.op);
+      if (!op) return bad(`tealbrick-conformance.json callerListedOp.op ${JSON.stringify(cfg.op)}: not a static agent op of this manifest`);
+      const path = cfg.path ?? "/listed";
+      const run = async () => {
+        const extra = { held: [] as HoldFamily[], prd: "tbconf-listed" };
+        let a: OpAnswer;
+        if (cfg.input !== undefined) {
+          const key = idemKey(op);
+          a = track(await c().callOp(op.id, grantInput(cfg.input), { caller: appCaller, ...extra, ...(key ? { idempotencyKey: key } : {}) }));
+        } else a = (await appCall(appCaller, op, extra)).answer;
+        return { a, value: isOk(a) && isObj(a.body) ? jsonPointer(a.body.output, path) : undefined };
+      };
+      await b.control.waitForSliceRevision(await b.control.listCompanionCaller({ product: "tbconf-listed" as ProductId, ins: appCaller, name: `Conformance caller ${ulid().slice(-6)}`, provider: null }), T);
+      const listed = await run();
+      if (!isOk(listed.a)) return AUTH_CODES.has(listed.a.code ?? "") || listed.a.code === "audience_not_agent" ? bad(`${op.id} as the app caller: ${show(listed.a)}`) : notRun(`${op.id} as the app caller: ${show(listed.a)} — supply an inputs fixture (inputsAs.app or callerListedOp.input) an app caller can run`);
+      await b.control.waitForSliceRevision(await b.control.unlistCompanionCaller(appCaller), T);
+      const dropped = await run();
+      const shown = `${op.id}: listed → output${path} ${JSON.stringify(listed.value)}; slice dropped the instance → ${isOk(dropped.a) ? JSON.stringify(dropped.value) : show(dropped.a)}`;
+      if (!isOk(dropped.a)) return notRun(`${shown} (the second call was not ok)`);
+      return verdict(listed.value === true && dropped.value === false, `${shown} (expected true, then false)`);
     },
   );
 

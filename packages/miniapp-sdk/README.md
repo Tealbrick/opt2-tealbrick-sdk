@@ -34,6 +34,24 @@ run: async (input, ctx) => {
 - **Known limits (documented, not changed).** The ceiling ignores the KIND of the default grant (`own` vs `shared` / `all`): a level that only a `shared` default gives agents still counts. A revoke does not stick across a share toggle: an instance that becomes shared gets the `shared` default again for agents seen before (`INSERT OR IGNORE`), exactly as for a revoke by the owner. No `tb_scopes` rows are removed when an agent leaves the slice.
 - **Unchanged.** `authorize()` step 2 reads the row at call time; the Core grant still bounds crud, workflow and held families first; Rules hooks still run on every call. The standard Agents & scopes page lives in the app template (`packages/create-tealbrick-miniapp/template/src/ui/standard.tsx`, copied into each app) and its default list shows no scope rows; an app that renders scope rows (`AgentsPage render`) gets `source` and `grantedByOp` (op id) from `tb.agents_list`. The spec row has no grant date and no op title field, so "given by <op title> on <date>" is not renderable from the row alone (the op title comes from the manifest; the date would need a spec field).
 
+## Companion callers on owner pages (0.1.32, SDK-COMPANION-CALLERS, spec 0.1.48)
+
+A person op can list the verified apps that may call this app, for example to render "Connected apps" with where each one runs:
+
+```ts
+run: async (_input, ctx) => {
+  const callers = ctx.companionCallers?.() ?? []; // undefined on agent and app calls
+  return { apps: callers.map((c) => ({ name: c.name, product: c.product, provider: c.provider })) };
+}
+```
+
+- **Shape.** `ctx.companionCallers()` returns `readonly CompanionCaller[]`: `{ product, ins, name, provider }` for each entry of the verified slice `companionCallers[]`. `provider` is where that instance runs (`"railway"`, `"own_infra"`, another provider key); a value that is not `^[a-z][a-z0-9_]{1,31}$`, `null` or an absent field reads as `null` (unknown, a Core before the field). Malformed entries are skipped, as for every other use of the slice list.
+- **Where it exists.** Set ONLY in a live person op, at the same single place as `ctx.scopeGrants`. It is `undefined` on agent calls, app (companion) calls, scheduled fires, hooks, jobs, hold views, public routes and Start/Event contexts. No grant material is ever in an entry.
+- **Fresh and frozen.** Each call reads the CURRENT verified slice (not a snapshot from the start of the op), so a slice update between two calls shows. The array and every entry are frozen copies: changing them has no effect on the slice. While the slice is missing or older than 12 h (`trust.stale`) the function returns `[]`.
+- **Not for authorisation.** The list is display and binding data for the owner page. To decide anything per caller, key on `ctx.caller.product` / `ctx.caller.id` (verified), as before.
+- **`ctx.caller.listed` on app callers (0.1.32, extension).** On an APP caller, `ctx.caller.listed` is `true` when the verified caller instance is in the CURRENT signed slice `companionCallers` under the SAME verified product as `ctx.caller.product`; `false` when the slice is stale (older than 12 h), the instance is not listed, or it is listed under another product. The key is ABSENT on person and agent callers. It is evaluated when the context is built: a live op call, a scheduled-op fire and a resumed held job each read the then-current slice. Typed in spec 0.1.49 (`Caller.listed`, the pin is 0.1.49): read `ctx.caller.listed` directly; `SdkCaller` stays exported as an alias of `Caller`. Key on `ctx.caller.product` and `ctx.caller.id` for identity; `listed` only says whether the signed slice still lists that instance.
+- **Unchanged.** `Caller.product`, the `grant_revoked` check and the fire-time re-check of scheduled ops read the same slice list and behave exactly as in 0.1.31.
+
 ## `sanitizeAgentDocument()` (0.1.29, C238, C230, C232; 0.1.30 needs `@opt2-tealbrick/manifest` 0.1.25)
 
 Agent-written HTML is served as a sandboxed `/_d/` document. CSP cannot stop every way such a page reaches the network (`<link rel=prerender>`, `<a ping>`, a navigation), so the server removes those constructs before it serves the page. Server entry only (`import { sanitizeAgentDocument } from "@opt2-tealbrick/miniapp-sdk"`), never the browser `/client` entry.
