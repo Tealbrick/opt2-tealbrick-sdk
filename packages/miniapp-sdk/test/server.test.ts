@@ -223,7 +223,7 @@ describe("agent operations via the bridge", () => {
   test("claim installed the slice and applied defaultGrants on first sight", async () => {
     assert.equal(b.bridge.claims, 1);
     const rows = await b.running.scopes.list(b.w.agents.a);
-    assert.deepEqual(rows, [{ agent: b.w.agents.a, type: "notebook", instanceId: b.w.agents.a, access: "read_write", source: "default" }]);
+    assert.deepEqual(rows, [{ agent: b.w.agents.a, type: "notebook", instanceId: b.w.agents.a, access: "read_write", authority: "bounded", source: "default" }]);
     assert.equal(await b.running.scopes.summary(b.w.agents.a), "1 Notebooks (1 write)");
     const health = (await (await fetch(`${b.base}/tb/v1/health`)).json()) as { status: string; manifestDigest: string };
     assert.equal(health.status, "ok");

@@ -2,7 +2,7 @@
 import { ulid } from "@opt2-tealbrick/manifest";
 import type { FreeCaps, Sha256Digest } from "@opt2-tealbrick/spec/credentials";
 import type { Effect, HoldFamily } from "@opt2-tealbrick/spec/manifest";
-import type { Json, Receipt, ReceiptQuery, ReceiptStatus, ReceiptStore } from "@opt2-tealbrick/spec/sdk";
+import type { AdmittedBy, Json, Receipt, ReceiptQuery, ReceiptStatus, ReceiptStore } from "@opt2-tealbrick/spec/sdk";
 import { clampLimit, decodeCursor, encodeCursor } from "./audit.ts";
 import { type RawDb, type Row, tx } from "./store.ts";
 
@@ -47,6 +47,8 @@ export interface NewReceipt {
   heldBy?: string | null;
   /** v0.1.13: hook verdict reason or the SDK hold reason code (never input, view or meta; C90) */
   holdReason?: string | null;
+  /** v0.1.35 (C283 A1, S7): which rule admitted a SCOPED call; absent for unscoped and refused calls */
+  admittedBy?: AdmittedBy | null;
   status: ReceiptStatus;
   inputDigest: Sha256Digest;
   summary: string;
@@ -89,6 +91,7 @@ function toReceipt(r: Row, withView: boolean): Receipt {
     effect: String(r.effect) as Effect,
     holdFamily: (r.hold_family as Receipt["holdFamily"]) ?? null,
     heldBy: (r.held_by as string | null | undefined) ?? null,
+    ...(r.admitted_by === "app_owner_row" || r.admitted_by === "portal_grant" ? { admittedBy: r.admitted_by } : {}),
     status: String(r.status) as ReceiptStatus,
     inputDigest: String(r.input_digest) as Sha256Digest,
     summary: String(r.summary),
@@ -274,7 +277,7 @@ export class Receipts implements ReceiptStore {
     this.#db
       .prepare(
         `INSERT INTO tb_receipts (id, call_id, caller_type, caller_id, caller_name, op, effect, hold_family, status, input_digest,
-          summary, meta, idempotency_key, view, created_at, expires_at, held_by, hold_reason, caller_product) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          summary, meta, idempotency_key, view, created_at, expires_at, held_by, hold_reason, caller_product, admitted_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -296,19 +299,20 @@ export class Receipts implements ReceiptStore {
         n.heldBy ?? null,
         n.holdReason ?? null,
         n.caller.type === "app" ? (n.caller.product ?? null) : null,
+        n.admittedBy ?? null,
       );
     return this.getSync(id) as Receipt;
   }
 
   /** Terminal statuses drop the hold view (§4.1). */
-  finish(id: string, status: ReceiptStatus, patch: { summary?: string; meta?: Json; consumed?: boolean } = {}): void {
+  finish(id: string, status: ReceiptStatus, patch: { summary?: string; meta?: Json; consumed?: boolean; admittedBy?: AdmittedBy } = {}): void {
     const keepView = status === "held" || status === "approved";
     this.#db
       .prepare(
         `UPDATE tb_receipts SET status = ?, summary = COALESCE(?, summary), meta = COALESCE(?, meta),
-          consumed = CASE WHEN ? THEN 1 ELSE consumed END, view = CASE WHEN ? THEN view ELSE NULL END WHERE id = ?`,
+          consumed = CASE WHEN ? THEN 1 ELSE consumed END, view = CASE WHEN ? THEN view ELSE NULL END, admitted_by = COALESCE(?, admitted_by) WHERE id = ?`,
       )
-      .run(status, patch.summary ?? null, patch.meta === undefined ? null : JSON.stringify(patch.meta), patch.consumed ? 1 : 0, keepView ? 1 : 0, id);
+      .run(status, patch.summary ?? null, patch.meta === undefined ? null : JSON.stringify(patch.meta), patch.consumed ? 1 : 0, keepView ? 1 : 0, patch.admittedBy ?? null, id);
   }
 
   decide(id: string, status: "approved" | "denied", by: Receipt["decidedBy"], now: number): void {
