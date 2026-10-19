@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, test } from "node:test";
 import { AGENT_DOCUMENT_MAX_BYTES, AGENT_DOCUMENT_RULES as R } from "@opt2-tealbrick/manifest";
+import { parse, serialize } from "parse5";
 import { AGENT_DOCUMENT_UNAVAILABLE_HTML, agentDocumentPrecheck, agentDocumentStats, MAX_ATTRIBUTE_BUDGET, MAX_ATTRIBUTES_PER_TAG, type SanitizeAgentDocumentResult, sanitizeAgentDocument } from "../src/server/index.ts";
 import { names, bodyPage as page, variants } from "./agent-document-shapes.ts";
 
@@ -27,6 +28,31 @@ const medianMs = (f: () => void, runs = 5): number => {
   return ts[Math.floor(runs / 2)] as number;
 };
 
+/** The benign rich document repeated up to 256 KiB. */
+function rich256(): string {
+  const rich = inputOf("benign-rich-document.html");
+  const richBody = rich.slice(rich.indexOf("<body>") + 6, rich.lastIndexOf("</body>"));
+  return page(richBody.repeat(Math.floor((256 * 1024 - page("").length) / richBody.length)));
+}
+
+/** Same-run calibration for the ceilings of (a) (C259, CI): the CI box is 1.5-2 times slower than the dev Mac ("256 KiB rich
+ *  document: 54.0 ms" against a ceiling of 50 ms, which the dev Mac meets at 30-34 ms). The baseline is a fixed benign job in
+ *  this run: plain parse5 parse + serialize of the 256 KiB rich document, no SDK code, so it moves with the machine and not with
+ *  the code under test. It was BASELINE_DEV_MS on the dev Mac (median of 9, idle, 2026-10-19). A ceiling is multiplied by
+ *  max(1, baseline / BASELINE_DEV_MS), at most SCALE_CAP: never tighter than the dev ceilings, proportionally looser on a slower
+ *  machine. The factor is capped, so a machine more than SCALE_CAP times slower than the dev Mac (or code that is) still fails. */
+const BASELINE_DEV_MS = 10;
+const SCALE_CAP = 4;
+let scaleOnce: number | undefined;
+function speedScale(page: string): number {
+  if (scaleOnce !== undefined) return scaleOnce;
+  const base = medianMs(() => serialize(parse(page, { scriptingEnabled: true })), 9);
+  const scale = Math.min(SCALE_CAP, Math.max(1, base / BASELINE_DEV_MS));
+  console.log(`# C259 calibration: plain parse5 parse + serialize of the 256 KiB page ${base.toFixed(1)} ms (dev Mac ${BASELINE_DEV_MS} ms): ceilings x ${scale.toFixed(2)}`);
+  scaleOnce = scale;
+  return scale;
+}
+
 function expectInertResult(r: SanitizeAgentDocumentResult, why: string): void {
   assert.equal(r.ok, false, why);
   assert.equal(r.html, AGENT_DOCUMENT_UNAVAILABLE_HTML, why);
@@ -36,37 +62,38 @@ function expectInertResult(r: SanitizeAgentDocumentResult, why: string): void {
 
 describe("C259 timing (runs alone)", () => {
   test("(a) worst cases just under the limits sanitise end to end within a measured ceiling", () => {
-    // Ceiling 50 ms per sanitizeAgentDocument call (median of 5): every page below needs three parse5 passes, two linear scans
+    // Ceiling 50 ms on the dev Mac (x the same-run calibration scale, see speedScale) per sanitizeAgentDocument call (median of 5): every page below needs three parse5 passes, two linear scans
     // and the walk. Measured on the dev Mac under load (median): 2,048 attributes 15-26 ms, depth 600 3-6 ms, 256 KiB rich page
     // 34 ms. The 1,024 × 64 page (cost exactly at the budget, 254 KB of attributes) is parse5-bound: 3 × 11 ms of parse plus
     // 2 × 3 ms of scan, 55 ms median measured; its ceiling is 120 ms. Over a ceiling = the bounds no longer bound the work.
-    const rich = inputOf("benign-rich-document.html");
-    const richBody = rich.slice(rich.indexOf("<body>") + 6, rich.lastIndexOf("</body>"));
-    const kib256 = page(richBody.repeat(Math.floor((256 * 1024 - page("").length) / richBody.length)));
+    const kib256 = rich256();
     const one = page(`<p ${names(MAX_ATTRIBUTES_PER_TAG)}>x</p>`);
     const many = page(`<p ${names(64)}>x</p>`.repeat(1024));
     assert.equal(cost(one), MAX_ATTRIBUTE_BUDGET);
     assert.equal(1024 * 64 * 64, MAX_ATTRIBUTE_BUDGET);
     assert.equal(cost(many), MAX_ATTRIBUTE_BUDGET, "1,024 × 64² is AT the budget, and the rule is <=");
     assert.ok(Buffer.byteLength(kib256) <= 256 * 1024 && Buffer.byteLength(kib256) > 250 * 1024);
+    const scale = speedScale(kib256);
     const cases: [string, string, number][] = [
       ["one tag × 2,048 attributes", one, 50],
       ["1,024 tags × 64 attributes", many, 120],
       [`depth ${R.maxDepth} (the limit)`, nest(R.maxDepth - 2), 50],
       ["256 KiB rich document", kib256, 50],
     ];
-    for (const [name, h, ceiling] of cases) {
+    for (const [name, h, devCeiling] of cases) {
+      const ceiling = devCeiling * scale;
       const r = sanitizeAgentDocument(h, on);
       assert.equal(r.ok, true, name);
       const ms = medianMs(() => sanitizeAgentDocument(h, on));
-      console.log(`# C259 (a) ${name}: ${ms.toFixed(1)} ms (ceiling ${ceiling} ms)`);
-      assert.ok(ms < ceiling, `${name}: ${ms.toFixed(1)} ms`);
+      console.log(`# C259 (a) ${name}: ${ms.toFixed(1)} ms (ceiling ${ceiling.toFixed(0)} ms = ${devCeiling} ms x ${scale.toFixed(2)})`);
+      assert.ok(ms < ceiling, `${name}: ${ms.toFixed(1)} ms (ceiling ${ceiling.toFixed(0)} ms)`);
     }
   });
 
   test("(b) every bypass shape is refused in < 100 ms", () => {
     // Live Artifacts S8 shapes (copied from the LA re-check, 2026-10-18) and the C259 shapes. A refusal is one linear scan
-    // (≈10 ns per character) or a parse stopped by the bounded adapter; measured: 1-20 ms each (dev Mac, median of 3).
+    // (≈10 ns per character) or a parse stopped by the bounded adapter; measured: 1-10 ms each (dev Mac, median of 3). The 100 ms
+    // is a HARD bound, not scaled by the calibration: the slowest refusal has 10 times that margin.
     const N = 40_000;
     const la = (n: number) => Array.from({ length: n }, (_, i) => `a${i}`).join(" ");
     const shapes: Record<string, string> = {
@@ -96,12 +123,16 @@ describe("C259 timing (runs alone)", () => {
     };
     for (const v of variants) shapes[`variant: ${v.name}`] = page(v.make(names(36_000)));
     assert.ok(Object.keys(shapes).length >= 21 + 14 + 8);
+    const all: [string, number][] = [];
     for (const [name, h] of Object.entries(shapes)) {
       assert.ok(Buffer.byteLength(h) <= AGENT_DOCUMENT_MAX_BYTES, name);
       for (const allowScripts of [true, false]) expectInertResult(sanitizeAgentDocument(h, { ...o, allowScripts }), name);
       const ms = medianMs(() => sanitizeAgentDocument(h, on), 3);
+      all.push([name, ms]);
       assert.ok(ms < 100, `${name}: ${ms.toFixed(1)} ms`);
     }
+    all.sort((a, b) => b[1] - a[1]);
+    console.log(`# C259 (b) slowest refusals: ${all.slice(0, 3).map(([n, ms]) => `${n} ${ms.toFixed(1)} ms`).join("; ")}`);
   });
 
   test("(b) LA S2 shapes cost no more than twice the same page without the trick (linear; the parse is bounded)", () => {
@@ -124,6 +155,31 @@ describe("C259 timing (runs alone)", () => {
       const ref = medianMs(() => sanitizeAgentDocument(reference, on), 3);
       console.log(`# C259 (b) ${name}: ${ms.toFixed(1)} ms (reference without the trick ${ref.toFixed(1)} ms)`);
       assert.ok(ms < 2 * ref + 50, `${name}: ${ms.toFixed(1)} ms vs ${ref.toFixed(1)} ms`);
+    }
+  });
+
+  test("(c) shapes of the shared bounded parse (live-artifacts S6/S7/S8 re-checks) cost no more than their ceiling", () => {
+    // Ceilings per call as in Live Artifacts' test (dev Mac), times the same-run calibration scale. The first three are refused
+    // at once by a bound (1-12 ms measured); the next two are refused when the work bound is reached, so they cost the bound
+    // itself (~100-180 ms); the rest are kept and linear. Unbounded costs on the dev Mac are in the names.
+    const scale = speedScale(rich256());
+    const attrs = (n: number): string => Array.from({ length: n }, (_, i) => `a${i}`).join(" ");
+    const shapes: [string, string, number, boolean][] = [
+      ["<html z0><html z1>... x30,000 (12.5 s)", Array.from({ length: 30_000 }, (_, i) => `<html z${i}>`).join(""), 100, false],
+      ["<body z0><body z1>... x30,000 (12 s)", Array.from({ length: 30_000 }, (_, i) => `<body z${i}>`).join(""), 100, false],
+      ["<p><b a0..a255> + <p>x x20,000 (4.6 s)", `<p><b ${attrs(256)}>${"<p>x".repeat(20_000)}`, 100, false],
+      ["<p> + 8 formatting elements + <p>x x45,000 (0.6 s, 4 MB out)", `<p><b><i><u><s><em><strong><code><small>${"<p>x".repeat(45_000)}`, 250, false],
+      ["adoption agency detaching 99,000 children (12 s)", `<b><div>${"<br>".repeat(99_000)}</b>`, 250, false],
+      ["text before an open table after 60,000 siblings (5 s)", `${"<br>".repeat(60_000)}<table>${"a ".repeat(250_000)}`, 1000, true],
+      ["99,990 elements foster-parented before an open table (1 s)", `<table>${"<br>".repeat(99_990)}`, 600, true],
+      ["a re-opened <b> with a 1,000-character attribute in 20,000 paragraphs (20 MB out, 1.4 s)", `<p><b a="${"X".repeat(1000)}">t${"<p>t".repeat(20_000)}`, 500, false],
+    ];
+    for (const [name, h, devCeiling, ok] of shapes) {
+      assert.equal(sanitizeAgentDocument(h, on).ok, ok, name);
+      const ms = medianMs(() => sanitizeAgentDocument(h, on), 3);
+      const ceiling = devCeiling * scale;
+      console.log(`# C259 (c) ${name}: ${ms.toFixed(1)} ms (ceiling ${ceiling.toFixed(0)} ms)`);
+      assert.ok(ms < ceiling, `${name}: ${ms.toFixed(1)} ms (ceiling ${ceiling.toFixed(0)} ms)`);
     }
   });
 });
