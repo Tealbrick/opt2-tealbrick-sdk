@@ -3,6 +3,25 @@
 The Teal Brick opt2 conformance suite: checks, a fake bridge and a fake Portal, generated from `@opt2-tealbrick/spec`.
 Targets: `app`, `manifest`, `bridge`, `relay`, `core` (`tb-conformance --help`).
 
+## 0.1.25 (spec 0.1.52)
+
+Release order (C215): spec 0.1.52 → `@opt2-tealbrick/manifest` 0.1.28 → `@opt2-tealbrick/miniapp-sdk` 0.1.36 → this package → bridge 0.2.5. All rows below are SDK >= 0.1.36 rules: an app that reports an older SDK in its claim gets `not_applicable` by version, whatever it does.
+
+- **C283b/C283c, owner rows keep the CRUD they were set with (group A21).**
+  - `A21.owner_row_widened_level`: a fresh agent; the owner sets level L on its rows; the app is "updated" so L gains the actions of a scoped op. The call needing them is refused 403 `scope_denied` (the Portal grant covers it, so the row is the only limiter), every owner row lists `crud` without them and `offer.adds` = them; a plain re-set of L accepts nothing; `acceptOffer` with other adds is 409 `offer_changed` and changes nothing; `acceptOffer` with the current adds (reversed, with a duplicate: compared as a set) is 200, the rows list the new crud and no offer, and the call runs.
+  - `A21.owner_row_narrowed_level`: the owner row at the lowest level that covers a scoped op runs the call above the Portal grant; the app is updated so that level loses the op's actions: the call is refused 403 `scope_denied` at once, the rows list the narrower crud and NO offer.
+  - `A21.accept_offer_rules` (no update needed): with no offer `acceptOffer {adds: []}` is 200 and any other adds is 409 `offer_changed`; `acceptOffer` with another level or with `access: null` is 400 `input_invalid` and the row is unchanged (not deleted); a malformed `acceptOffer` is 400; a plain re-set keeps the owner row.
+  - `A21.snapshot_backfill`: always `not_applicable`: the one-time backfill of the schema migration, and a NULL or unparsable snapshot reading `[]`, need a data directory written by an older SDK and the app's database, which a black-box suite cannot reach. The SDK covers them in its own tests.
+  - **"An app update" in a black-box suite.** The two update rows restart the app on the same data dir with the env name `TBCONF_LEVEL_CRUD` (JSON `[{type, level, crud}]`; exported as `LEVEL_CRUD_ENV`, with `parseLevelCrud` and `applyLevelCrud` for start modules). A start module applies it to its manifest before `defineApp`, like `TBCONF_PORT` and `TBCONF_PORTAL_ROOT_KEYS` (a harness name, not a `TB_*` name; the SDK never reads it). The suite checks that the app serves the digest of the updated manifest (`GET /tb/v1/health`); a start module that ignores the variable makes the two update rows `not_applicable` (never a silent pass) and the report still lists them. `--url` mode (no restart) reports `not_run`. The suite restarts the app back to the released manifest afterwards.
+- **C268 B / C268c, hook proof `bd` (spec 0.1.52).**
+  - `A2.proof_claims_declared`: the claim and every status push carry `proofClaims: ["bd"]`.
+  - `A2.hook_bd_binds_body`: at every declared hook, for an agent and an app caller, a proof whose `bd` is the sha256 of the exact bytes sent is answered; the same proof with other bytes (`call.ws` changed: a field outside `ctx` and `in`, bound by no other claim since `call.id` and the caller are bound by `call` and `sub`) is refused 401 `call_proof_invalid`.
+  - `A2.hook_bd_malformed`: `bd` = `""`, `sha256:abc`, upper-case hex, another algorithm, a number or `null` is refused 401 `call_proof_invalid`.
+  - `A2.proof_bd_other_variants`: `bd` on an op proof (`tb.hold_status`) and on a bridge-op proof (`scope_summary`) is refused 401 `call_proof_invalid`; the same calls without `bd` are not.
+  - A hook proof WITHOUT `bd` stays accepted: that is the baseline of every hook row.
+- **Test doubles.** The mini app implements the rules and has one fault per row (`ownerRowFollowsLevel`, `ownerRowSnapshotOnly`, `plainResetAccepts`, `acceptNoCompare`, `acceptPhantomOk`, `acceptNullDeletes`, `acceptOtherLevelOk`, `noOffer`, `noEffectiveCrud`, `ignoresLevelCrud`, `hookIgnoresBd`, `bdProofsUnverified`, `noProofClaims`). The real miniapp-sdk of this workspace passes every row (`test/app-real-sdk.test.ts`).
+- **Fix.** The CLI exits only after stdout and stderr are flushed. A report over 64 KiB (the pipe size) was cut off mid-string when a parent process read it; with these rows the report is larger than that.
+
 ## 0.1.24 (spec 0.1.50)
 
 Release order (C215): `@opt2-tealbrick/manifest` 0.1.27 indexed and mirrored, then `@opt2-tealbrick/miniapp-sdk` 0.1.35, then this package. The workspace link pins the three together, so this package no longer carries the stale manifest 0.1.25 (ajv 8.17.1) of 0.1.23: it is built with manifest 0.1.27 (ajv 8.18.0).

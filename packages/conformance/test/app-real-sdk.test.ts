@@ -83,6 +83,14 @@ describe("conformance 0.1.24 and 0.1.25 rows against the real miniapp-sdk", { ti
       "A20.paused_agent_owner_row",
       "A20.catalog_admitted",
       "A20.admitted_ops",
+      // 0.1.25 (spec 0.1.52): owner rows keep their CRUD (the update rows restart the REAL SDK with the widened / narrowed level), hook proof bd, proofClaims
+      "A21.owner_row_widened_level",
+      "A21.owner_row_narrowed_level",
+      "A21.accept_offer_rules",
+      "A2.proof_claims_declared",
+      "A2.hook_bd_binds_body",
+      "A2.hook_bd_malformed",
+      "A2.proof_bd_other_variants",
     ]) {
       assert.equal(st(id)?.status, "pass", `${id}: ${st(id)?.asserted}`);
     }
