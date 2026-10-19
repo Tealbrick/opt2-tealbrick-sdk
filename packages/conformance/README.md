@@ -3,7 +3,7 @@
 The Teal Brick opt2 conformance suite: checks, a fake bridge and a fake Portal, generated from `@opt2-tealbrick/spec`.
 Targets: `app`, `manifest`, `bridge`, `relay`, `core` (`tb-conformance --help`).
 
-## 0.1.23 (spec 0.1.48)
+## 0.1.23 (spec 0.1.49)
 
 - App target, SDK-COMPANION-CALLERS (group A19, SDK >= 0.1.32; an older SDK is `not_applicable` by version): `ctx.companionCallers()` on owner pages. Opt-in fixture `companionCallersOp` in `tealbrick-conformance.json`: `{op: "<person op>", path?: "/companionCallers", input?, agentProbe?: {op: "<static agent op>", path?, input?}}`. The app's op returns what `ctx.companionCallers()` gave it, at `path` (JSON pointer into the op output). Without the fixture both checks are `not_applicable`.
   - `A19.companion_callers_person`: the suite lists three companion callers in the fake bridge slice (provider `railway`, `own_infra` and `null`), publishes it, runs the person op as the owner and requires the output at `path` to equal the WHOLE slice list `{product, ins, name, provider}` (`provider` null = unknown; any other member, for example grant material, fails; the listed callers are removed again afterwards). A list taken before the slice update, a dropped `provider` or an extra member fails.
