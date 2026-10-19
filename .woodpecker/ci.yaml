@@ -42,7 +42,7 @@ steps:
     depends_on: [secret-scan]
     environment: &env
       CI: "true"
-      TB_CI_REF: a21c82656e01fae52d3db29324628020cef098dd
+      TB_CI_REF: ci-v9.15
       TB_CI_SHA256: "fb031a61608bd1192940f4e8b30a6c82dfe06190d3fa85963e5e5bd5ba6c53e3"
       NPM_CONFIG_UPDATE_NOTIFIER: "false"
       NPM_CONFIG_FUND: "false"
