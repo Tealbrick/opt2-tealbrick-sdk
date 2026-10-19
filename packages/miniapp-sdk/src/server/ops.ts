@@ -74,6 +74,17 @@ export function peekClaims(token: string): Record<string, unknown> | null {
 }
 
 /**
+ * v0.1.35 (C261, spec 0.1.49): with the verified slice flag `appCallers: "verified"` an APP caller must have a verified product
+ * (the grant's `prd`, else its slice `companionCallers` entry; `resolveCallerProduct`). 403 `caller_unverified`, retryable (a newer
+ * slice or a bridge that mints `prd` fixes it), nothing runs. The message names the fix.
+ */
+export const CALLER_UNVERIFIED_MESSAGE = "the calling app is not verified for this workspace yet: update the bridge, or retry after the workspace config refreshes";
+export function callerUnverified(rt: Pick<Runtime, "trust">, caller: { type: string; product?: unknown }): boolean {
+  return caller.type === "app" && caller.product === undefined && rt.trust.appCallersVerified();
+}
+const callerUnverifiedError = (): TbError => new TbError("caller_unverified", CALLER_UNVERIFIED_MESSAGE, 403, { retryable: true });
+
+/**
  * v0.1.35 (C283 A1): the access the app's own store gives `callerId` on `type` for a call (never from the caller): the level, its
  * crud and the row's `authority` ("owner" = primary, also above the Portal grant; "bounded" = the grant stays the ceiling).
  * No row = level "none", no crud, bounded. For an op that spans instances (`target` null) `authority` is "owner" only when
@@ -554,6 +565,25 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       throw new TbError("agent_unknown", "this agent is not in the instance slice", 403);
     }
 
+    // v0.1.35 (C261): an app caller with no verified product is refused before ANYTHING else runs (standard ops included: no
+    // hold status, no pending list, no defaults, no idempotency key, no cap slot); the refusal is audited as a refused receipt
+    if (callerUnverified(rt, caller)) {
+      rt.receipts.insert({
+        callId,
+        caller: receiptCallerOf(caller, callerId),
+        op: op.id,
+        effect: op.effect,
+        inputDigest: inputDigest as Sha256Digest,
+        idempotencyKey: null,
+        kind: "rcp",
+        holdFamily: null,
+        status: "refused",
+        summary: clampSummary(op.title),
+        meta: { reason: "caller_unverified" },
+      });
+      rt.statusChanged();
+      throw callerUnverifiedError();
+    }
     // tb.hold_status: valid grant suffices (I4); only the caller's own holds; no receipt.
     if (op.standard && op.id === "tb.hold_status") {
       const v = validateInput(op, body.input);
@@ -824,6 +854,8 @@ export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: Abor
   if (!cp.ok) return refuse("grant_invalid");
   caller = { type: caller.type, id: caller.id, name: caller.name, mode: caller.mode, ...cp.caller };
   base.caller = receiptCallerOf(caller, callerId);
+  // v0.1.35 (C261): a scheduled fire, and the resume of a held one, is a call like any other: no verified product, no run
+  if (callerUnverified(rt, caller)) return refuse("caller_unverified");
   if (!opInGrantWorkflow(g.claims, op.id)) return refuse(DECISION_REASON.notInWorkflow);
 
   let access: AuthorizeInput["access"] = null;
