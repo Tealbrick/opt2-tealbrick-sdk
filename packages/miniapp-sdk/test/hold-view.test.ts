@@ -129,7 +129,10 @@ async function boot(): Promise<Booted> {
 }
 
 async function send(b: Booted, draftId: string, key?: string) {
-  const input: Json = { tool: "send_draft", arguments: { draft_id: draftId } };
+  return sendInput(b, { tool: "send_draft", arguments: { draft_id: draftId } }, key);
+}
+
+async function sendInput(b: Booted, input: Json, key?: string) {
   const g = await grant(b.w, b.w.agents.a, { held: ["outward"] });
   const proof = await callProof(b.w, g, "tools", input);
   const res = await fetch(`${b.base}/tb/v1/ops/tools`, {
@@ -328,6 +331,52 @@ describe("SDK-HV-1 dynamic hold view", () => {
     await approve(b, String(plain.body.holdId));
     assert.equal((await send(b, "d6")).status, 200, "a null view is stable: the approval matches");
     assert.deepEqual(b.sent, ["D6"]);
+  });
+
+  test("G7 (C275): default view is built from JCS — approve, then a replay with permuted keys runs exactly once", async () => {
+    b.mode.value = "null";
+    b.sent.length = 0;
+    b.drafts.g7a = "G7 A";
+    const held = await sendInput(b, { tool: "send_draft", arguments: { draft_id: "g7a", cc: "carol@example.com", z: 1 } });
+    assert.equal(held.status, 202);
+    const view = holdRow(b, held.body.holdId).view ?? "";
+    assert.ok(view.startsWith("Connected tools\n"), view);
+    await approve(b, String(held.body.holdId));
+    // same input, other key order at both levels (what another client or a JSON round trip sends)
+    const run = await sendInput(b, { arguments: { z: 1, cc: "carol@example.com", draft_id: "g7a" }, tool: "send_draft" });
+    assert.equal(run.status, 200, "the approval matches a permuted-key replay");
+    assert.deepEqual(b.sent, ["G7 A"]);
+    const again = await sendInput(b, { arguments: { cc: "carol@example.com", draft_id: "g7a", z: 1 }, tool: "send_draft" });
+    assert.equal(again.status, 202, "the approval is used once: a further replay is a new hold");
+    assert.equal(holdRow(b, again.body.holdId).view, view, "key order never changes the view text");
+    assert.deepEqual(b.sent, ["G7 A"], "sent exactly once");
+  });
+
+  test("G7 (C275): an identical replay of an approved default-view hold runs once", async () => {
+    b.mode.value = "null";
+    b.sent.length = 0;
+    b.drafts.g7b = "G7 B";
+    const input: Json = { tool: "send_draft", arguments: { draft_id: "g7b", cc: "dan@example.com" } };
+    const held = await sendInput(b, input);
+    assert.equal(held.status, 202);
+    await approve(b, String(held.body.holdId));
+    assert.equal((await sendInput(b, input)).status, 200);
+    assert.equal((await sendInput(b, input)).status, 202, "a second replay needs a new approval");
+    assert.deepEqual(b.sent, ["G7 B"]);
+  });
+
+  test("G7 (C275): a changed value (any key order) is still held again and never runs on the old approval", async () => {
+    b.mode.value = "null";
+    b.sent.length = 0;
+    b.drafts.g7c = "G7 C";
+    const held = await sendInput(b, { tool: "send_draft", arguments: { draft_id: "g7c", cc: "erin@example.com" } });
+    assert.equal(held.status, 202);
+    await approve(b, String(held.body.holdId));
+    const changed = await sendInput(b, { arguments: { cc: "mallory@example.com", draft_id: "g7c" }, tool: "send_draft" });
+    assert.equal(changed.status, 202, "another value is another input: a new hold");
+    assert.notEqual(changed.body.holdId, held.body.holdId);
+    assert.ok(holdRow(b, changed.body.holdId).view?.includes("mallory@example.com"));
+    assert.deepEqual(b.sent, [], "nothing runs on the old approval");
   });
 
   test(`holdView that never answers → the hold is created after the ${HOLD_VIEW_BUDGET_MS} ms budget with the fallback view`, async () => {
