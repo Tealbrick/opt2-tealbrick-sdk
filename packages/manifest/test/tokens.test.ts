@@ -10,6 +10,7 @@ import { opaqueValue, ulid } from "../src/random.ts";
 import {
   bridgeOpBinding,
   bridgeOpProofClaims,
+  hookCallerRef,
   signAgentSession,
   signBridgeOpProof,
   signCallProof,
@@ -153,6 +154,36 @@ test("verifyHookProof: positive, phase / input binding, replay", async () => {
   const replay = memoryReplayGuard();
   assert.ok(verifyHookProof(h, w.trust, hb, replay).ok);
   assert.equal(code(verifyHookProof(h, w.trust, hb, replay)), "invalid_token");
+});
+
+test("verifyHookProof (manifest 0.1.27, C268 A): sub and call are compared when given, never replay-burning on a mismatch (fires on bad)", async () => {
+  const { w, brg, call, bind } = await proofs();
+  const claims = { iss: brg, sub: `tb:agt:${w.agt}` as const, aud: `tb:ins:${w.ins}` as const, call, hook: "audit", phase: "before" as const, ctx: bind.contextDigest, iat: NOW };
+  const hb = { hook: "audit", phase: "before" as const, contextDigest: bind.contextDigest };
+  const h = await signHookProof(claims, w.bridgeKey);
+  // matching sub + call: ok (and the proof still verifies with neither, as before 0.1.27)
+  assert.ok(verifyHookProof(h, w.trust, { ...hb, sub: `tb:agt:${w.agt}`, call }).ok);
+  assert.ok(verifyHookProof(await signHookProof(claims, w.bridgeKey), w.trust, hb).ok, "callers that pass neither behave as before");
+  // fires on bad: a body that names another caller (an agent, an app instance) or another call than the proof was signed for
+  for (const sub of [`tb:agt:${w.other}`, `tb:ins:${w.agt}`, `tb:ins:${w.ins}`, "", `tb:agt:${w.agt}x`]) {
+    assert.equal(code(verifyHookProof(await signHookProof(claims, w.bridgeKey), w.trust, { ...hb, sub })), "invalid_token", `sub ${sub}`);
+  }
+  assert.equal(code(verifyHookProof(await signHookProof(claims, w.bridgeKey), w.trust, { ...hb, call: `call_${ulid()}` as CallId })), "invalid_token");
+  assert.equal(code(verifyHookProof(await signHookProof(claims, w.bridgeKey), w.trust, { ...hb, call: "" })), "invalid_token");
+  assert.equal(code(verifyHookProof(await signHookProof(claims, w.bridgeKey), w.trust, { ...hb, sub: 7 as never })), "invalid_token");
+  // a mismatch does not use up the one-time proof: the right body still verifies once, and only once
+  const replay = memoryReplayGuard();
+  assert.equal(code(verifyHookProof(h, w.trust, { ...hb, sub: `tb:agt:${w.other}` }, replay)), "invalid_token");
+  assert.ok(verifyHookProof(h, w.trust, { ...hb, sub: `tb:agt:${w.agt}`, call }, replay).ok);
+  assert.equal(code(verifyHookProof(h, w.trust, { ...hb, sub: `tb:agt:${w.agt}`, call }, replay)), "invalid_token");
+});
+
+test("hookCallerRef: agent -> tb:agt:, app -> tb:ins:, everything else never matches a proof", () => {
+  assert.equal(hookCallerRef({ type: "agent", id: "agt_1", mode: "free" }), "tb:agt:agt_1");
+  assert.equal(hookCallerRef({ type: "app", id: "ins_1", product: "x" }), "tb:ins:ins_1");
+  for (const bad of [undefined, null, [], "agent", {}, { type: "agent" }, { type: "agent", id: "" }, { type: "agent", id: 3 }, { type: "person", id: "per_1" }, { type: "system", id: "ins_1" }]) {
+    assert.equal(hookCallerRef(bad), "", JSON.stringify(bad));
+  }
 });
 
 test("verifyBridgeOpProof: positive, bop / op / in binding, iss = sub", async () => {

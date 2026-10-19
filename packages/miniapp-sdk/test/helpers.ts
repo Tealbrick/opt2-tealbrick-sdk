@@ -85,6 +85,8 @@ export async function slice(
     /** spec 0.1.48: `provider` (where that instance runs); `unknown` so a test can push an invalid value */
     companionCallers?: { product: string; ins: string; name: string; provider?: unknown }[];
     appsPolicy?: { held: string[] };
+    /** spec 0.1.49 (C261): `"verified"` = an app caller without a verified product is refused `caller_unverified`; `unknown` so a test can push another value */
+    appCallers?: unknown;
     /** spec 0.1.43 (LA-1): bridge.viewUrl (string = tb-views origin, null = Core has none yet, absent = member omitted) */
     viewUrl?: string | null;
   } = {},
@@ -117,6 +119,7 @@ export async function slice(
       ...(over.companionTargets ? { companionTargets: over.companionTargets } : {}),
       ...(over.companionCallers ? { companionCallers: over.companionCallers } : {}),
       ...(over.appsPolicy ? { appsPolicy: over.appsPolicy } : {}),
+      ...(over.appCallers !== undefined ? { appCallers: over.appCallers } : {}),
     } as Parameters<typeof signSlice>[0],
     w.portal,
   );

@@ -103,18 +103,42 @@ async function boot(): Promise<Booted> {
   };
 }
 
-async function callHook(b: Booted, hook: string, phase: HookPhase, input: Json, opts: { proof?: string | null; sentInput?: Json; output?: Json } = {}) {
+/**
+ * `caller` = the `call.caller` of the request body (default: agent A); `sub` = the proof `sub` (default: the ref of `caller`);
+ * `proofCall` = the proof `call` claim (default: the request's `call.id`); `callId` = the request's `call.id`.
+ */
+async function callHook(
+  b: Booted,
+  hook: string,
+  phase: HookPhase,
+  input: Json,
+  opts: { proof?: string | null; sentInput?: Json; output?: Json; caller?: Record<string, Json> | null; sub?: string; proofCall?: string; callId?: string } = {},
+) {
   const context = { "other-app.flag": true };
+  const callerBody = opts.caller === undefined ? { type: "agent", id: b.w.agents.a, mode: "free" } : opts.caller;
   const call = {
-    id: `call_${ulid()}`,
+    id: opts.callId ?? `call_${ulid()}`,
     ws: b.w.ws,
-    caller: { type: "agent", id: b.w.agents.a, mode: "free" },
+    ...(callerBody === null ? {} : { caller: callerBody }),
     target: { instance: `ins_${ulid()}`, product: "other-app", op: "other_op", crud: ["create"], effect: "write" },
     input: opts.sentInput ?? input,
   };
   const proof =
     opts.proof === undefined
-      ? await signHookProof({ iss: `tb:brg:${b.w.brg}`, sub: `tb:agt:${b.w.agents.a}`, aud: `tb:ins:${b.w.ins}`, iat: nowS(), call: call.id as `call_${string}`, hook, phase, ctx: digest(context), in: digest(input) }, b.w.bridgeKey)
+      ? await signHookProof(
+          {
+            iss: `tb:brg:${b.w.brg}`,
+            sub: (opts.sub ?? (callerBody && callerBody.type === "app" ? `tb:ins:${callerBody.id}` : `tb:agt:${(callerBody as { id?: string } | null)?.id ?? b.w.agents.a}`)) as never,
+            aud: `tb:ins:${b.w.ins}`,
+            iat: nowS(),
+            call: (opts.proofCall ?? call.id) as `call_${string}`,
+            hook,
+            phase,
+            ctx: digest(context),
+            in: digest(input),
+          },
+          b.w.bridgeKey,
+        )
       : opts.proof;
   const res = await fetch(`${b.base}/tb/v1/hooks/${hook}`, {
     method: "POST",
@@ -185,6 +209,70 @@ describe("hook route", () => {
     const u = await callHook(b, "nope_hook", "before", {});
     assert.equal(u.status, 404);
     assert.equal(u.body.error.code, "unknown_hook");
+  });
+});
+
+describe("hook proof binds the caller and the call (C268 A, v0.1.35)", () => {
+  let b: Booted;
+  before(async () => {
+    b = await boot();
+  });
+  after(async () => b.cleanup());
+
+  const refused = (a: { status: number; body: Record<string, any> }, why: string) => {
+    assert.equal(a.status, 401, `${why}: ${JSON.stringify(a.body)}`);
+    assert.equal(a.body.error.code, "call_proof_invalid", why);
+  };
+  const other = `agt_${ulid()}`;
+  const appIns = `ins_${ulid()}`;
+
+  test("quiet on good: an agent caller and an app caller whose proof sub names them are answered", async () => {
+    assert.equal((await callHook(b, "check_before", "before", { mode: "ok" })).status, 200);
+    const app = await callHook(b, "check_before", "before", { mode: "ok" }, { caller: { type: "app", id: appIns, product: "evolution" } });
+    assert.equal(app.status, 200, JSON.stringify(app.body));
+    assert.equal((await callHook(b, "check_before", "before", { mode: "ok" }, { caller: { type: "app", id: appIns } })).status, 200, "an app caller without product");
+  });
+
+  test("the proof sub differs from the caller of the body → 401 call_proof_invalid (fires on bad: before 0.1.35 this was answered 200)", async () => {
+    // the proof is for agent A, the body says another agent / an app instance / the other way round
+    refused(await callHook(b, "check_before", "before", { mode: "ok" }, { caller: { type: "agent", id: other, mode: "free" }, sub: `tb:agt:${b.w.agents.a}` }), "another agent");
+    refused(await callHook(b, "check_before", "before", { mode: "ok" }, { caller: { type: "app", id: appIns }, sub: `tb:agt:${b.w.agents.a}` }), "an app named in the body, an agent in the proof");
+    refused(await callHook(b, "check_before", "before", { mode: "ok" }, { caller: { type: "agent", id: appIns, mode: "free" }, sub: `tb:ins:${appIns}` }), "type confusion: an agent in the body, an instance in the proof");
+    refused(await callHook(b, "check_before", "before", { mode: "ok" }, { caller: { type: "app", id: appIns }, sub: `tb:ins:ins_${ulid()}` }), "another app instance");
+    // every phase
+    refused(await callHook(b, "tag_context", "context", {}, { caller: { type: "agent", id: other, mode: "free" }, sub: `tb:agt:${b.w.agents.a}` }), "context phase");
+    refused(await callHook(b, "redact_after", "after", {}, { caller: { type: "agent", id: other, mode: "free" }, sub: `tb:agt:${b.w.agents.a}` }), "after phase");
+  });
+
+  test("a body without a usable caller (missing, no id, other type, id not a string) never matches → 401", async () => {
+    refused(await callHook(b, "check_before", "before", { mode: "ok" }, { caller: null, sub: `tb:agt:${b.w.agents.a}` }), "no caller");
+    refused(await callHook(b, "check_before", "before", { mode: "ok" }, { caller: { type: "agent" }, sub: `tb:agt:${b.w.agents.a}` }), "no id");
+    refused(await callHook(b, "check_before", "before", { mode: "ok" }, { caller: { type: "person", id: "per_x" }, sub: `tb:agt:${b.w.agents.a}` }), "a person caller");
+    refused(await callHook(b, "check_before", "before", { mode: "ok" }, { caller: { type: "agent", id: 7 }, sub: `tb:agt:${b.w.agents.a}` }), "id not a string");
+  });
+
+  test("the proof `call` differs from the call id of the body → 401 call_proof_invalid", async () => {
+    refused(await callHook(b, "check_before", "before", { mode: "ok" }, { proofCall: `call_${ulid()}` }), "another call id");
+    // the body names no call id the proof could match
+    refused(await callHook(b, "check_before", "before", { mode: "ok" }, { callId: "" , proofCall: `call_${ulid()}` }), "empty call id");
+  });
+
+  test("a mismatch does not burn the proof: the same proof with the right body is still accepted once", async () => {
+    const context = { "other-app.flag": true };
+    const input = { mode: "ok" };
+    const callId = `call_${ulid()}`;
+    const proof = await signHookProof({ iss: `tb:brg:${b.w.brg}`, sub: `tb:agt:${b.w.agents.a}`, aud: `tb:ins:${b.w.ins}`, iat: nowS(), call: callId as `call_${string}`, hook: "check_before", phase: "before", ctx: digest(context), in: digest(input) }, b.w.bridgeKey);
+    const send = async (caller: Record<string, Json>) => {
+      const res = await fetch(`${b.base}/tb/v1/hooks/check_before`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "tb-call": proof },
+        body: JSON.stringify({ phase: "before", call: { id: callId, ws: b.w.ws, caller, target: { instance: `ins_${ulid()}`, product: "other-app", op: "other_op", crud: ["create"], effect: "write" }, input }, context }),
+      });
+      return res.status;
+    };
+    assert.equal(await send({ type: "agent", id: other, mode: "free" }), 401);
+    assert.equal(await send({ type: "agent", id: b.w.agents.a, mode: "free" }), 200);
+    assert.equal(await send({ type: "agent", id: b.w.agents.a, mode: "free" }), 401, "one-time");
   });
 });
 

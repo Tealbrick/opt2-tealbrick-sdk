@@ -1,7 +1,7 @@
 // Grantless bridge→app routes (SDK-API §3.2): hook calls (`verifyHookProof`) and the bridge ops catalog, resolve,
 // mark, scope-summary (`verifyBridgeOpProof`, C16 B5). No receipts, no hooks, no agent action.
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { bridgeOpBinding, digest, hookResponseProblem, mcpToolName, toolNameFits, verifyBridgeOpProof, verifyHookProof } from "@opt2-tealbrick/manifest";
+import { bridgeOpBinding, digest, hookCallerRef, hookResponseProblem, mcpToolName, toolNameFits, verifyBridgeOpProof, verifyHookProof } from "@opt2-tealbrick/manifest";
 import { BRIDGE_HEADERS, type HookRequest, type ScopeSummaryResult } from "@opt2-tealbrick/spec/bridge";
 import type { BridgeOp } from "@opt2-tealbrick/spec/credentials";
 import { type DynamicCatalogEntry, EFFECTS, HOOK_PHASES, type Operation } from "@opt2-tealbrick/spec/manifest";
@@ -55,7 +55,16 @@ export async function handleHook(rt: Runtime, req: IncomingMessage, res: ServerR
     const proof = verifyHookProof(
       header(req, BRIDGE_HEADERS.callProof) ?? "",
       trust,
-      { hook: hookId, phase: hook.phase, contextDigest: digest(r.context as Json), ...(r.call.input !== undefined ? { inputDigest: digest(r.call.input as Json) } : {}) },
+      {
+        hook: hookId,
+        phase: hook.phase,
+        contextDigest: digest(r.context as Json),
+        ...(r.call.input !== undefined ? { inputDigest: digest(r.call.input as Json) } : {}),
+        // v0.1.35 (C268 A): the proof names the caller (`sub`) and the call (`call`) the bridge signed for; the body must name the
+        // SAME caller and call id, else 401 call_proof_invalid. A body without a usable caller ref or call id binds "" and never matches.
+        sub: hookCallerRef((r.call as { caller?: unknown }).caller),
+        call: typeof r.call.id === "string" ? r.call.id : "",
+      },
       rt.replay,
     );
     if (!proof.ok) throw new TbError("call_proof_invalid", "hook call proof missing or not valid", 401);
@@ -89,6 +98,17 @@ function entryValid(rt: Runtime, op: Operation, e: DynamicCatalogEntry): boolean
   );
 }
 
+/**
+ * v0.1.35 (C283 A1): may the DISPLAY marks (`admitted`, `admittedOps`) be given for `agentId`? Only an agent that is in the verified
+ * slice, active, and not paused (workspace, this app, itself): an owner row never revives a paused or removed agent, not even on a list.
+ */
+function markable(rt: Runtime, agentId: string): boolean {
+  const a = rt.trust.agent(agentId);
+  if (a?.status !== "active") return false;
+  const p = rt.trust.paused(agentId);
+  return !p.workspace && !p.instance && !p.agent;
+}
+
 export async function handleBridgeOp(rt: Runtime, req: IncomingMessage, res: ServerResponse, bop: BridgeOp): Promise<void> {
   const rid = requestId();
   try {
@@ -113,7 +133,15 @@ export async function handleBridgeOp(rt: Runtime, req: IncomingMessage, res: Ser
           return ok;
         });
         const max = op.dynamic?.mode === "list" ? CATALOG_LIST_MAX : (limit ?? CATALOG_LIST_MAX);
-        return sendJson(res, 200, valid.slice(0, max));
+        // v0.1.35 (C283 A1, spec 0.1.50): `admitted` is set by the SDK ALONE. A value the app's own catalog put on an entry is dropped
+        // (display only, but an app must not list its own entries above the Portal grant), then an entry is marked "owner" iff the body's
+        // `agent` has OWNER rows for the op's scope type that admit the entry's crud (every row an owner row, best row's crud).
+        const agent = typeof body.agent === "string" && op.scopeType !== undefined && markable(rt, body.agent) ? body.agent : null;
+        const out = valid.slice(0, max).map((e): DynamicCatalogEntry => {
+          const { admitted: _dropped, ...entry } = e;
+          return agent !== null && op.scopeType !== undefined && rt.scopes.ownerAdmits(agent, op.scopeType, entry.crud) ? { ...entry, admitted: "owner" } : entry;
+        });
+        return sendJson(res, 200, out);
       }
       case "resolve": {
         const op = dynamicOp(rt, body.op);
@@ -132,7 +160,13 @@ export async function handleBridgeOp(rt: Runtime, req: IncomingMessage, res: Ser
       }
       case "scope_summary": {
         const out: ScopeSummaryResult[] = [];
-        for (const a of rt.trust.slice?.agents ?? []) out.push({ agent: a.id, label: await rt.scopes.summary(a.id) });
+        // v0.1.35 (C283 A1): `admittedOps` = this agent's STATIC agent ops with a scopeType whose crud its OWNER rows admit (possibly
+        // above the Portal grant); absent when none. Display only: the SDK still authorizes every call.
+        const staticOps = rt.manifest.operations.filter((o) => !o.dynamic && o.audience === "agent" && o.scopeType !== undefined);
+        for (const a of rt.trust.slice?.agents ?? []) {
+          const admittedOps = markable(rt, a.id) ? staticOps.filter((o) => o.scopeType !== undefined && rt.scopes.ownerAdmits(a.id, o.scopeType, o.crud)).map((o) => o.id) : [];
+          out.push({ agent: a.id, label: await rt.scopes.summary(a.id), ...(admittedOps.length > 0 ? { admittedOps } : {}) });
+        }
         return sendJson(res, 200, out);
       }
     }

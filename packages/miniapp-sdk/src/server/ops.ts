@@ -8,6 +8,7 @@ import { BRIDGE_HEADERS, type CompanionCaller, type OpCallBody, type OpResult } 
 import type { AgentId, CallId, InstanceId, PersonId, Sha256Digest } from "@opt2-tealbrick/spec/credentials";
 import type { CrudAction, DynamicResolution, Effect, HoldFamily, Operation } from "@opt2-tealbrick/spec/manifest";
 import type {
+  AuthorizeInput,
   Caller,
   Decision,
   HandlerSpec,
@@ -70,6 +71,28 @@ export function peekClaims(token: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * v0.1.35 (C261, spec 0.1.49): with the verified slice flag `appCallers: "verified"` an APP caller must have a verified product
+ * (the grant's `prd`, else its slice `companionCallers` entry; `resolveCallerProduct`). 403 `caller_unverified`, retryable (a newer
+ * slice or a bridge that mints `prd` fixes it), nothing runs. The message names the fix.
+ */
+export const CALLER_UNVERIFIED_MESSAGE = "the calling app is not verified for this workspace yet: update the bridge, or retry after the workspace config refreshes";
+export function callerUnverified(rt: Pick<Runtime, "trust">, caller: { type: string; product?: unknown }): boolean {
+  return caller.type === "app" && caller.product === undefined && rt.trust.appCallersVerified();
+}
+const callerUnverifiedError = (): TbError => new TbError("caller_unverified", CALLER_UNVERIFIED_MESSAGE, 403, { retryable: true });
+
+/**
+ * v0.1.35 (C283 A1): the access the app's own store gives `callerId` on `type` for a call (never from the caller): the level, its
+ * crud and the row's `authority` ("owner" = primary, also above the Portal grant; "bounded" = the grant stays the ceiling).
+ * No row = level "none", no crud, bounded. For an op that spans instances (`target` null) `authority` is "owner" only when
+ * every row of the caller for the type is an owner row (ScopeStoreInternals.resolve).
+ */
+function scopeAccessOf(rt: Pick<Runtime, "scopes">, callerId: string, type: string, target: string | null): NonNullable<AuthorizeInput["access"]> {
+  const r = rt.scopes.resolve(callerId, type, target);
+  return r ? { level: r.level, crud: r.crud, authority: r.authority } : { level: "none", crud: [], authority: "bounded" };
 }
 
 export function handlerSpec(rt: Runtime, opId: string): HandlerSpec | null {
@@ -542,6 +565,25 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       throw new TbError("agent_unknown", "this agent is not in the instance slice", 403);
     }
 
+    // v0.1.35 (C261): an app caller with no verified product is refused before ANYTHING else runs (standard ops included: no
+    // hold status, no pending list, no defaults, no idempotency key, no cap slot); the refusal is audited as a refused receipt
+    if (callerUnverified(rt, caller)) {
+      rt.receipts.insert({
+        callId,
+        caller: receiptCallerOf(caller, callerId),
+        op: op.id,
+        effect: op.effect,
+        inputDigest: inputDigest as Sha256Digest,
+        idempotencyKey: null,
+        kind: "rcp",
+        holdFamily: null,
+        status: "refused",
+        summary: clampSummary(op.title),
+        meta: { reason: "caller_unverified" },
+      });
+      rt.statusChanged();
+      throw callerUnverifiedError();
+    }
     // tb.hold_status: valid grant suffices (I4); only the caller's own holds; no receipt.
     if (op.standard && op.id === "tb.hold_status") {
       const v = validateInput(op, body.input);
@@ -597,13 +639,12 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
     try {
       // scope access (from the app's own store, never from the caller)
       const spec = handlerSpec(rt, op.id);
-      let access: { level: string; crud: CrudAction[] } | null = null;
+      let access: AuthorizeInput["access"] = null;
       let viewAccess: ScopeAccessView["access"] = null;
       if (eff.scopeType) {
         const target = spec?.scope ? spec.scope(body.input, caller) : null;
-        const r = rt.scopes.resolve(callerId, eff.scopeType, target);
-        access = r ? { level: r.level, crud: r.crud } : { level: "none", crud: [] };
-        viewAccess = { type: eff.scopeType, id: target, level: access.level, crud: access.crud };
+        access = scopeAccessOf(rt, callerId, eff.scopeType, target);
+        viewAccess = { type: eff.scopeType, id: target, level: access.level, crud: access.crud, authority: access.authority ?? "bounded" };
       }
 
       // v0.1.23 (SDK-HV-1): one OpContext factory for the hold view = the context the call itself would get
@@ -639,6 +680,8 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       );
       const decision = d.decision;
       slot = d.slot;
+      // v0.1.35 (C283 A1, S7): which rule admitted a SCOPED call is recorded on its receipt (never on a refusal)
+      const admit = decision.decision !== "refuse" && decision.admittedBy ? { admittedBy: decision.admittedBy } : {};
       const receiptCaller = receiptCallerOf(caller, callerId);
       const base = { callId, caller: receiptCaller, op: op.id, effect: eff.effect, inputDigest: inputDigest as Sha256Digest, idempotencyKey: idemKey };
       const meta0: Json = dyn ? { tool: dyn.tool } : null;
@@ -689,8 +732,8 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       } catch (e) {
         const err = toTbError(e, rt);
         const meta = rh.meta ?? meta0;
-        if (approved) rt.receipts.finish(approved.id, "failed", { meta });
-        else if (writeReceipt) rt.receipts.insert({ ...base, kind: "rcp", holdFamily: null, status: "failed", summary: rh.summary ?? clampSummary(op.title), meta: { ...(isObj(meta) ? meta : {}), error: err.code } });
+        if (approved) rt.receipts.finish(approved.id, "failed", { meta, ...admit });
+        else if (writeReceipt) rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "failed", summary: rh.summary ?? clampSummary(op.title), meta: { ...(isObj(meta) ? meta : {}), error: err.code } });
         throw err;
       } finally {
         sig.done();
@@ -698,10 +741,10 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       const summary = rh.summary ?? clampSummary(spec?.redact ? spec.redact(body.input, output) : op.title);
       let receiptId: string | undefined;
       if (approved) {
-        rt.receipts.finish(approved.id, "run", { summary, meta: rh.meta ?? meta0 });
+        rt.receipts.finish(approved.id, "run", { summary, meta: rh.meta ?? meta0, ...admit });
         receiptId = approved.id;
       } else if (writeReceipt) {
-        receiptId = rt.receipts.insert({ ...base, kind: "rcp", holdFamily: null, status: "run", summary, meta: rh.meta ?? meta0 }).id;
+        receiptId = rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "run", summary, meta: rh.meta ?? meta0 }).id;
       }
       sendJson(res, 200, receiptId ? ({ status: "ok", output, receiptId } satisfies OpResult) : ({ status: "ok", output } satisfies OpResult));
     } catch (e) {
@@ -738,6 +781,7 @@ function createHold(rt: Runtime, base: ReceiptBase, spec: HandlerSpec | null, op
       kind: "hld",
       holdFamily: decision.holdFamily ?? null,
       heldBy: decision.heldBy ?? null,
+      ...(decision.admittedBy ? { admittedBy: decision.admittedBy } : {}),
       holdReason: hookReason ?? decision.reason,
       status: "held",
       summary,
@@ -810,15 +854,16 @@ export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: Abor
   if (!cp.ok) return refuse("grant_invalid");
   caller = { type: caller.type, id: caller.id, name: caller.name, mode: caller.mode, ...cp.caller };
   base.caller = receiptCallerOf(caller, callerId);
+  // v0.1.35 (C261): a scheduled fire, and the resume of a held one, is a call like any other: no verified product, no run
+  if (callerUnverified(rt, caller)) return refuse("caller_unverified");
   if (!opInGrantWorkflow(g.claims, op.id)) return refuse(DECISION_REASON.notInWorkflow);
 
-  let access: { level: string; crud: CrudAction[] } | null = null;
+  let access: AuthorizeInput["access"] = null;
   let viewAccess: ScopeAccessView["access"] = null;
   if (op.scopeType) {
     const target = spec?.scope ? spec.scope(input, caller) : null;
-    const r = rt.scopes.resolve(callerId, op.scopeType, target);
-    access = r ? { level: r.level, crud: r.crud } : { level: "none", crud: [] };
-    viewAccess = { type: op.scopeType, id: target, level: access.level, crud: access.crud };
+    access = scopeAccessOf(rt, callerId, op.scopeType, target);
+    viewAccess = { type: op.scopeType, id: target, level: access.level, crud: access.crud, authority: access.authority ?? "bounded" };
   }
   // a hold created at an earlier fire: denied/expired ends the job; still held waits; approved runs once (C8)
   if (job.holdId) {
@@ -841,6 +886,7 @@ export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: Abor
     }),
   );
   if (decision.decision === "refuse") return refuse(decision.reason);
+  const admit = decision.admittedBy ? { admittedBy: decision.admittedBy } : {};
   if (decision.decision === "hold") {
     if (job.holdId) return { kind: "refused", reason: "hold_consumed" };
     const hold = createHold(rt, base, spec, op, input, decision, null, { scheduled: job.id }, now);
@@ -870,13 +916,13 @@ export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: Abor
   } catch (e) {
     const err = toTbError(e, rt);
     const meta = rh.meta ?? null;
-    if (approved) rt.receipts.finish(approved.id, "failed", { meta });
-    else if (writeReceipt) rt.receipts.insert({ ...base, kind: "rcp", holdFamily: null, status: "failed", summary: rh.summary ?? clampSummary(op.title), meta: { ...(isObj(meta) ? meta : {}), error: err.code } });
+    if (approved) rt.receipts.finish(approved.id, "failed", { meta, ...admit });
+    else if (writeReceipt) rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "failed", summary: rh.summary ?? clampSummary(op.title), meta: { ...(isObj(meta) ? meta : {}), error: err.code } });
     return { kind: "failed", error: err.code };
   }
   const summary = rh.summary ?? clampSummary(spec?.redact ? spec.redact(input, output) : op.title);
-  if (approved) rt.receipts.finish(approved.id, "run", { summary, meta: rh.meta ?? null });
-  else if (writeReceipt) rt.receipts.insert({ ...base, kind: "rcp", holdFamily: null, status: "run", summary, meta: rh.meta ?? null });
+  if (approved) rt.receipts.finish(approved.id, "run", { summary, meta: rh.meta ?? null, ...admit });
+  else if (writeReceipt) rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "run", summary, meta: rh.meta ?? null });
   return { kind: "done", result: output };
 }
 
@@ -970,7 +1016,9 @@ async function runStandardPersonOp(rt: Runtime, principal: PersonPrincipal, id: 
     }
     case "tb.scopes_set": {
       const { agent, type, id: inst, access } = input as { agent: AgentId; type: string; id: string; access: string | null };
-      await rt.scopes.set(principal, agent, type, inst, access);
+      // v0.1.35 (C283 A1): THE one place an owner row is written: the verified owner session of this person route. Agent and app
+      // callers never reach runStandardPersonOp (audience person); app code holding the store can only write bounded rows.
+      await scopeGrantOps(rt.scopes).ownerSet(principal, agent, type, inst, access);
       return { access: (await rt.scopes.access(agent, type, inst)) as unknown as Json };
     }
     case "tb.keys_status":

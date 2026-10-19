@@ -59,13 +59,13 @@ test("gate: pass, and each step refuses in order", async () => {
   }
   // (2) grant invalid wins over CRUD
   assert.deepEqual(gate(gateIn({ grant: bad, op: op({ crud: ["delete"] }) })), { decision: "refuse", reason: "grant_invalid" });
-  // (3) CRUD ceiling, audience, scope type
-  assert.equal(gate(gateIn({ op: op({ crud: ["read", "delete"] }) })).reason, "crud_exceeds_grant");
+  // (3) CRUD ceiling (v0.1.27, C283 A1: UNSCOPED ops only), audience, scope type
+  assert.equal(gate(gateIn({ op: op({ crud: ["read", "delete"], scopeType: undefined }), declaredScopeTypes: [] })).reason, "crud_exceeds_grant");
   assert.equal(gate(gateIn({ op: op({ audience: "person" }) })).reason, "audience_not_agent");
   assert.equal(gate(gateIn({ op: op({ scopeType: "folder" }) })).reason, "scope_type_unknown");
   assert.equal(gate(gateIn({ op: op({ scopeType: undefined }), declaredScopeTypes: [] })).decision, "pass");
   // (3) before (4): CRUD failure reported even when not in wf
-  assert.equal(gate(gateIn({ op: op({ crud: ["delete"] }) })).reason, "crud_exceeds_grant");
+  assert.equal(gate(gateIn({ op: op({ crud: ["delete"], scopeType: undefined }), declaredScopeTypes: [] })).reason, "crud_exceeds_grant");
 });
 
 test("gate: Bound workflow (4)", async () => {
@@ -90,7 +90,7 @@ test("gate: expired / revoked grants carry their codes", async () => {
 
 test("authorize: run, pause (0), grant (1), scope (2)", async () => {
   const { authIn, bad } = await setup();
-  assert.deepEqual(authorize(authIn()), { decision: "run", reason: "run" });
+  assert.deepEqual(authorize(authIn()), { decision: "run", reason: "run", admittedBy: "portal_grant" });
   for (const k of ["workspace", "instance", "agent"] as const) {
     const paused = { workspace: false, instance: false, agent: false, [k]: true };
     assert.deepEqual(authorize(authIn({ paused, grant: bad })), { decision: "refuse", reason: "paused" }, k);
@@ -114,10 +114,10 @@ test("authorize: holds (3) — money always, held family, approval once per call
   const { authIn } = await setup({ crud: ["read", "create", "update"], held: ["first_contact"] });
   const write = { level: "rw", crud: ["read", "create", "update"] as ("read" | "create" | "update")[] };
   const money = { id: "pay", crud: ["create"] as "create"[], effect: "money" as const, scopeType: "area" };
-  assert.deepEqual(authorize(authIn({ op: money, access: write })), { decision: "hold", reason: "held_money", holdFamily: "money" });
-  assert.deepEqual(authorize(authIn({ op: money, access: write, approval: "approved" })), { decision: "run", reason: "approved" });
+  assert.deepEqual(authorize(authIn({ op: money, access: write })), { decision: "hold", reason: "held_money", holdFamily: "money", admittedBy: "portal_grant" });
+  assert.deepEqual(authorize(authIn({ op: money, access: write, approval: "approved" })), { decision: "run", reason: "approved", admittedBy: "portal_grant" });
   const contact = { id: "send", crud: ["create"] as "create"[], effect: "outward" as const, holdFamily: "first_contact" as const, scopeType: "area" };
-  assert.deepEqual(authorize(authIn({ op: contact, access: write })), { decision: "hold", reason: "held_family", holdFamily: "first_contact" });
+  assert.deepEqual(authorize(authIn({ op: contact, access: write })), { decision: "hold", reason: "held_family", holdFamily: "first_contact", admittedBy: "portal_grant" });
   assert.equal(authorize(authIn({ op: { ...contact, holdFamily: "live_call" }, access: write })).decision, "run");
   assert.equal(authorize(authIn({ op: contact, access: write, approval: "approved" })).decision, "run");
   // scope refusal precedes holds
@@ -129,7 +129,7 @@ test("authorize: Free caps (4) after holds; money has no cap", async () => {
   const access = { level: "rw", crud: ["read", "create"] as ("read" | "create")[] };
   const add = { id: "notes_add", crud: ["create"] as "create"[], effect: "write" as const, scopeType: "area" };
   assert.equal(authorize(authIn({ op: add, access, usage: { write: 4 } })).decision, "run");
-  assert.deepEqual(authorize(authIn({ op: add, access, usage: { write: 5 } })), { decision: "hold", reason: "caps_exceeded", holdFamily: "caps" });
+  assert.deepEqual(authorize(authIn({ op: add, access, usage: { write: 5 } })), { decision: "hold", reason: "caps_exceeded", holdFamily: "caps", admittedBy: "portal_grant" });
   assert.equal(authorize(authIn({ op: add, access, usage: { write: 5 }, approval: "approved" })).decision, "run");
   // max 0 holds the first call; usage of another effect does not count
   const send = { id: "send", crud: ["create"] as "create"[], effect: "outward" as const, scopeType: "area" };
@@ -152,7 +152,7 @@ test("authorize v0.1.13 (G1): a hook hold verdict holds after scope; approval ru
   const access = { level: "rw", crud: ["read", "create"] as ("read" | "create")[] };
   const add = { id: "notes_add", crud: ["create"] as "create"[], effect: "write" as const, scopeType: "area" };
   const hv = { family: "policy" as const, reason: "needs owner review", by: "rules/rules_gate" };
-  assert.deepEqual(authorize(authIn({ op: add, access, holdVerdict: hv })), { decision: "hold", reason: "held_by_hook", holdFamily: "policy", heldBy: "rules/rules_gate" });
+  assert.deepEqual(authorize(authIn({ op: add, access, holdVerdict: hv })), { decision: "hold", reason: "held_by_hook", holdFamily: "policy", heldBy: "rules/rules_gate", admittedBy: "portal_grant" });
   assert.equal(authorize(authIn({ op: add, access, holdVerdict: hv, approval: "approved" })).decision, "run");
   assert.equal(authorize(authIn({ op: add, access: { level: "r", crud: ["read"] }, holdVerdict: hv })).reason, "scope_denied");
   // a read op is held too when a hook says so
@@ -180,7 +180,7 @@ test("C111a (spec 0.1.19): a non-empty wf limits ops in ANY mode; caps apply in 
   const add = { id: "notes_search", crud: ["create"] as "create"[], effect: "write" as const, scopeType: "area" };
   const access = { level: "rw", crud: ["read", "create"] as ("read" | "create")[] };
   assert.equal(authorize(free.authIn({ op: add, access, usage: { write: 0 } })).decision, "run");
-  assert.deepEqual(authorize(free.authIn({ op: add, access, usage: { write: 1 } })), { decision: "hold", reason: "caps_exceeded", holdFamily: "caps" });
+  assert.deepEqual(authorize(free.authIn({ op: add, access, usage: { write: 1 } })), { decision: "hold", reason: "caps_exceeded", holdFamily: "caps", admittedBy: "portal_grant" });
 });
 
 test("opInGrantWorkflow / opVisibleToGrant (L1): tools/list shows exactly what gate() steps 3–4 pass", async () => {
@@ -201,7 +201,12 @@ test("opInGrantWorkflow / opVisibleToGrant (L1): tools/list shows exactly what g
     for (const op of [view("notes_search", ["read"]), view("notes_add", ["create"]), view("notes_other", ["read"], { scopeType: "ghost" }), view("person_op", ["read"], { audience: "person" }), view("node_pump", ["read"], { listing: "workflow" }), view("notes_add", ["create"], { listing: "workflow" }), hp]) {
       const listed = opVisibleToGrant(op, grant, ["area"]);
       const passes = g(s.gateIn({ op })).decision === "pass";
-      assert.equal(listed, passes, `${grant.mode} wf[${grant.wf}] crud[${grant.crud}] ${op.id}`);
+      // v0.1.27 (C283 A1): listing is the NARROWER side. Everything listed passes gate(); the only op gate() passes without listing is
+      // an agent op WITH a scopeType whose crud is above the grant (the app's own access decides; the bridge lists it via admittedOps)
+      const op2 = op as { standard: boolean; crud: string[]; scopeType?: string; audience: string };
+      const aboveGrant = !op2.standard && op2.scopeType === "area" && op2.audience === "agent" && !op2.crud.every((c) => (grant.crud as string[]).includes(c));
+      if (listed) assert.equal(passes, true, `${grant.mode} wf[${grant.wf}] crud[${grant.crud}] ${op.id}: listed but gate refuses`);
+      else if (!aboveGrant) assert.equal(passes, false, `${grant.mode} wf[${grant.wf}] crud[${grant.crud}] ${op.id}: gate passes an op that is not listed`);
     }
   }
 });
@@ -229,4 +234,99 @@ test("v0.1.21 (LR-1, C234): a listing workflow op is visible and passes ONLY whe
     assert.equal(d.decision === "pass", grant.wf.includes("node_pump"), JSON.stringify(d));
     if (!listed) assert.equal(d.reason, "not_in_workflow");
   }
+});
+
+// ── v0.1.27 (C283 A1, C277): the owner-set access row is primary for a scoped op ───────────────────────────────────────────
+type Crud = "read" | "create" | "update" | "delete";
+const ownerAccess = (crud: Crud[]) => ({ level: "owner_level", crud, authority: "owner" as const });
+const boundedAccess = (crud: Crud[]) => ({ level: "bounded_level", crud, authority: "bounded" as const });
+const delOp = { id: "notes_delete", crud: ["delete"] as Crud[], effect: "destructive" as const, scopeType: "area" };
+
+test("gate (C283 A1): a scoped op above grant.crud passes to the SDK; an UNSCOPED op above it is still refused (fires on bad)", async () => {
+  const { gateIn } = await setup({ crud: ["read"] });
+  // fires on bad: before 0.1.27 this refused crud_exceeds_grant at the bridge, so an owner row above the grant could never reach the SDK
+  assert.deepEqual(gate(gateIn({ op: op({ crud: ["read", "delete"] }) })), { decision: "pass", reason: "pass" });
+  // quiet on good / the rule stays for everything else
+  assert.equal(gate(gateIn({ op: op({ crud: ["read", "delete"], scopeType: undefined }), declaredScopeTypes: [] })).reason, "crud_exceeds_grant");
+  assert.equal(gate(gateIn({ op: { standard: true, id: "tb.keys_status", title: "k", crud: ["read", "delete"], effect: "read", audience: "agent", idempotency: "none", receipt: false } as OperationView })).reason, "crud_exceeds_grant");
+  // the other gate steps still apply to a scoped op above the grant
+  assert.equal(gate(gateIn({ op: op({ crud: ["delete"], scopeType: "folder" }) })).reason, "scope_type_unknown");
+  assert.equal(gate(gateIn({ op: op({ crud: ["delete"], audience: "person" }) })).reason, "audience_not_agent");
+  assert.equal(gate(gateIn({ op: op({ crud: ["delete"], id: "notes_other" }), paused: { workspace: false, agent: true, connection: false, instance: false } })).reason, "paused");
+  const bound = await setup({ crud: ["read"], mode: "bound", wf: ["notes_search"] });
+  assert.equal(gate(bound.gateIn({ op: op({ id: "notes_delete", crud: ["delete"] }) })).reason, "not_in_workflow");
+  assert.equal(gate(bound.gateIn({ op: op({ id: "notes_search", crud: ["read", "delete"] }) })).decision, "pass");
+  const bad = await setup({ crud: ["read"] });
+  assert.equal(gate(bad.gateIn({ op: op({ crud: ["delete"] }), grant: bad.bad })).reason, "grant_invalid");
+});
+
+test("authorize (C283 A1): an owner row admits above the grant; a bounded row is capped by the grant (fires on bad)", async () => {
+  const { authIn } = await setup({ crud: ["read"], held: [] });
+  // owner row wider than the grant: runs, and the receipt says which rule admitted it
+  assert.deepEqual(authorize(authIn({ op: delOp, access: ownerAccess(["read", "delete"]) })), { decision: "run", reason: "run", admittedBy: "app_owner_row" });
+  // fires on bad: the same row as `bounded` (or without authority) is refused scope_denied by the Portal ceiling
+  assert.deepEqual(authorize(authIn({ op: delOp, access: boundedAccess(["read", "delete"]) })), { decision: "refuse", reason: "scope_denied" });
+  assert.deepEqual(authorize(authIn({ op: delOp, access: { level: "x", crud: ["read", "delete"] } })), { decision: "refuse", reason: "scope_denied" });
+  // only the exact value "owner" counts
+  for (const authority of ["Owner", "primary", "", null, 1, true]) {
+    assert.equal(authorize(authIn({ op: delOp, access: { level: "x", crud: ["read", "delete"], authority } as never })).reason, "scope_denied", String(authority));
+  }
+  // an owner row NARROWER than the grant still narrows (the row's crud is the effective crud)
+  const wide = await setup({ crud: ["read", "create", "delete"], held: [] });
+  assert.equal(authorize(wide.authIn({ op: delOp, access: ownerAccess(["read"]) })).reason, "scope_denied");
+  assert.equal(authorize(wide.authIn({ op: delOp, access: ownerAccess(["read", "delete"]) })).decision, "run");
+  // no row at all is a refusal whatever the grant says
+  assert.equal(authorize(wide.authIn({ op: delOp, access: null })).reason, "scope_denied");
+  // bounded row inside the grant: the Portal grant admits
+  assert.deepEqual(authorize(wide.authIn({ op: delOp, access: boundedAccess(["read", "delete"]) })), { decision: "run", reason: "run", admittedBy: "portal_grant" });
+});
+
+test("authorize (C283 A1): an UNSCOPED op ignores the access row, also an owner row (fires on bad)", async () => {
+  const { authIn } = await setup({ crud: ["read"], held: [] });
+  const unscopedDelete = { id: "purge", crud: ["delete"] as Crud[], effect: "destructive" as const };
+  assert.deepEqual(authorize(authIn({ op: unscopedDelete, access: ownerAccess(["read", "delete"]) })), { decision: "refuse", reason: "scope_denied" });
+  assert.deepEqual(authorize(authIn({ op: unscopedDelete, access: null })), { decision: "refuse", reason: "scope_denied" });
+  // within the grant it runs, with no admittedBy (no scope rule applied)
+  assert.deepEqual(authorize(authIn({ op: { id: "ping", crud: ["read"], effect: "read" }, access: ownerAccess(["read"]) })), { decision: "run", reason: "run" });
+});
+
+test("authorize (C283 A1, S4): pause, revoked/invalid grant, expiry and wrong audience beat an owner row (fires on bad)", async () => {
+  const { authIn, bad, w } = await setup({ crud: ["read"], held: [] });
+  const access = ownerAccess(["read", "delete"]);
+  for (const k of ["workspace", "instance", "agent"] as const) {
+    assert.deepEqual(authorize(authIn({ op: delOp, access, paused: { workspace: false, instance: false, agent: false, [k]: true } })), { decision: "refuse", reason: "paused" }, k);
+  }
+  assert.equal(authorize(authIn({ op: delOp, access, grant: bad })).reason, "grant_invalid");
+  // revoked grant (jti in the slice revoked list)
+  const good = await signGrant(w.grantClaims({ crud: ["read"] }), w.portal);
+  const jti = JSON.parse(Buffer.from(good.split(".")[1] ?? "", "base64url").toString("utf8")).jti as string;
+  const revoked = authorize(authIn({ op: delOp, access, grant: good, trust: { ...w.trust, revokedJtis: new Set([jti]) as never } }));
+  assert.equal(revoked.decision, "refuse");
+  assert.notEqual(revoked.reason, "scope_denied");
+  // expired grant
+  const expired = authorize(authIn({ op: delOp, access, grant: good, trust: { ...w.trust, now: w.trust.now + 13 * 3600 } }));
+  assert.equal(expired.decision, "refuse");
+  assert.notEqual(expired.reason, "scope_denied");
+});
+
+test("authorize (C283 A1, S6): an owner row never skips a hold, a hook verdict, money or a cap; admittedBy rides along (fires on bad)", async () => {
+  const { authIn } = await setup({ crud: ["read"], held: ["destructive"], caps: { destructive: { max: 1, per: "hour" } } });
+  const access = ownerAccess(["read", "delete"]);
+  const held = authorize(authIn({ op: { ...delOp, holdFamily: "destructive" }, access }));
+  assert.deepEqual(held, { decision: "hold", reason: "held_family", holdFamily: "destructive", admittedBy: "app_owner_row" });
+  assert.deepEqual(authorize(authIn({ op: delOp, access, usage: { destructive: 1 } })), { decision: "hold", reason: "caps_exceeded", holdFamily: "caps", admittedBy: "app_owner_row" });
+  assert.equal(authorize(authIn({ op: { ...delOp, effect: "money" }, access })).holdFamily, "money");
+  const hv = { family: "first_contact" as const, reason: "new person", by: "rules/guard" };
+  assert.deepEqual(authorize(authIn({ op: delOp, access, holdVerdict: hv })), { decision: "hold", reason: "held_by_hook", holdFamily: "first_contact", heldBy: "rules/guard", admittedBy: "app_owner_row" });
+  // approval runs it once, still admitted by the owner row; but a refusal at step 2 beats an approval
+  assert.deepEqual(authorize(authIn({ op: delOp, access, approval: "approved" })), { decision: "run", reason: "approved", admittedBy: "app_owner_row" });
+  assert.equal(authorize(authIn({ op: delOp, access: boundedAccess(["read", "delete"]), approval: "approved" })).reason, "scope_denied");
+  // a refusal never carries admittedBy
+  assert.equal("admittedBy" in authorize(authIn({ op: delOp, access: boundedAccess(["read", "delete"]) })), false);
+});
+
+test("authorize (C283 A1): tb.hold_status and tb.holds_pending carry no admittedBy and never read the access row", async () => {
+  const { authIn } = await setup({ crud: ["create"] });
+  const hs = { id: "tb.hold_status", crud: ["read"] as Crud[], effect: "read" as const };
+  assert.deepEqual(authorize(authIn({ op: hs, access: null })), { decision: "run", reason: "run" });
 });

@@ -3,7 +3,7 @@
 // the `shared` default also when an instance becomes shared later, for every caller seen before.
 import type { AgentId } from "@opt2-tealbrick/spec/credentials";
 import type { CrudAction, Manifest, Scope } from "@opt2-tealbrick/spec/manifest";
-import type { AuditLog, PersonPrincipal, ScopeAccessView, ScopeGrantRow, ScopeInstance, ScopeStore, SliceAgent } from "@opt2-tealbrick/spec/sdk";
+import type { AuditLog, PersonPrincipal, ScopeAccessView, ScopeAuthority, ScopeGrantRow, ScopeInstance, ScopeStore, SliceAgent } from "@opt2-tealbrick/spec/sdk";
 import { TbError } from "./errors.ts";
 import { metaGet, metaSet, type RawDb, type Row, tx } from "./store.ts";
 
@@ -19,6 +19,9 @@ function toRow(r: Row): ScopeGrantRow {
     type: String(r.type),
     instanceId: String(r.instance_id),
     access: String(r.access),
+    // v0.1.35 (C283 A1): ONLY the exact stored value 'owner' is primary; anything else (the column default, a NULL from a
+    // database that skipped the migration, a corrupted value) reads as bounded, the Portal-ceiling rule
+    authority: r.authority === "owner" ? "owner" : "bounded",
     // v0.1.31 (SDK-INSTANCE-GRANT): absent on rows written before 0.1.31 (the writer was not stored)
     ...(source ? { source } : {}),
     ...(source === "app" && typeof r.granted_by_op === "string" ? { grantedByOp: r.granted_by_op } : {}),
@@ -33,8 +36,17 @@ export interface ScopeStoreInternals extends ScopeStore {
   crudOf(type: string, level: string): CrudAction[];
   /** Monotonic counter reported as `AppStatus.scopesRev`. */
   rev(): number;
-  /** Resolved access for a call: the targeted instance, or the best access when the op spans instances. */
-  resolve(caller: string, type: string, instanceId: string | null): { level: string; crud: CrudAction[]; id: string | null } | null;
+  /**
+   * Resolved access for a call: the targeted instance, or the best access when the op spans instances.
+   * v0.1.35 (C283 A1): `authority` is the stored authority of the targeted row; for an op that spans instances (id null) it is
+   * "owner" ONLY when EVERY row of the caller for this type is an owner row, else "bounded" (fail closed).
+   */
+  resolve(caller: string, type: string, instanceId: string | null): { level: string; crud: CrudAction[]; id: string | null; authority: ScopeAuthority } | null;
+  /**
+   * v0.1.35 (C283 A1): do the caller's OWNER rows admit `crud` for `type` across instances (the display marks `admitted` and
+   * `admittedOps`)? True only when the caller has rows, EVERY row is an owner row and the best row's crud contains `crud`.
+   */
+  ownerAdmits(caller: string, type: string, crud: readonly CrudAction[]): boolean;
   /** ScopeAccessView for an agent/app caller (person callers see everything). */
   view(caller: string | null, access: ScopeAccessView["access"]): ScopeAccessView;
   /** Applies defaults for a caller that has no slice entry (companion app callers). */
@@ -49,6 +61,12 @@ export interface ScopeStoreInternals extends ScopeStore {
  * `scopeGrantOps(store)`, called by the person-op / agent-op context builders in ops.ts.
  */
 export interface ScopeGrantOps {
+  /**
+   * `tb.scopes_set` of a verified owner SESSION (ops.ts `runStandardPersonOp`): the ONE path that writes `authority = 'owner'`
+   * (v0.1.35, C283 A1), also when the access level is unchanged ("make primary"). Not a member of the store object, so app code
+   * (an op handler, a hook, a job) that holds the store can never reach it.
+   */
+  ownerSet(principal: PersonPrincipal, agent: string, type: string, instanceId: string, access: string | null): Promise<void>;
   /** `ctx.scopeGrants.grant`: person op only (the caller builds `by` from the verified session). */
   appGrant(by: GrantBy, agent: string, type: string, instanceId: string, access: string): Promise<ScopeGrantRow>;
   /** `ctx.scopeGrants.revoke`: removes the agent's row for the instance, whatever its source; audited. */
@@ -124,7 +142,7 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
     if (shared.length === 0) return false;
     const seen = (db.prepare("SELECT agent FROM tb_scope_defaults WHERE type = ?").all(s.type) as Row[]).map((r) => String(r.agent));
     let n = 0;
-    const grant = db.prepare("INSERT OR IGNORE INTO tb_scopes (agent, type, instance_id, access, source) VALUES (?, ?, ?, ?, 'default')");
+    const grant = db.prepare("INSERT OR IGNORE INTO tb_scopes (agent, type, instance_id, access, source, authority) VALUES (?, ?, ?, ?, 'default', 'bounded')");
     for (const agent of seen) {
       const g = shared.find((x) => appliesTo(x, agent));
       if (g) n += Number(grant.run(agent, s.type, id, g.access).changes ?? 0);
@@ -150,7 +168,7 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
     tx(db, () => {
       for (const s of scopes.values()) {
         if (db.prepare("SELECT 1 FROM tb_scope_defaults WHERE agent = ? AND type = ?").get(caller, s.type)) continue;
-        const grant = db.prepare("INSERT OR IGNORE INTO tb_scopes (agent, type, instance_id, access, source) VALUES (?, ?, ?, ?, 'default')");
+        const grant = db.prepare("INSERT OR IGNORE INTO tb_scopes (agent, type, instance_id, access, source, authority) VALUES (?, ?, ?, ?, 'default', 'bounded')");
         for (const g of s.defaultGrants) {
           if (!appliesTo(g, caller)) continue;
           let ids: string[];
@@ -172,6 +190,23 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
     if (changed) bump();
   };
 
+  /** The one writer of a person-set row (`tb.scopes_set`): `authority` says whether it is primary (see ScopeGrantOps.ownerSet). */
+  const setRow = async (principal: PersonPrincipal, agent: string, type: string, instanceId: string, access: string | null, authority: ScopeAuthority): Promise<void> => {
+    if (principal?.type !== "person") throw new TbError("session_required", "only the owner can set scope access", 403);
+    const s = scopeOf(type);
+    if (access !== null && !s.access.some((a) => a.id === access)) throw new TbError("access_level_unknown", `access level not declared: ${access}`, 400);
+    if (!db.prepare("SELECT 1 FROM tb_scope_instances WHERE type = ? AND id = ?").get(type, instanceId))
+      throw new TbError("scope_instance_unknown", "scope instance does not exist", 404);
+    if (access === null) db.prepare("DELETE FROM tb_scopes WHERE agent = ? AND type = ? AND instance_id = ?").run(agent, type, instanceId);
+    else
+      db.prepare(
+        `INSERT INTO tb_scopes (agent, type, instance_id, access, source, granted_by_op, authority) VALUES (?, ?, ?, ?, 'owner', NULL, ?)
+         ON CONFLICT (agent, type, instance_id) DO UPDATE SET access = excluded.access, source = 'owner', granted_by_op = NULL, authority = excluded.authority`,
+      ).run(agent, type, instanceId, access, authority === "owner" ? "owner" : "bounded");
+    await audit.record({ actor: principal.id, action: "scope.set", target: agent, detail: { type, instance: instanceId, access, ...(access !== null ? { authority } : {}) } });
+    bump();
+  };
+
   const store: ScopeStoreInternals = {
     instances: {
       async create(type, id, label, opts) {
@@ -191,20 +226,11 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
     async list(agent) {
       return (db.prepare("SELECT * FROM tb_scopes WHERE agent = ? ORDER BY type, instance_id").all(agent) as Row[]).map(toRow);
     },
+    // v0.1.35 (C283 A1): the public store method NEVER writes an owner row: it is reachable from app code (the `StartedApp` handle),
+    // and the principal it takes is a plain object an agent op or a companion-call handler could forge. It still writes source
+    // 'owner' (audited) but authority 'bounded'. The one owner path is `ScopeGrantOps.ownerSet`, called with the verified session.
     async set(principal: PersonPrincipal, agent, type, instanceId, access) {
-      if (principal?.type !== "person") throw new TbError("session_required", "only the owner can set scope access", 403);
-      const s = scopeOf(type);
-      if (access !== null && !s.access.some((a) => a.id === access)) throw new TbError("access_level_unknown", `access level not declared: ${access}`, 400);
-      if (!db.prepare("SELECT 1 FROM tb_scope_instances WHERE type = ? AND id = ?").get(type, instanceId))
-        throw new TbError("scope_instance_unknown", "scope instance does not exist", 404);
-      if (access === null) db.prepare("DELETE FROM tb_scopes WHERE agent = ? AND type = ? AND instance_id = ?").run(agent, type, instanceId);
-      else
-        db.prepare(
-          `INSERT INTO tb_scopes (agent, type, instance_id, access, source, granted_by_op) VALUES (?, ?, ?, ?, 'owner', NULL)
-           ON CONFLICT (agent, type, instance_id) DO UPDATE SET access = excluded.access, source = 'owner', granted_by_op = NULL`,
-        ).run(agent, type, instanceId, access);
-      await audit.record({ actor: principal.id, action: "scope.set", target: agent, detail: { type, instance: instanceId, access } });
-      bump();
+      await setRow(principal, agent, type, instanceId, access, "bounded");
     },
     async applyDefaults(agent: SliceAgent) {
       applyDefaultsFor(agent.id, agent.name);
@@ -229,8 +255,20 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
     agentCeiling,
     rev: () => metaGet<number>(db, "scopes_rev") ?? 0,
     resolve(caller, type, instanceId) {
-      const row = instanceId === null ? bestOf(caller, type) : accessOf(caller, type, instanceId);
-      return row ? { level: row.access, crud: crudOf(type, row.access), id: instanceId } : null;
+      if (instanceId !== null) {
+        const row = accessOf(caller, type, instanceId);
+        return row ? { level: row.access, crud: crudOf(type, row.access), id: instanceId, authority: row.authority === "owner" ? "owner" : "bounded" } : null;
+      }
+      // an op that spans instances: the best access; owner only when EVERY row involved is an owner row
+      const rows = rowsOf(caller, type);
+      const row = bestOf(caller, type);
+      if (!row) return null;
+      return { level: row.access, crud: crudOf(type, row.access), id: null, authority: rows.every((r) => r.authority === "owner") ? "owner" : "bounded" };
+    },
+    ownerAdmits(caller, type, crud) {
+      if (!scopes.has(type)) return false;
+      const r = store.resolve(caller, type, null);
+      return r !== null && r.authority === "owner" && crud.every((c) => r.crud.includes(c));
     },
     view(caller, access) {
       const ids = async (type: string, want: (c: CrudAction[]) => boolean): Promise<string[]> => {
@@ -255,6 +293,9 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
     applyDefaultsFor,
   };
   const ops: ScopeGrantOps = {
+    async ownerSet(principal, agent, type, instanceId, access) {
+      await setRow(principal, agent, type, instanceId, access, "owner");
+    },
     async appGrant(by, agent, type, instanceId, access) {
       const bad = (reason: string, message: string): TbError => new TbError("scope_grant_invalid", message, 400, { reason });
       if (by?.principal?.type !== "person") throw new TbError("session_required", "only a person op can grant scope access", 403);
@@ -273,8 +314,9 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
       const refused = by.refusal(agent);
       if (refused) throw bad(refused.reason, refused.message);
       db.prepare(
-        `INSERT INTO tb_scopes (agent, type, instance_id, access, source, granted_by_op) VALUES (?, ?, ?, ?, 'app', ?)
-         ON CONFLICT (agent, type, instance_id) DO UPDATE SET access = excluded.access, source = 'app', granted_by_op = excluded.granted_by_op`,
+        // v0.1.35 (C283 A1): authority 'bounded' also when this overwrites an owner row (an app never makes a row primary)
+        `INSERT INTO tb_scopes (agent, type, instance_id, access, source, granted_by_op, authority) VALUES (?, ?, ?, ?, 'app', ?, 'bounded')
+         ON CONFLICT (agent, type, instance_id) DO UPDATE SET access = excluded.access, source = 'app', granted_by_op = excluded.granted_by_op, authority = 'bounded'`,
       ).run(agent, type, instanceId, access, by.op);
       await audit.record({
         actor: by.principal.id,
