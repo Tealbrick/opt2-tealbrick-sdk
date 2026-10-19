@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/Tealbrick/opt2-tealbrick-platform/ci-v9.9/ci/tealbrick-ci.schema.json",
+  "$schema": "https://raw.githubusercontent.com/Tealbrick/opt2-tealbrick-platform/ci-v9.17/ci/tealbrick-ci.schema.json",
   "kind": "miniapp",
   "paths": ["."],
   "images": [
