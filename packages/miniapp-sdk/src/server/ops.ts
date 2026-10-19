@@ -3,7 +3,7 @@
 // → authorize() (step 0 = slice pause) → handler. Holds and receipts are rows of the one receipts table.
 import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { authorize, DECISION_REASON, digest, EFFECTS, HOLDS_PENDING_OP, opInGrantWorkflow, validateAgainstSchema, validateInput, verifyCallProof, verifyGrant } from "@opt2-tealbrick/manifest";
+import { authorize, canonicalize, DECISION_REASON, digest, EFFECTS, HOLDS_PENDING_OP, opInGrantWorkflow, validateAgainstSchema, validateInput, verifyCallProof, verifyGrant } from "@opt2-tealbrick/manifest";
 import { BRIDGE_HEADERS, type CompanionCaller, type OpCallBody, type OpResult } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, CallId, InstanceId, PersonId, Sha256Digest } from "@opt2-tealbrick/spec/credentials";
 import type { CrudAction, DynamicResolution, Effect, HoldFamily, Operation } from "@opt2-tealbrick/spec/manifest";
@@ -437,7 +437,10 @@ export interface DynamicHoldText {
   readable: boolean;
 }
 
-const defaultHoldView = (op: { title: string }, input: Json): string => `${op.title}\n${JSON.stringify(input, null, 2)}`;
+// v0.1.33 (G7, C275): the JSON is built from the JCS form (the same canonicalize() as the input digest), so a replay of the
+// same input with its keys in another order gives the SAME view text and hash and the approval matches; key order of the
+// caller never reaches the view. Indented for the owner (JSON.parse keeps the JCS key order; integer-like keys sort first).
+const defaultHoldView = (op: { title: string }, input: Json): string => `${op.title}\n${JSON.stringify(JSON.parse(canonicalize(input)), null, 2)}`;
 export const holdViewDigest = (view: string): string => `sha256:${createHash("sha256").update(view, "utf8").digest("hex")}`;
 
 /**
