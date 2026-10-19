@@ -178,13 +178,17 @@ async function boot(opts: { handlers?: Handlers; jobsDrainMs?: number; dir?: str
         // the scheduling op: an agent asks for a delete in N ms (SDK-2)
         note_get: async (input, c) => {
           const ctx = c as SdkOpContext;
-          const i = input as { id: string; inMs?: number; key?: string };
-          const job = ctx.schedule({ op: "note_delete", input: { id: i.id } }, { at: Date.now() + (i.inMs ?? 300) }, i.key ? { key: i.key } : {});
+          const i = input as { id: string; inMs?: number; key?: string; nb?: string };
+          const job = ctx.schedule({ op: "note_delete", input: { id: i.id, ...(i.nb ? { nb: i.nb } : {}) } }, { at: Date.now() + (i.inMs ?? 300) }, i.key ? { key: i.key } : {});
           return { job: job.id, paused: ctx.paused() as unknown as Json };
         },
-        note_delete: async (input) => {
-          b.ran.note_delete.push(String((input as { id: string }).id));
-          return { deleted: true };
+        // `scope` is read only when the manifest gives the op a scopeType (the v0.1.36 fire-time scope test); `nb` = the target instance
+        note_delete: {
+          scope: (input) => (input as { nb?: string }).nb ?? null,
+          run: async (input) => {
+            b.ran.note_delete.push(String((input as { id: string }).id));
+            return { deleted: true };
+          },
         },
         notebook_rename: async () => ({}),
       },
@@ -661,5 +665,76 @@ describe("scheduled ops: a `listing: \"workflow\"` op at fire time", () => {
     const rs = await receipts();
     assert.equal(rs.length, before + 1);
     assert.equal(rs.at(-1)?.status, "run");
+  });
+});
+
+// v0.1.36 gap G3 (sdk#34 review): the fire path reads the caller's scope row with ITS authority. A BOUNDED row (default, app or
+// bounded-written) never lifts the stored Portal grant at fire time; only an OWNER row does, exactly like a live call.
+describe("scheduled ops: scope row authority at fire time", () => {
+  let b: Booted;
+  before(async () => {
+    // note_delete becomes a scoped op (notebook); the fixture's `read_write` level includes delete, the stored grant below does not
+    b = await boot({ manifest: (m) => ({ ...m, operations: m.operations.map((o) => (o.id === "note_delete" ? { ...o, scopeType: "notebook" } : o)) as Manifest["operations"] }) });
+  });
+  after(async () => b.cleanup());
+
+  /** the stored grant: read + create only, so a delete is ABOVE the Portal grant (the row's level read_write would admit it) */
+  const NARROW = { crud: ["read", "create"] as ("read" | "create")[] };
+  const schedule = async (id: string, nb: string, grantToken: string) => {
+    const r = await callOp(b, "note_get", { id, nb, inMs: 300 }, { grantToken });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    return String(r.body.output.job);
+  };
+  const settled = (id: string) => until(async () => {
+    const j = b.jobs.get(id);
+    return j && ["done", "refused", "failed", "waiting"].includes(j.status) ? j : null;
+  });
+  const dbDo = async <T>(f: (db: import("node:sqlite").DatabaseSync) => T, readOnly = true): Promise<T> => {
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(`${b.dir}/app.db`, { readOnly });
+    try {
+      db.exec("PRAGMA busy_timeout = 5000");
+      return f(db);
+    } finally {
+      db.close();
+    }
+  };
+
+  test("fires on bad: a BOUNDED row whose level grants delete does not lift the narrow grant at fire time: refused scope_denied (the live call's code), never runs", async () => {
+    const agent = b.w.agents.a;
+    const g = await grant(b.w, agent, NARROW);
+    // the agent's first call applies the default rows: its OWN notebook instance (id = the agent) at read_write, authority bounded
+    const live = await callOp(b, "note_delete", { id: "live-1", nb: agent }, { grantToken: g });
+    assert.equal(live.status, 403, JSON.stringify(live.body));
+    assert.equal(live.body.error.code, "scope_denied", "the live call of the same op, same grant, same row");
+    const row = await dbDo((db) => db.prepare("SELECT access, authority FROM tb_scopes WHERE agent = ? AND type = 'notebook' AND instance_id = ?").get(agent, agent) as { access: string; authority: string } | undefined);
+    assert.deepEqual({ ...row }, { access: "read_write", authority: "bounded" }, "the row would admit delete, but it is bounded");
+    const j = await settled(await schedule("g3-bad-1", agent, g));
+    assert.equal(j.status, "refused", j.lastError ?? "");
+    assert.equal(j.lastError, live.body.error.code, "fire time gives the same code as the live path");
+    assert.ok(!b.ran.note_delete.includes("g3-bad-1"), "the handler never ran");
+    const rs = await dbDo((db) => db.prepare("SELECT status, meta FROM tb_receipts WHERE op = 'note_delete' ORDER BY created_at").all() as { status: string; meta: string }[]);
+    assert.equal(rs.at(-1)?.status, "refused");
+    assert.equal(JSON.parse(String(rs.at(-1)?.meta)).reason, "scope_denied");
+  });
+
+  test("quiet on good: the SAME row made an OWNER row admits the scheduled delete above the grant (run receipt, admitted by app_owner_row); a bounded row inside the grant also runs", async () => {
+    const agent = b.w.agents.b;
+    const g = await grant(b.w, agent, NARROW);
+    // first sight applies the defaults (a refused live call is enough)
+    assert.equal((await callOp(b, "note_delete", { id: "live-2", nb: agent }, { grantToken: g })).body.error?.code, "scope_denied");
+    await dbDo((db) => db.prepare("UPDATE tb_scopes SET authority = 'owner' WHERE agent = ? AND type = 'notebook' AND instance_id = ?").run(agent, agent), false);
+    const j = await settled(await schedule("g3-owner-1", agent, g));
+    assert.equal(j.status, "done", j.lastError ?? "");
+    assert.deepEqual(b.ran.note_delete.filter((x) => x === "g3-owner-1"), ["g3-owner-1"]);
+    const rs = await dbDo((db) => db.prepare("SELECT status, admitted_by FROM tb_receipts WHERE op = 'note_delete' AND caller_id = ? ORDER BY created_at").all(agent) as { status: string; admitted_by: string | null }[]);
+    assert.equal(rs.at(-1)?.status, "run");
+    assert.equal(rs.at(-1)?.admitted_by, "app_owner_row");
+    // a grant that already includes delete: the bounded row is inside the grant and admits (portal_grant)
+    const agentA = b.w.agents.a;
+    const wide = await grant(b.w, agentA, { crud: ["read", "create", "update", "delete"] });
+    const j2 = await settled(await schedule("g3-inside-1", agentA, wide));
+    assert.equal(j2.status, "done", j2.lastError ?? "");
+    assert.deepEqual(b.ran.note_delete.filter((x) => x === "g3-inside-1"), ["g3-inside-1"]);
   });
 });

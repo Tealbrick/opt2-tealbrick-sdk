@@ -463,6 +463,72 @@ describe("C283 A1: owner-set access is primary, everything else is bounded (HTTP
       b.bridge.push(await slice(b.w, PRODUCT));
     }
   });
+
+  // v0.1.36 gap G1 (sdk#34 review): toRow reads ONLY the exact stored value 'owner' as primary. The column is NOT NULL DEFAULT 'bounded',
+  // so a "corrupted" value is a different string; the store level below covers NULL.
+  test("G1: a stored authority that is not exactly 'owner' (Owner, OWNER, x, empty, padded) reads as bounded and the Portal grant stays the ceiling", async () => {
+    const setRaw = (agent: string, id: string, value: string) => {
+      const db = new DatabaseSync(join(b.dataDir, "app.db"));
+      try {
+        db.exec("PRAGMA busy_timeout = 5000");
+        const r = db.prepare("UPDATE tb_scopes SET authority = ? WHERE agent = ? AND type = 'notebook' AND instance_id = ?").run(value, agent, id);
+        assert.equal(Number(r.changes), 1, "the raw write hit the row");
+      } finally {
+        db.close();
+      }
+    };
+    // control: the exact value 'owner' written raw is primary (so the raw write path really reaches the decision)
+    const idOk = await fresh();
+    await setOwner(A(), idOk, "manage");
+    setRaw(A(), idOk, "owner");
+    assert.equal((await rowOf(A(), idOk))?.authority, "owner");
+    assert.equal((await agentOp(b, "note_purge", { notebook: idOk })).status, 200, "quiet on good: an exact 'owner' row admits above the grant");
+    for (const bad of ["Owner", "OWNER", "x", "", " owner", "owner ", "bounded "]) {
+      const id = await fresh();
+      await setOwner(A(), id, "manage");
+      setRaw(A(), id, bad);
+      assert.equal((await rowOf(A(), id))?.authority, "bounded", `fires on bad: ${JSON.stringify(bad)} must read bounded (a "!== bounded" test would make it primary)`);
+      const no = await agentOp(b, "note_purge", { notebook: id });
+      assert.equal(no.status, 403, `${JSON.stringify(bad)}: ${JSON.stringify(no.body)}`);
+      assert.equal(no.body.error.code, "scope_denied", "capped by the Portal grant (read + create)");
+    }
+  });
+
+  // v0.1.36 gap G4 (sdk#34 review): markable() requires status "active" itself. The slice type allows "active" | "paused", and
+  // `paused` is also caught by trust.paused(), so only a status outside the pair separates the two checks. The slice is signed by Portal
+  // (the test pushes a value the types do not list, as a newer Portal might); the SDK must fail closed and mark nothing.
+  test("G4: an agent in the slice whose status is not 'active' gets no `admitted` marks in catalog and no admittedOps in scope_summary, owner rows or not", async () => {
+    const agent = b.w.agents.b;
+    assert.equal((await agentOp(b, "note_create", { notebook: agent, title: "t" }, { agent })).status, 200);
+    for (const r of await b.running.scopes.list(agent as never)) await setOwner(agent, r.instanceId, "manage");
+    const others = [{ id: b.w.agents.a, name: "Agent A", mode: "free", status: "active" }];
+    const adm = async () => {
+      const cat = await bridgeOp(b, "catalog", { op: "tools", agent });
+      const sum = await bridgeOp(b, "scope_summary", {});
+      const forB = sum.body.find((x: { agent: string }) => x.agent === agent);
+      return { marked: (cat.body as DynamicCatalogEntry[]).filter((e) => e.admitted === "owner").length, ops: forB?.admittedOps as string[] | undefined, listed: forB !== undefined };
+    };
+    const push = async (status: string) => {
+      const before = b.bridge.statuses.length;
+      b.bridge.push(await slice(b.w, PRODUCT, { agents: [...others, { id: agent, name: "Agent B", mode: "free", status }] as never }));
+      await until(async () => b.bridge.statuses.length > before && (b.bridge.statuses.at(-1) as { sliceRevision?: number }).sliceRevision === b.w.rev);
+    };
+    try {
+      await push("active");
+      const good = await adm();
+      assert.ok(good.marked > 0, "quiet on good: an active agent with owner rows is marked");
+      assert.deepEqual([...(good.ops ?? [])].sort(), ["note_create", "note_purge"]);
+      for (const status of ["retired", "suspended", ""]) {
+        await push(status);
+        const bad = await adm();
+        assert.equal(bad.listed, true, "still in the slice, so scope_summary lists it");
+        assert.equal(bad.marked, 0, `fires on bad: status ${JSON.stringify(status)} must mark no catalog entry`);
+        assert.equal(bad.ops, undefined, `fires on bad: status ${JSON.stringify(status)} must name no admittedOps`);
+      }
+    } finally {
+      b.bridge.push(await slice(b.w, PRODUCT));
+    }
+  });
 });
 
 // ── migration (C283a condition 4): owner rows written before schema 8 stay bounded after the upgrade ─────────────────────────
@@ -599,6 +665,35 @@ describe("C283 A1: store rows feed authorize()", () => {
       assert.equal(await st.access("agt_1" as never, "notebook", "a"), null);
       await assert.rejects(ops.ownerSet(per, "agt_1", "notebook", "a", "root"), (e: unknown) => (e as { code?: string }).code === "access_level_unknown");
       await assert.rejects(ops.ownerSet(per, "agt_1", "notebook", "nope", "read"), (e: unknown) => (e as { code?: string }).code === "scope_instance_unknown");
+      db.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  // v0.1.36 gap G1: a NULL authority (a database whose column lost its NOT NULL, or a row written by other code) is bounded too
+  test("a NULL or foreign stored authority reads bounded in resolve / access / list, and ownerAdmits is false", async () => {
+    const t = tempDir();
+    try {
+      const db = openDb(t.dir);
+      applySdkMigrations(db);
+      db.exec("DROP TABLE tb_scopes");
+      db.exec(
+        "CREATE TABLE tb_scopes (agent TEXT NOT NULL, type TEXT NOT NULL, instance_id TEXT NOT NULL, access TEXT NOT NULL, source TEXT, granted_by_op TEXT, authority TEXT, PRIMARY KEY (agent, type, instance_id)) STRICT",
+      );
+      const st = createScopeStore(db, manifestFor(1), createAuditLog(db, []), () => {});
+      await st.instances.create("notebook", "a", "A");
+      const ins = db.prepare("INSERT INTO tb_scopes (agent, type, instance_id, access, source, authority) VALUES (?, 'notebook', 'a', 'manage', 'owner', ?)");
+      const values: [string, string | null][] = [["agt_null", null], ["agt_cap", "Owner"], ["agt_x", "x"], ["agt_ok", "owner"]];
+      for (const [agent, v] of values) ins.run(agent, v);
+      for (const agent of ["agt_null", "agt_cap", "agt_x"]) {
+        assert.equal(st.resolve(agent, "notebook", "a")?.authority, "bounded", `fires on bad: ${agent} must not be primary`);
+        assert.equal((await st.access(agent as never, "notebook", "a"))?.authority, "bounded");
+        assert.equal((await st.list(agent as never)).every((r) => r.authority === "bounded"), true);
+        assert.equal(st.ownerAdmits(agent, "notebook", ["delete"]), false);
+      }
+      assert.equal(st.resolve("agt_ok", "notebook", "a")?.authority, "owner", "quiet on good: the exact value 'owner'");
+      assert.equal(st.ownerAdmits("agt_ok", "notebook", ["delete"]), true);
       db.close();
     } finally {
       t.cleanup();
