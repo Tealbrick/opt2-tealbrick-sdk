@@ -1,11 +1,11 @@
-// The new 0.1.24 app rows (A20, A12.caller_unverified_refused, A2 hook sub / call) against the REAL miniapp-sdk of this workspace,
+// The new 0.1.24 and 0.1.25 app rows (A20, A12.caller_unverified_refused, A2 hook sub / call / bd, A21) against the REAL miniapp-sdk of this workspace,
 // not against the mini app test double: a correct SDK passes every row. (The double is where the rows are proven to FAIL on bad.)
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
-import { parseConformanceConfig, runApp } from "../src/index.ts";
+import { applyLevelCrud, LEVEL_CRUD_ENV, parseConformanceConfig, parseLevelCrud, runApp } from "../src/index.ts";
 
 const sdk = (await import(new URL("../../miniapp-sdk/src/server/index.ts", import.meta.url).href)) as {
   defineApp(def: unknown): unknown;
@@ -44,7 +44,8 @@ async function startReal(env: Record<string, string>) {
   mkdirSync(migrations, { recursive: true });
   writeFileSync(join(migrations, "0001_init.sql"), "CREATE TABLE conformance_real (id TEXT PRIMARY KEY);\n");
   const app = sdk.defineApp({
-    manifest: am,
+    // conformance 0.1.25: the A21 rows simulate an app update by restarting with TBCONF_LEVEL_CRUD; this start module applies it
+    manifest: applyLevelCrud(am, parseLevelCrud(env[LEVEL_CRUD_ENV])),
     handlers,
     hooks: { guard: async () => ({ allow: true }) },
     dynamic: {
@@ -64,8 +65,8 @@ async function startReal(env: Record<string, string>) {
   return { url: `http://127.0.0.1:${port}`, stop: () => running.stop(), backupNow: async () => void (await running.backups.runNow()) };
 }
 
-describe("conformance 0.1.24 rows against the real miniapp-sdk", () => {
-  it("a correct SDK passes every new row", async () => {
+describe("conformance 0.1.24 and 0.1.25 rows against the real miniapp-sdk", { timeout: 300_000 }, () => {
+  it("a correct SDK passes every new row", { timeout: 240_000 }, async () => {
     const config = parseConformanceConfig({ scopeGrantOp: { op: "scope_grant", input: { agent: "${tb.agentA}", id: "space-draft", access: "read_write" }, aboveCeiling: { agent: "${tb.agentA}", id: "space-draft", access: "manage" } } }, "test config");
     const r = await runApp({ manifest: am, manifestPath: path, config, start: startReal as never, deployTemplate: template, timeoutMs: 8000 });
     const st = (id: string) => r.checks.find((c) => c.id === id);

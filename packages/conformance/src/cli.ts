@@ -313,12 +313,18 @@ const isEntry = (() => {
     return false;
   }
 })();
+/**
+ * Exits after stdout and stderr have been flushed. `process.exit` right after a large `write` to a PIPE loses what the pipe
+ * (64 KiB) did not take yet: a report over 64 KiB was cut off mid-string when a parent read it (conformance 0.1.25: the report
+ * grew past that with the A21 rows). A write callback fires when everything written before it has been handed to the OS.
+ */
+function exitFlushed(code: number): void {
+  process.exitCode = code;
+  process.stdout.write("", () => process.stderr.write("", () => process.exit(code)));
+}
 if (isEntry) {
-  main(process.argv.slice(2)).then(
-    (code) => process.exit(code),
-    (e) => {
-      process.stderr.write(`tb-conformance: ${e instanceof Error ? e.message : String(e)}\n`);
-      process.exit(2);
-    },
-  );
+  main(process.argv.slice(2)).then(exitFlushed, (e) => {
+    process.stderr.write(`tb-conformance: ${e instanceof Error ? e.message : String(e)}\n`);
+    exitFlushed(2);
+  });
 }

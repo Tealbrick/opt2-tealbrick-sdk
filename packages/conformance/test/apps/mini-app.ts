@@ -24,6 +24,7 @@ import {
   portalRootKeys,
   seal,
   sealAad,
+  sha256Bytes,
   signInstanceAssertion,
   tagsMatch,
   trustedPortalKeys,
@@ -41,6 +42,7 @@ import type { InstanceSlice } from "@opt2-tealbrick/spec/bridge";
 import type { BridgeId, InstanceId, SealedBlob, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
 import type { Effect, Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json, OperationView, TrustContext } from "@opt2-tealbrick/spec/sdk";
+import { applyLevelCrud, LEVEL_CRUD_ENV, parseLevelCrud } from "../../src/level-crud.ts";
 import { readTar } from "../../src/tar.ts";
 import { writeTarGz } from "./tar-write.ts";
 
@@ -192,6 +194,32 @@ export interface MiniAppFaults {
   hookIgnoresSub?: boolean;
   /** spec 0.1.50 (C268 A): the hook route does not compare the proof `call` with the call id of the body (fails A2.hook_call_mismatch) */
   hookIgnoresCall?: boolean;
+  /** spec 0.1.52 (C283c): an owner row has no snapshot; its crud is the level's crud NOW (the 0.1.35 rule; fails A21.owner_row_widened_level) */
+  ownerRowFollowsLevel?: boolean;
+  /** spec 0.1.52: an owner row's crud is its snapshot only, not intersected with the level now (fails A21.owner_row_narrowed_level) */
+  ownerRowSnapshotOnly?: boolean;
+  /** spec 0.1.52: a plain re-set of the same level takes the new level crud (accepts the offer; fails A21.owner_row_widened_level) */
+  plainResetAccepts?: boolean;
+  /** spec 0.1.52: acceptOffer is not compared with the current offer (any adds accept; fails A21.owner_row_widened_level) */
+  acceptNoCompare?: boolean;
+  /** spec 0.1.52: acceptOffer with NO offer accepts any adds (fails A21.accept_offer_rules) */
+  acceptPhantomOk?: boolean;
+  /** spec 0.1.52: acceptOffer with access null deletes the row (fails A21.accept_offer_rules) */
+  acceptNullDeletes?: boolean;
+  /** spec 0.1.52: acceptOffer for another level than the row's is allowed and changes the level (fails A21.accept_offer_rules) */
+  acceptOtherLevelOk?: boolean;
+  /** spec 0.1.52: a widened level lists no offer (fails A21.owner_row_widened_level) */
+  noOffer?: boolean;
+  /** spec 0.1.52: scope rows carry no effective `crud` member (fails A21.owner_row_widened_level / A21.owner_row_narrowed_level) */
+  noEffectiveCrud?: boolean;
+  /** spec 0.1.52: the start module does not apply TBCONF_LEVEL_CRUD (the A21 update rows are not_applicable) */
+  ignoresLevelCrud?: boolean;
+  /** spec 0.1.52 (C268 B): the hook route accepts any `bd` (compares nothing; fails A2.hook_bd_binds_body) */
+  hookIgnoresBd?: boolean;
+  /** spec 0.1.52: a proof that carries `bd` is not verified at all, on any route (fails A2.hook_bd_malformed and A2.proof_bd_other_variants) */
+  bdProofsUnverified?: boolean;
+  /** spec 0.1.52: the claim and the status pushes declare no proofClaims (fails A2.proof_claims_declared) */
+  noProofClaims?: boolean;
 }
 
 /**
@@ -258,7 +286,7 @@ interface State {
   idem: Record<string, { inputDigest: string; kind: "held" | "result"; holdId?: string; output?: Json }>;
   /** v0.1.18 (SDK-02): one cap slot per run of a capped effect (receipt or not) */
   capSlots?: { caller: string; effect: string; at: number }[];
-  scopes: { agent: string; type: string; instanceId: string; access: string; source?: string; grantedByOp?: string; authority?: "owner" | "bounded" }[];
+  scopes: { agent: string; type: string; instanceId: string; access: string; source?: string; grantedByOp?: string; authority?: "owner" | "bounded"; /** spec 0.1.52: the level's crud when the owner set the row */ crudSnapshot?: string[] }[];
   defaultsApplied: string[];
   sessions: { digest: string; per: string; createdAt: number; csrf: string; expiresAt: number }[];
   usedJti: string[];
@@ -289,7 +317,9 @@ class E extends Error {
   }
 }
 
-export async function startMiniApp(manifest: Manifest, env: Record<string, string>, faults: MiniAppFaults = {}, port = 0) {
+export async function startMiniApp(released: Manifest, env: Record<string, string>, faults: MiniAppFaults = {}, port = 0) {
+  // spec 0.1.52 (conformance 0.1.25): an A21 row simulates "an app update" by restarting with TBCONF_LEVEL_CRUD; this start module applies it
+  const manifest = faults.ignoresLevelCrud ? released : applyLevelCrud(released, parseLevelCrud(env[LEVEL_CRUD_ENV]));
   const ins = env.TB_INSTANCE_ID as InstanceId;
   const dataDir = env.TB_DATA_DIR;
   const backupDir = env.TB_BACKUP_DIR;
@@ -408,7 +438,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
 
   // claim (once; again only after a refused identity with a NEW enrolment code, SDK-API §13 v0.1.12)
   async function claim(reclaim: boolean): Promise<void> {
-    const r = await bridge("POST", "/tb/v1/claim", { code: env.TB_ENROL_CODE, instancePublicKey: key.publicJwk, manifestDigest: mDigest, version: manifest.version, sdkVersion: faults.reportedSdkVersion ?? `${manifest.sdkMajor}.0.0` }, undefined, {}, false);
+    const r = await bridge("POST", "/tb/v1/claim", { code: env.TB_ENROL_CODE, instancePublicKey: key.publicJwk, manifestDigest: mDigest, version: manifest.version, sdkVersion: faults.reportedSdkVersion ?? `${manifest.sdkMajor}.0.0`, ...(faults.noProofClaims ? {} : { proofClaims: ["bd"] }) }, undefined, {}, false);
     if (r.status !== 200 || !isObj(r.body) || r.body.ins !== ins) throw new Error(`claim failed: ${r.status}`);
     st.claimed = true;
     st.codeDigest = sha(env.TB_ENROL_CODE ?? "");
@@ -458,7 +488,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
         const r = await bridge(
           "POST",
           `/tb/v1/status?wait=${now ? 0 : 60}`,
-          { readiness: "ready", version: manifest.version, sdkVersion: `${manifest.sdkMajor}.0.0`, scopesRev: 0, sliceRevision: slice?.rev ?? 0, keysRev, pendingHolds: pending() },
+          { readiness: "ready", version: manifest.version, sdkVersion: `${manifest.sdkMajor}.0.0`, scopesRev: 0, sliceRevision: slice?.rev ?? 0, keysRev, pendingHolds: pending(), ...(faults.noProofClaims ? {} : { proofClaims: ["bd"] }) },
           AbortSignal.any([stop.signal, poll.signal]),
         );
         first = false;
@@ -495,7 +525,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
       if (r.status === 200 || r.status === 202) return r.body as Json;
       const code = String(((r.body as { error?: { code?: string } } | null)?.error?.code) ?? "app_error");
       if (attempt === 0 && code === "grant_stale" && !faults.noCompanionRetry) {
-        const s0 = await bridge("POST", "/tb/v1/status?wait=0", { readiness: "ready", version: manifest.version, sdkVersion: `${manifest.sdkMajor}.0.0`, scopesRev: 0, sliceRevision: 0, keysRev, pendingHolds: pending() });
+        const s0 = await bridge("POST", "/tb/v1/status?wait=0", { readiness: "ready", version: manifest.version, sdkVersion: `${manifest.sdkMajor}.0.0`, scopesRev: 0, sliceRevision: 0, keysRev, pendingHolds: pending(), ...(faults.noProofClaims ? {} : { proofClaims: ["bd"] }) });
         if (s0.status === 200 && isObj(s0.body) && typeof s0.body.slice === "string") installSlice(s0.body.slice);
         continue;
       }
@@ -519,6 +549,19 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
     return { workspace: slice.pause.workspace, instance: slice.pause.instances.includes(ins), agent: agent !== null && slice.pause.agents.includes(agent as never) };
   };
   const levelCrud = (type: string, level: string) => manifest.scopes?.find((s) => s.type === type)?.access.find((a) => a.id === level)?.crud ?? [];
+  type ScopeRow = State["scopes"][number];
+  /**
+   * spec 0.1.52 (C283c): the crud a stored row gives. A bounded row: its level's crud now. An OWNER row: its snapshot ∩ the level's crud
+   * now (a narrowed level applies at once, a widened one does not; no snapshot = []). The faults drop the snapshot or the intersection.
+   */
+  const rowCrud = (r: ScopeRow): readonly string[] => {
+    const level = levelCrud(r.type, r.access);
+    if (r.authority !== "owner" || faults.ownerRowFollowsLevel) return level;
+    const snap = r.crudSnapshot ?? [];
+    return faults.ownerRowSnapshotOnly ? snap : level.filter((c) => snap.includes(c));
+  };
+  /** the actions the level grants now that the owner row's snapshot does not (the offer) */
+  const rowOffer = (r: ScopeRow): string[] => (r.authority !== "owner" || faults.noOffer ? [] : levelCrud(r.type, r.access).filter((c) => !(r.crudSnapshot ?? []).includes(c)));
   /**
    * spec 0.1.50 (C283 A1): do the OWNER rows of `agent` admit `crud` for `type` across instances? The agent must have rows, EVERY row
    * an owner row, and the best row's crud (the one with most actions) must contain `crud`. Display only (catalog / scope_summary).
@@ -526,7 +569,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
   const ownerAdmits = (agent: string, type: string, crud: readonly string[]): boolean => {
     const rows = st.scopes.filter((r) => r.agent === agent && r.type === type);
     if (rows.length === 0 || !rows.every((r) => r.authority === "owner")) return false;
-    const best = rows.map((r) => levelCrud(type, r.access)).sort((x, y) => y.length - x.length)[0] ?? [];
+    const best = rows.map((r) => rowCrud(r)).sort((x, y) => y.length - x.length)[0] ?? [];
     return crud.every((c) => (best as readonly string[]).includes(c));
   };
   /** the agent is in the slice, active and not paused: only then does a display mark apply */
@@ -546,7 +589,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
     const g0 = peek(grant);
     let callId: string | null = null;
     let hv: { f: string; r: string; by: string } | null = null;
-    if (!faults.skipProofVerify) {
+    if (!faults.skipProofVerify && !(faults.bdProofsUnverified && peek(proof).bd !== undefined)) {
       const p = verifyCallProof(proof, t, { op: opId, inputDigest: digest(body.input), contextDigest: digest(body.context ?? {}), grantJti: String(g0.jti ?? ""), grantSub: String(g0.sub ?? "") }, faults.noProofReplayGuard ? undefined : replay);
       if (!p.ok) throw new E(401, "call_proof_invalid");
       callId = p.claims.call;
@@ -647,7 +690,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
       const sid = strs.find((v) => st.scopes.some((r) => r.agent === callerId && r.type === scoped && r.instanceId === v)) ?? strs[0] ?? "";
       const row = st.scopes.find((r) => r.agent === callerId && r.type === scoped && r.instanceId === sid);
       // spec 0.1.50 (C283 A1): only the owner's tb.scopes_set marks a row primary (`allRowsPrimary` is the fault: every row is)
-      access = row ? { level: row.access, crud: levelCrud(scoped, row.access), authority: faults.allRowsPrimary || row.authority === "owner" ? "owner" : "bounded" } : null;
+      access = row ? { level: row.access, crud: [...rowCrud(row)] as typeof op.crud, authority: faults.allRowsPrimary || row.authority === "owner" ? "owner" : "bounded" } : null;
       // areaPerAppCaller: the caller's own area grants it full access to that scope instance
       if (ownArea) access = { level: "own_area", crud: ["create", "read", "update", "delete"] };
     }
@@ -797,14 +840,33 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
       }
       case "tb.agents_list":
         out = { agents: (slice?.agents ?? []).map((a) => ({ ...a, access: st.scopes.filter((r) => r.agent === a.id).map((r) => {
-            const { authority, ...rest } = r;
-            return faults.noAuthorityField ? rest : { ...rest, authority: authority ?? "bounded" };
+            const { authority, crudSnapshot: _snapshot, ...rest } = r;
+            const offer = rowOffer(r);
+            const row = { ...rest, ...(faults.noEffectiveCrud ? {} : { crud: [...rowCrud(r)] }), ...(offer.length > 0 ? { offer: { adds: offer } } : {}) };
+            return faults.noAuthorityField ? row : { ...row, authority: authority ?? "bounded" };
           }) })) as unknown as Json };
         break;
       case "tb.scopes_set": {
-        st.scopes = st.scopes.filter((r) => !(r.agent === input.agent && r.type === input.type && r.instanceId === input.id));
-        // spec 0.1.50 (C283 A1): the owner's person op writes a PRIMARY row (also an unchanged level: "make primary")
-        if (input.access !== null) st.scopes.push({ agent: String(input.agent), type: String(input.type), instanceId: String(input.id), access: String(input.access), source: "owner", authority: faults.scopesSetBounded ? "bounded" : "owner" });
+        const same = (r: ScopeRow) => r.agent === input.agent && r.type === input.type && r.instanceId === input.id;
+        const prior = st.scopes.find(same);
+        const level = input.access === null ? null : String(input.access);
+        // spec 0.1.52 (C283b/C283c): acceptOffer {adds} accepts the CURRENT offer at the row's own level (compared as a set)
+        const accepting = input.acceptOffer !== undefined;
+        const ao = input.acceptOffer;
+        if (accepting && (!isObj(ao) || Object.keys(ao).some((k) => k !== "adds") || !Array.isArray(ao.adds) || !ao.adds.every((x) => ["read", "create", "update", "delete"].includes(String(x))))) throw new E(400, "input_invalid");
+        const adds = accepting ? (ao as { adds: string[] }).adds.map(String) : [];
+        if (accepting && level === null && !faults.acceptNullDeletes) throw new E(400, "input_invalid");
+        if (accepting && level !== null && prior && prior.access !== level && !faults.acceptOtherLevelOk) throw new E(400, "input_invalid");
+        const offer = prior ? rowOffer(prior) : [];
+        if (accepting && level !== null && !faults.acceptNoCompare && !(faults.acceptPhantomOk && offer.length === 0) && !(adds.length > 0 || offer.length > 0 ? new Set(adds).size === new Set(offer).size && adds.every((x) => offer.includes(x)) : true)) throw new E(409, "offer_changed");
+        st.scopes = st.scopes.filter((r) => !same(r));
+        // spec 0.1.50 (C283 A1): the owner's person op writes a PRIMARY row (also an unchanged level: "make primary");
+        // spec 0.1.52: with the level's crud now as its snapshot, except a plain re-set of an owner row at its own level, which keeps it
+        if (level !== null) {
+          const keep = !faults.plainResetAccepts && prior?.authority === "owner" && prior.access === level && !(accepting && offer.length > 0);
+          const snapshot = keep ? (prior?.crudSnapshot ?? []) : [...levelCrud(String(input.type), level)];
+          st.scopes.push({ agent: String(input.agent), type: String(input.type), instanceId: String(input.id), access: level, source: "owner", authority: faults.scopesSetBounded ? "bounded" : "owner", crudSnapshot: snapshot });
+        }
         out = { access: input.access as Json };
         break;
       }
@@ -880,13 +942,17 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
         const b = JSON.parse(raw) as { phase: string; call: { input?: Json; caller?: unknown }; context: Json };
         // spec 0.1.50 (C268 A): the proof names the caller (`sub`) and the call (`call`) of the request; the faults skip one comparison
         const callBody = b.call as unknown as { id?: unknown; caller?: unknown };
-        const p = verifyHookProof(
-          String(req.headers["tb-call"] ?? ""),
+        const hookProofToken = String(req.headers["tb-call"] ?? "");
+        // spec 0.1.52 (C268 B): bd = sha256 of the raw body bytes received (the faults compare nothing / skip the whole verification)
+        const bdClaim = peek(hookProofToken).bd;
+        const p = faults.bdProofsUnverified && bdClaim !== undefined ? { ok: true as const } : verifyHookProof(
+          hookProofToken,
           t,
           {
             hook: hook.id,
             phase: hook.phase,
             contextDigest: digest(b.context),
+            bodyDigest: faults.hookIgnoresBd ? (typeof bdClaim === "string" ? (bdClaim as never) : undefined) : sha256Bytes(Buffer.from(raw)),
             ...(b.call.input !== undefined ? { inputDigest: digest(b.call.input) } : {}),
             ...(faults.hookIgnoresSub ? {} : { sub: hookCallerRef(callBody.caller) }),
             ...(faults.hookIgnoresCall ? {} : { call: typeof callBody.id === "string" ? callBody.id : "" }),
@@ -913,7 +979,8 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
         const name = path.slice(14);
         const bop = name === "scope-summary" ? "scope_summary" : name;
         const b = JSON.parse(raw || "{}") as Record<string, Json>;
-        const p = verifyBridgeOpProof(String(req.headers["tb-call"] ?? ""), t, bridgeOpBinding(bop as never, b), replay);
+        const bopToken = String(req.headers["tb-call"] ?? "");
+        const p = faults.bdProofsUnverified && peek(bopToken).bd !== undefined ? { ok: true as const } : verifyBridgeOpProof(bopToken, t, bridgeOpBinding(bop as never, b), replay);
         if (!p.ok) throw new E(401, "call_proof_invalid");
         if (bop === "scope_summary") {
           // spec 0.1.50: admittedOps = the static scoped agent ops this agent's OWNER rows admit (absent when none)

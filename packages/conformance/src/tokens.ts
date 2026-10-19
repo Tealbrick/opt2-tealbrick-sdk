@@ -28,6 +28,7 @@ import type {
   Sha256Digest,
   WorkspaceId,
 } from "@opt2-tealbrick/spec/credentials";
+import { TYP } from "@opt2-tealbrick/spec/credentials";
 import type { AgentMode, CrudAction, HoldFamily, HookPhase } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 
@@ -148,7 +149,8 @@ export class Mint {
     );
   }
 
-  hookProof(p: { sub: string; aud: `tb:ins:${InstanceId}`; hook: string; phase: HookPhase; context: Json; input?: Json; call?: CallId; key?: Ed25519KeyPair }): Promise<string> {
+  /** `bd` (spec 0.1.52, C268 B): sha256 of the exact hook request body bytes */
+  hookProof(p: { sub: string; aud: `tb:ins:${InstanceId}`; hook: string; phase: HookPhase; context: Json; input?: Json; call?: CallId; key?: Ed25519KeyPair; bd?: Sha256Digest }): Promise<string> {
     return signHookProof(
       {
         iss: `tb:brg:${this.#w.bridge}`,
@@ -159,10 +161,20 @@ export class Mint {
         phase: p.phase,
         ctx: digest(p.context),
         ...(p.input !== undefined ? { in: digest(p.input) } : {}),
+        ...(p.bd !== undefined ? { bd: p.bd } : {}),
         iat: nowS(),
       },
       p.key ?? this.#w.bridgeKey(),
     );
+  }
+
+  /**
+   * A call proof `token` re-signed by the bridge key with one more claim (`extra`), bypassing the closed claim checks — ONLY for the
+   * negative cases the signers refuse to build (a malformed `bd`, `bd` on an op or bridge-op proof; spec 0.1.52).
+   */
+  async withExtraClaim(token: string, extra: Record<string, unknown>, key?: Ed25519KeyPair): Promise<string> {
+    const k = key ?? this.#w.bridgeKey();
+    return rawSign({ alg: "EdDSA", typ: TYP.callProof, kid: k.kid }, { ...(peek(token) ?? {}), ...extra }, k);
   }
 
   /** `body`: binds `in` = digest(body); `in`: a precomputed digest (bridgeOpProofClaims) */
