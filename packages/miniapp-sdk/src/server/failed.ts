@@ -13,7 +13,7 @@ import { BRIDGE_INTERNAL_PATHS } from "@opt2-tealbrick/spec/bridge";
 import type { InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Logger } from "@opt2-tealbrick/spec/sdk";
-import { BridgeClient } from "./bridge-client.ts";
+import { BridgeClient, SDK_PROOF_CLAIMS } from "./bridge-client.ts";
 import type { SdkConfig } from "./env.ts";
 import { TbError } from "./errors.ts";
 import { requestId, sendError, sendJson } from "./http.ts";
@@ -120,6 +120,7 @@ export async function startFailedMode(f: FailedBoot): Promise<{ port: number; st
         readiness: "degraded" as const,
         version: f.manifest.version,
         sdkVersion: f.sdkVersion,
+        proofClaims: [...SDK_PROOF_CLAIMS],
         scopesRev: 0,
         sliceRevision: 0,
         keysRev: 0,

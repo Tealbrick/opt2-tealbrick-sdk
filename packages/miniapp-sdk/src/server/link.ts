@@ -12,7 +12,7 @@ import {
 import type { BridgeId, Ed25519PublicJwk, InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { CompanionResult, HealthStatus, Json, Logger } from "@opt2-tealbrick/spec/sdk";
 import type { BridgeClient } from "./bridge-client.ts";
-import { errorFrom } from "./bridge-client.ts";
+import { errorFrom, SDK_PROOF_CLAIMS } from "./bridge-client.ts";
 import { enrolCodeDigest, identityRefused, reclaimCode, waitForMountedDataDir } from "./claim-guard.ts";
 import { TbError } from "./errors.ts";
 import type { JobsSummary } from "./jobs.ts";
@@ -114,6 +114,7 @@ export class BridgeLink {
       readiness: attention && ready === "ready" ? "degraded" : ready,
       version: rt.manifest.version,
       sdkVersion: rt.sdkVersion,
+      proofClaims: [...SDK_PROOF_CLAIMS],
       scopesRev: rt.scopes.rev(),
       sliceRevision: rt.trust.slice?.rev ?? 0,
       keysRev: rt.keys.keysRev(),
@@ -162,7 +163,7 @@ export class BridgeLink {
     }
     if (!(await this.#mounted())) return false;
     const r = await this.#client.claim(
-      { code, instancePublicKey: rt.instanceKey.publicJwk, manifestDigest: rt.digest, version: rt.manifest.version, sdkVersion: rt.sdkVersion },
+      { code, instancePublicKey: rt.instanceKey.publicJwk, manifestDigest: rt.digest, version: rt.manifest.version, sdkVersion: rt.sdkVersion, proofClaims: [...SDK_PROOF_CLAIMS] },
       this.#stop.signal,
     );
     if (r.status !== 200) throw errorFrom(r, "claim_failed");

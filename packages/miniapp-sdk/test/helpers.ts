@@ -1,5 +1,6 @@
 // Test harness: Portal + bridge key pairs, a fake bridge internal API (claim, status long-poll), and token helpers
 // built ONLY from the manifest package's signers (no hand-rolled JWS).
+import { webcrypto } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createServer as createNetServer } from "node:net";
@@ -176,6 +177,18 @@ export async function callProof(
   );
 }
 
+const b64 = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64url");
+
+/**
+ * Signs ANY header + payload with `key`, bypassing the claim checks of the manifest signers. The ONLY use: a token the signers refuse
+ * to build (a malformed `bd`, `bd` on an op proof) so a test can show the SDK refuses it too. Never for a valid token.
+ */
+export async function rawSign(header: unknown, payload: unknown, key: Ed25519KeyPair): Promise<string> {
+  const input = `${b64(header)}.${b64(payload)}`;
+  const sig = await webcrypto.subtle.sign({ name: "Ed25519" }, key.privateKey as webcrypto.CryptoKey, Buffer.from(input));
+  return `${input}.${Buffer.from(sig).toString("base64url")}`;
+}
+
 export async function ticket(w: World, path = "/"): Promise<string> {
   return signTicket({ iss: "tb:portal", sub: `tb:per:${w.per}`, aud: `tb:ins:${w.ins}`, iat: nowS(), ws: w.ws, pur: "launch", path }, w.portal);
 }
@@ -188,6 +201,8 @@ export class FakeBridge {
   claims = 0;
   /** enrolment codes of every claim, in order */
   claimCodes: string[] = [];
+  /** v0.1.36: the whole body of every claim, in order (proofClaims) */
+  claimBodies: Record<string, unknown>[] = [];
   /** v0.1.12 tests: true → a reused code is refused 403 code_invalid (one-time codes) */
   oneTimeCodes = false;
   /** v0.1.12 tests: true → instance-assertion routes answer 401 unauthenticated (stored identity unknown); a claim clears it */
@@ -239,6 +254,7 @@ export class FakeBridge {
         return void res.end(JSON.stringify({ error: { code: "code_invalid", message: "enrolment code used", requestId: "req_test" } }));
       }
       this.claimCodes.push(code);
+      this.claimBodies.push(body ?? {});
       this.refuseIdentity = false;
       this.claims += 1;
       this.instanceKey = body?.instancePublicKey ?? null;

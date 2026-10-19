@@ -217,12 +217,14 @@ test("M2: failed mode pushes the failure to the bridge (readiness degraded + att
     const healthy = bridge.statuses.at(-1) as Record<string, any>;
     assert.deepEqual(healthy.schemaVersion, { app: 1, sdk: SDK_SCHEMA }, "a healthy status carries the schema too");
     assert.equal(healthy.minCompatibleCode, "1.0.0");
+    assert.deepEqual(healthy.proofClaims, ["bd"], "v0.1.36 (C268 B): every status push declares the proof claims");
     bridge.statuses.length = 0;
     const b = await boot(appAt("2.0.0", r.code("v2b", V2_BROKEN), await freePort()), env, testRoots(w));
     try {
       const s = await until(async () => bridge.statuses.find((x) => (x as { readiness?: string }).readiness === "degraded") as Record<string, any> | undefined);
       assert.equal(s.version, "2.0.0");
       assert.equal(s.attention.code, "migration_failed");
+      assert.deepEqual(s.proofClaims, ["bd"], "also in failed mode: the bridge keeps the capability of the app instance");
       assert.equal(s.failure.code, "migration_failed");
       assert.equal(s.failure.file, "0003_tag_index.sql");
       assert.equal(s.preUpdateSnapshot.file, "tb-preupdate-to-2.0.0.tar.gz");
@@ -231,6 +233,8 @@ test("M2: failed mode pushes the failure to the bridge (readiness degraded + att
       await bridge.stop();
     }
   } finally {
+    // a failed assertion before the inner try must not leave the bridge listening (an open handle keeps the test process alive)
+    await bridge.stop();
     r.t.cleanup();
   }
 });
