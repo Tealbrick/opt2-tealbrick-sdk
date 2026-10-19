@@ -702,7 +702,7 @@ export async function restoreAtBoot(ctx: BackupContext, restoreFrom: string | nu
     for (const s of ["-wal", "-shm", "-journal"]) await replace(dbPath + s, null);
     await replace(dbPath, v.db);
     for (const f of v.files) await replace(f.target, f.staged);
-    const db = openStore(ctx.dataDir);
+    const db = openStore(ctx.dataDir, { manifest: ctx.manifest });
     try {
       metaSet(db, RESTORED_KEY, marker);
       // v0.1.25: a snapshot taken during an upgrade carries that boot's migration lock row; it means nothing here

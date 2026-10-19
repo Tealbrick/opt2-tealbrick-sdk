@@ -240,7 +240,7 @@ async function dataPhase(
       }
     }
     phase = "sdk_migrations";
-    const sdkDone = applySdkMigrations(db, () => lock?.heartbeat());
+    const sdkDone = applySdkMigrations(db, () => lock?.heartbeat(), { manifest });
     phase = "app_migrations";
     const migrated = await applyAppMigrations(db, def.migrations, pendingAppMigrations(db, files), () => lock?.heartbeat());
     const schema = storedSchema(db);

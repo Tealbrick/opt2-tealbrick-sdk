@@ -1,7 +1,7 @@
 // Operation views and MCP tool names (SDK-API §2 + §6, MANIFEST §5.4, BRIDGE §7.3, CORE I9).
 import { TOOL_NAME_RULE } from "@opt2-tealbrick/spec/bridge";
 import type { JsonSchemaObject, Manifest, StandardOperationId } from "@opt2-tealbrick/spec/manifest";
-import { STANDARD_OPERATIONS } from "@opt2-tealbrick/spec/manifest";
+import { CRUD_ACTIONS, STANDARD_OPERATIONS } from "@opt2-tealbrick/spec/manifest";
 import type { OperationView } from "@opt2-tealbrick/spec/sdk";
 
 type StandardView = Extract<OperationView, { standard: true }>;
@@ -71,12 +71,17 @@ const STANDARD_DEFS: Record<StandardOperationId, StandardDef> = {
     audience: "person",
     idempotency: "supported",
     receipt: false,
-    input: closed({ agent: str, type: str, id: str, access: { anyOf: [str, { type: "null" }] } }, [
-      "agent",
-      "type",
-      "id",
-      "access",
-    ]),
+    // v0.1.52 (C283b/C283c, manifest 0.1.28): `acceptOffer {adds}` accepts a row's offer (SDK-API §7.2); the SDK compares it as a set
+    input: closed(
+      {
+        agent: str,
+        type: str,
+        id: str,
+        access: { anyOf: [str, { type: "null" }] },
+        acceptOffer: closed({ adds: { type: "array", maxItems: 8, items: { enum: [...CRUD_ACTIONS] } } }, ["adds"]),
+      },
+      ["agent", "type", "id", "access"],
+    ),
   },
   "tb.keys_status": {
     title: "Key status",

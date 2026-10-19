@@ -733,7 +733,7 @@ describe("scheduled ops: scope row authority at fire time", { timeout: 60_000 },
     const g = await grant(b.w, agent, NARROW);
     // first sight applies the defaults (a refused live call is enough)
     assert.equal((await callOp(b, "note_delete", { id: "live-2", nb: agent }, { grantToken: g })).body.error?.code, "scope_denied");
-    await dbDo((db) => db.prepare("UPDATE tb_scopes SET authority = 'owner' WHERE agent = ? AND type = 'notebook' AND instance_id = ?").run(agent, agent), false);
+    await dbDo((db) => db.prepare("UPDATE tb_scopes SET authority = 'owner', crud_snapshot = '[\"read\",\"create\",\"update\",\"delete\"]' WHERE agent = ? AND type = 'notebook' AND instance_id = ?").run(agent, agent), false);
     const j = await settled(await schedule("g3-owner-1", agent, g));
     assert.equal(j.status, "done", j.lastError ?? "");
     assert.deepEqual(b.ran.note_delete.filter((x) => x === "g3-owner-1"), ["g3-owner-1"]);

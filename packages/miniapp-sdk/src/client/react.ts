@@ -4,9 +4,8 @@ import type { AgentId, Ulid } from "@opt2-tealbrick/spec/credentials";
 import type { CrudAction } from "@opt2-tealbrick/spec/manifest";
 import type { Receipt, ScopeGrantRow, SliceAgent, TbProviderProps, UseAgents, UseHolds, UseScopes, UseSession } from "@opt2-tealbrick/spec/sdk";
 import React from "react";
-import { TbError } from "../server/errors.ts";
 import { setProduct } from "./fetch.ts";
-import { type AgentWithAccess, acceptScopeOffer, decideHold, getSessionSnapshot, type HoldFilter, listAgents, listHolds, loadSession, scopeRows, setScope, signOut, subscribeSession } from "./store.ts";
+import { type AgentWithAccess, acceptOffer as acceptScopeOffer, decideHold, getSessionSnapshot, type HoldFilter, listAgents, listHolds, loadSession, scopeRows, setScope, signOut, subscribeSession } from "./store.ts";
 
 const ProductContext = React.createContext<string | null>(null);
 
@@ -82,10 +81,7 @@ export function useScopes(agent?: AgentId): UseScopes {
   );
   const acceptOffer = React.useCallback(
     async (a: AgentId, type: string, instanceId: string, adds: CrudAction[]) => {
-      // the row is read when the owner clicks: acceptOffer keeps the row's level (a different level is not an accept)
-      const row = scopeRows(data, a).find((r) => r.type === type && r.instanceId === instanceId);
-      if (!row) throw new TbError("input_invalid", "no scope row for this agent, type and instance", 400);
-      await acceptScopeOffer(a, type, instanceId, row.access, adds);
+      await acceptScopeOffer(data, a, type, instanceId, adds);
       await reload();
     },
     [data, reload],

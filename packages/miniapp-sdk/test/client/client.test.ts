@@ -6,7 +6,7 @@ import React from "react";
 import { renderToString } from "react-dom/server";
 import { basePath, setProduct } from "../../src/client/fetch.ts";
 import { callOp, TbError, TbProvider, tbFetch, useAgents, useHolds, useScopes, useSession } from "../../src/client/index.ts";
-import { decideHold, getSessionSnapshot, listAgents, listHolds, loadSession, resetClientState, scopeRows, setScope, signOut } from "../../src/client/store.ts";
+import { acceptOffer, decideHold, getSessionSnapshot, listAgents, listHolds, loadSession, resetClientState, scopeRows, setScope, signOut } from "../../src/client/store.ts";
 
 interface Call {
   url: string;
@@ -228,6 +228,20 @@ describe("standard person ops behind the hooks", () => {
     await setScope(agentA, "notebook", "n1", null);
     assert.deepEqual(ops(calls.at(-1) as Call), { agent: agentA, type: "notebook", id: "n1", access: null });
   });
+
+  test("acceptOffer sends the row's OWN level with acceptOffer {adds}; no row → input_invalid and nothing is sent (v0.1.36)", { timeout: 60_000 }, async () => {
+    setProduct("jotter");
+    const agents = [{ id: agentA, name: "A", mode: "free", status: "active", access: [{ agent: agentA, type: "notebook", instanceId: "n1", access: "write", authority: "owner", crud: ["read"], offer: { adds: ["update", "delete"] } }] }];
+    handler = (c) => (c.url.endsWith("/session") ? json(200, { principal, csrf: "t" }) : json(200, { status: "ok", output: { access: null } }));
+    await loadSession();
+    const before = calls.length;
+    await acceptOffer(agents as never, agentA, "notebook", "n1", ["update", "delete"]);
+    assert.deepEqual(ops(calls.at(-1) as Call), { agent: agentA, type: "notebook", id: "n1", access: "write", acceptOffer: { adds: ["update", "delete"] } });
+    assert.equal(calls.length, before + 1);
+    await assert.rejects(acceptOffer(agents as never, agentA, "notebook", "nope", ["delete"]), (e: unknown) => (e as { code?: string }).code === "input_invalid");
+    await assert.rejects(acceptOffer(agents as never, agentB, "notebook", "n1", ["delete"]), (e: unknown) => (e as { code?: string }).code === "input_invalid");
+    assert.equal(calls.length, before + 1, "nothing was sent for a row that does not exist");
+  });
 });
 
 describe("React bindings (initial render)", () => {
@@ -238,12 +252,12 @@ describe("React bindings (initial render)", () => {
       const h = useHolds({ status: "held" });
       const a = useAgents();
       const sc = useScopes();
-      seen = { status: s.status, holds: h.holds.length, holdsLoading: h.loading, agents: a.agents.length, access: sc.access.length, signOut: typeof s.signOut, decide: typeof h.decide, set: typeof sc.set };
+      seen = { status: s.status, holds: h.holds.length, holdsLoading: h.loading, agents: a.agents.length, access: sc.access.length, signOut: typeof s.signOut, decide: typeof h.decide, set: typeof sc.set, acceptOffer: typeof sc.acceptOffer };
       return React.createElement("p", null, s.status);
     }
     const html = renderToString(React.createElement(TbProvider, { product: "jotter" }, React.createElement(Probe)));
     assert.equal(html, "<p>loading</p>");
-    assert.deepEqual(seen, { status: "loading", holds: 0, holdsLoading: true, agents: 0, access: 0, signOut: "function", decide: "function", set: "function" });
+    assert.deepEqual(seen, { status: "loading", holds: 0, holdsLoading: true, agents: 0, access: 0, signOut: "function", decide: "function", set: "function", acceptOffer: "function" });
     assert.equal(basePath(), "/a/jotter/");
   });
 

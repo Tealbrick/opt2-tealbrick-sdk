@@ -119,3 +119,10 @@ export async function setScope(agent: AgentId, type: string, instanceId: string,
 export async function acceptScopeOffer(agent: AgentId, type: string, instanceId: string, level: string, adds: CrudAction[]): Promise<void> {
   await callOp("tb.scopes_set", { agent, type, id: instanceId, access: level, acceptOffer: { adds } });
 }
+
+/** `UseScopes.acceptOffer`: the level is the one the row has in `agents` (an offer is for the row's own level); no such row → `input_invalid`. */
+export async function acceptOffer(agents: readonly AgentWithAccess[], agent: AgentId, type: string, instanceId: string, adds: CrudAction[]): Promise<void> {
+  const row = scopeRows(agents, agent).find((r) => r.type === type && r.instanceId === instanceId);
+  if (!row) throw new TbError("input_invalid", "no scope row for this agent, type and instance", 400);
+  await acceptScopeOffer(agent, type, instanceId, row.access, adds);
+}

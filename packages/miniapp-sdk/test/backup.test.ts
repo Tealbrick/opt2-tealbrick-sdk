@@ -364,6 +364,28 @@ test("restoreAtBoot: round trip restores rows, files and the service; audited; i
   }
 });
 
+test("restoreAtBoot: a schema-9 archive with an owner row is migrated to the crud snapshot with the running manifest (C283c, an E3 restore re-runs the backfill once)", { timeout: 60_000 }, async () => {
+  const r = await rig();
+  try {
+    // make the data exactly what SDK 0.1.35 left: schema 9 (no crud_snapshot column, no migration 10), one owner row and one bounded row
+    r.db.exec("INSERT INTO tb_scope_instances (type, id, label, shared, created_at) VALUES ('notebook', 'x', 'X', 0, 1)");
+    r.db.exec("INSERT INTO tb_scopes (agent, type, instance_id, access, source, authority) VALUES ('agt_owner', 'notebook', 'x', 'read_write', 'owner', 'owner'), ('agt_def', 'notebook', 'x', 'read', 'default', 'bounded')");
+    r.db.exec("ALTER TABLE tb_scopes DROP COLUMN crud_snapshot");
+    r.db.exec("DELETE FROM tb_migrations WHERE scope = 'sdk' AND version = 10");
+    const { file } = await r.api.api.runNow();
+    r.api.stop();
+    r.db.close();
+    await restoreAtBoot(r.ctx, file);
+    r.reopen();
+    const snap = (agent: string) => (r.db.prepare("SELECT crud_snapshot AS c FROM tb_scopes WHERE agent = ?").get(agent) as { c: string | null }).c;
+    assert.equal(snap("agt_owner"), JSON.stringify(["read", "create", "update", "delete"]), "fires on bad: a restore that opened the store without the manifest would throw or leave the row without a snapshot");
+    assert.equal(snap("agt_def"), null);
+    assert.equal(r.db.prepare("SELECT count(*) AS n FROM tb_audit WHERE action = 'scope.snapshot_backfill'").get()?.n, 1);
+  } finally {
+    await r.cleanup();
+  }
+});
+
 test("restoreAtBoot: a tampered part, a foreign product or a bad name is refused and nothing is applied", async () => {
   const r = await rig();
   try {

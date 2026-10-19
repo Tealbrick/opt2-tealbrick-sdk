@@ -6,14 +6,48 @@ import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { constants, DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { pathToFileURL } from "node:url";
+import { ulid } from "@opt2-tealbrick/manifest";
+import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Db } from "@opt2-tealbrick/spec/sdk";
 import { TbError } from "./errors.ts";
 
 export type RawDb = DatabaseSync;
 export type Row = Record<string, unknown>;
 
+/** What a migration's code step may use (v0.1.36): the manifest of the running app. */
+export interface SdkMigrationContext {
+  manifest?: Manifest;
+}
+/** One SDK migration: `sql` (checksummed) and an optional code step `after` that runs in the SAME transaction, right after the sql. */
+export interface SdkMigration {
+  version: number;
+  name: string;
+  sql: string;
+  after?: (db: RawDb, ctx: SdkMigrationContext) => void;
+}
+
+/**
+ * v0.1.36 (C283b/C283c, SDK-API §7.2): the one-time backfill of migration `sdk_scope_crud_snapshot`. Every OWNER row gets the crud
+ * snapshot of its level in the manifest that runs the migration, plus one audit line `scope.snapshot_backfill` (level + crud).
+ * Needs the manifest only when there is an owner row; with owner rows and no manifest it throws (the transaction rolls back and the
+ * migration is not recorded) rather than guess a snapshot. Bounded rows keep a NULL snapshot.
+ */
+function backfillCrudSnapshots(db: RawDb, ctx: SdkMigrationContext): void {
+  const rows = db.prepare("SELECT agent, type, instance_id, access FROM tb_scopes WHERE authority = 'owner' ORDER BY agent, type, instance_id").all() as Row[];
+  if (rows.length === 0) return;
+  const manifest = ctx.manifest;
+  if (!manifest) throw new TbError("sdk_migration_context", "the scope crud snapshot backfill needs the manifest of the running app", 500);
+  const update = db.prepare("UPDATE tb_scopes SET crud_snapshot = ? WHERE agent = ? AND type = ? AND instance_id = ?");
+  const audit = db.prepare("INSERT INTO tb_audit (id, at, actor, action, target, detail) VALUES (?, ?, 'system', 'scope.snapshot_backfill', ?, ?)");
+  for (const r of rows) {
+    const crud = [...(manifest.scopes?.find((x) => x.type === r.type)?.access.find((a) => a.id === r.access)?.crud ?? [])];
+    update.run(JSON.stringify(crud), String(r.agent), String(r.type), String(r.instance_id));
+    audit.run(`aud_${ulid()}`, Date.now(), String(r.agent), JSON.stringify({ type: String(r.type), instance: String(r.instance_id), level: String(r.access), crud }));
+  }
+}
+
 /** SDK-internal migrations (scope "sdk"), applied before any app migration. Forward-only; never edit an entry. */
-export const SDK_MIGRATIONS: readonly { version: number; name: string; sql: string }[] = [
+export const SDK_MIGRATIONS: readonly SdkMigration[] = [
   {
     version: 1,
     name: "sdk_baseline",
@@ -137,6 +171,17 @@ INSERT INTO tb_cap_usage (id, caller_id, effect, op, state, created_at)
     name: "sdk_receipt_admitted_by",
     sql: "ALTER TABLE tb_receipts ADD COLUMN admitted_by TEXT;",
   },
+  {
+    // v0.1.36 (C283b/C283c, spec 0.1.52): `crud_snapshot` = the JSON array of crud actions an OWNER row was set with (NULL on bounded
+    // rows). Effective crud of an owner row = snapshot ∩ the level's crud now (SDK-API §7.2). The code step backfills every existing
+    // owner row ONCE, in this transaction, from the manifest that runs it, with one audit line per row. After that a NULL snapshot on an
+    // owner row reads as [] (corruption or a bug never widens). Spec text calls this "schema 9"; 9 is sdk_receipt_admitted_by, so the
+    // next free version is 10.
+    version: 10,
+    name: "sdk_scope_crud_snapshot",
+    sql: "ALTER TABLE tb_scopes ADD COLUMN crud_snapshot TEXT;",
+    after: backfillCrudSnapshots,
+  },
 ];
 
 function sha256(text: string | Uint8Array): string {
@@ -174,7 +219,7 @@ export function storedSchema(db: RawDb): SchemaVersion {
 }
 
 /** SDK migrations not applied yet; `sdk_schema_newer` when the DB carries an SDK migration this SDK does not know. */
-export function pendingSdkMigrations(db: RawDb): (typeof SDK_MIGRATIONS)[number][] {
+export function pendingSdkMigrations(db: RawDb): SdkMigration[] {
   const applied = new Map(
     (db.prepare("SELECT version, sha256 FROM tb_migrations WHERE scope = 'sdk'").all() as Row[]).map((r) => [Number(r.version), String(r.sha256)]),
   );
@@ -184,7 +229,7 @@ export function pendingSdkMigrations(db: RawDb): (typeof SDK_MIGRATIONS)[number]
         stored: Math.max(...applied.keys()),
         code: SDK_SCHEMA,
       });
-  const out: (typeof SDK_MIGRATIONS)[number][] = [];
+  const out: SdkMigration[] = [];
   for (const m of SDK_MIGRATIONS) {
     const have = applied.get(m.version);
     if (have === undefined) out.push(m);
@@ -193,12 +238,16 @@ export function pendingSdkMigrations(db: RawDb): (typeof SDK_MIGRATIONS)[number]
   return out;
 }
 
-/** Applies the pending SDK migrations (one transaction each); `onEach` runs after every committed migration. */
-export function applySdkMigrations(db: RawDb, onEach?: (m: { version: number; name: string }) => void): { version: number; name: string }[] {
+/**
+ * Applies the pending SDK migrations (one transaction each, the code step of a migration inside it); `onEach` runs after every
+ * committed migration. `ctx.manifest` is the running app's manifest (a code step that needs it throws without it).
+ */
+export function applySdkMigrations(db: RawDb, onEach?: (m: { version: number; name: string }) => void, ctx: SdkMigrationContext = {}): { version: number; name: string }[] {
   const done: { version: number; name: string }[] = [];
   for (const m of pendingSdkMigrations(db)) {
     tx(db, () => {
       db.exec(m.sql);
+      m.after?.(db, ctx);
       db.prepare("INSERT INTO tb_migrations (scope, version, name, sha256, applied_at) VALUES ('sdk', ?, ?, ?, ?)").run(m.version, m.name, sha256(m.sql), Date.now());
     });
     done.push({ version: m.version, name: m.name });
@@ -208,10 +257,10 @@ export function applySdkMigrations(db: RawDb, onEach?: (m: { version: number; na
 }
 
 /** Opens TB_DATA_DIR/app.db and applies the SDK migration set (restore, tests). startApp runs the steps itself (E2 lock + snapshot). */
-export function openStore(dataDir: string): RawDb {
+export function openStore(dataDir: string, ctx: SdkMigrationContext = {}): RawDb {
   const db = openDb(dataDir);
   try {
-    applySdkMigrations(db);
+    applySdkMigrations(db, undefined, ctx);
   } catch (e) {
     db.close();
     throw e;
