@@ -120,6 +120,23 @@ INSERT INTO tb_cap_usage (id, caller_id, effect, op, state, created_at)
     name: "sdk_scope_source",
     sql: "ALTER TABLE tb_scopes ADD COLUMN source TEXT;\nALTER TABLE tb_scopes ADD COLUMN granted_by_op TEXT;",
   },
+  {
+    // v0.1.35 (C283 A1, spec 0.1.50): `authority` = ScopeGrantRow.authority. 'owner' only for a row written by `tb.scopes_set`
+    // (a person session) under this SDK: that row is PRIMARY, also above the Portal grant's crud. EVERY row that exists at this
+    // migration gets the column default 'bounded' (the Portal grant stays its ceiling): rows the owner wrote while they could only
+    // NARROW access must not widen it silently. Additive, forward-only, never rewrites a value, never destructive; the owner
+    // re-saves a row with `tb.scopes_set` ("make primary") to opt in.
+    version: 8,
+    name: "sdk_scope_authority",
+    sql: "ALTER TABLE tb_scopes ADD COLUMN authority TEXT NOT NULL DEFAULT 'bounded';",
+  },
+  {
+    // v0.1.35 (C283 A1, S7): `admitted_by` = Receipt.admittedBy ('app_owner_row' | 'portal_grant'): which rule admitted a SCOPED
+    // call. Additive and nullable; existing rows and unscoped or refused calls keep NULL (Receipt.admittedBy absent).
+    version: 9,
+    name: "sdk_receipt_admitted_by",
+    sql: "ALTER TABLE tb_receipts ADD COLUMN admitted_by TEXT;",
+  },
 ];
 
 function sha256(text: string | Uint8Array): string {
