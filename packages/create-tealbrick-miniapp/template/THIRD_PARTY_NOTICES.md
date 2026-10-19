@@ -46,3 +46,6 @@ its packages are in `/usr/share/doc/*/copyright` inside the image).
 
 TypeScript, Biome, `@types/*`, happy-dom and `@opt2-tealbrick/conformance` are used to build and test the app and are
 not part of the image.
+`@opt2-tealbrick/conformance` 0.1.23 brings its own pins as dev-only dependencies: `@opt2-tealbrick/manifest` 0.1.25,
+`@opt2-tealbrick/miniapp-sdk` 0.1.32 and `ajv` 8.17.1 (MIT). They are removed by `pnpm prune --prod` in the Dockerfile and
+are not shipped; the CI OSV scan may list ajv 8.17.1 (GHSA-2g4f-4pwh-qvx6, MEDIUM, non-blocking) until conformance 0.1.24.
