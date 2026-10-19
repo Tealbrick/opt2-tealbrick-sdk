@@ -719,10 +719,11 @@ describe("pre-parse caps (L39): the HTML parser is quadratic in the attributes o
     assert.equal(fillTextSlots(r.html, {}), r.html);
     expectInertResult(sanitizeAgentDocument(nest(R.maxDepth - 1), o), "one level over");
     assert.equal(fillTextSlots(AGENT_DOCUMENT_MARKER + nest(R.maxDepth - 1), {}), AGENT_DOCUMENT_UNAVAILABLE_HTML, "fillTextSlots: one level over");
-    // template content counts at its template's depth, as the walk counts it: template at R.maxDepth - 1, <i> at R.maxDepth
-    const tmpl = page(`${"<div>".repeat(R.maxDepth - 4)}<template><i>x</i></template>${"</div>".repeat(R.maxDepth - 4)}`);
+    // the parse-time bound (bounded-parse.ts, as in Live Artifacts) counts template content one level BELOW its template, one
+    // stricter than the walk: template at R.maxDepth - 2, content at R.maxDepth - 1, <i> at R.maxDepth passes; one more div fails
+    const tmpl = page(`${"<div>".repeat(R.maxDepth - 5)}<template><i>x</i></template>${"</div>".repeat(R.maxDepth - 5)}`);
     assert.equal(sanitizeAgentDocument(tmpl, o).ok, true);
-    const tmplOver = page(`${"<div>".repeat(R.maxDepth - 3)}<template><i>x</i></template>${"</div>".repeat(R.maxDepth - 3)}`);
+    const tmplOver = page(`${"<div>".repeat(R.maxDepth - 4)}<template><i>x</i></template>${"</div>".repeat(R.maxDepth - 4)}`);
     expectInertResult(sanitizeAgentDocument(tmplOver, o), "template content one over");
   });
 

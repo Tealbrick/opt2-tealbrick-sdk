@@ -106,13 +106,15 @@ describe("C259 timing (runs alone)", () => {
 
   test("(b) LA S2 shapes cost no more than twice the same page without the trick (linear; the parse is bounded)", () => {
     // 1. foster parenting before an open table: parse5's own adapter searches the reference from the start of the child list
-    //    (27 s in plain parse5). parse5 buffers the table text and fosters it at the end of the input, so the refusal comes
-    //    after a linear tokenize of 1.8 MB (~150-250 ms on the dev Mac, like a plain text page of that size).
-    // 2. the adoption agency detaching 99,000 children one by one (2.9 s in plain parse5): linear here, and the page passes.
+    //    (27 s in plain parse5). The bounded adapter (bounded-parse.ts) searches from the end: the page is kept, linear.
+    // 2. the adoption agency detaching 99,000 children one by one (2.9 s in plain parse5): every detach is charged the whole
+    //    list against MAX_CHILD_WORK, so the page is refused when the work bound is reached (the cost of the bound itself, not
+    //    of the page). It passed in the first 0.1.34 draft, which detached the leading children lazily; the shared bounded
+    //    parse (live-artifacts logic) refuses it. Fail closed, stricter.
     // The ceiling is relative (2 × the same page without the trick + 50 ms), so a loaded CI machine slows both sides alike.
     const pairs: [string, string, string, boolean][] = [
-      ["<br> × 99,990 + <table> + 'a ' × 700,000", `${"<br>".repeat(99_990)}<table>${"a ".repeat(700_000)}`, `${"<br>".repeat(99_990)}${"a ".repeat(700_000)}<table>`, false],
-      ["<b><div> + <br> × 99,000 + </b>", `<b><div>${"<br>".repeat(99_000)}</b>`, `<b><div>${"<br>".repeat(99_000)}</div></b>`, true],
+      ["<br> × 99,990 + <table> + 'a ' × 700,000", `${"<br>".repeat(99_990)}<table>${"a ".repeat(700_000)}`, `${"<br>".repeat(99_990)}${"a ".repeat(700_000)}<table>`, true],
+      ["<b><div> + <br> × 99,000 + </b>", `<b><div>${"<br>".repeat(99_000)}</b>`, `<b><div>${"<br>".repeat(99_000)}</div></b>`, false],
     ];
     for (const [name, shape, reference, ok] of pairs) {
       assert.ok(Buffer.byteLength(shape) <= AGENT_DOCUMENT_MAX_BYTES && agentDocumentPrecheck(shape), `${name}: within the pre-parse caps`);

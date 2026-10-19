@@ -10,6 +10,7 @@
 // The `removed` counts name a rule kind and how many times it fired. They never hold removed content.
 import { AGENT_DOCUMENT_MARKER, AGENT_DOCUMENT_RULES, AGENT_DOCUMENT_UNAVAILABLE_TEXT } from "@opt2-tealbrick/manifest";
 import { defaultTreeAdapter, parse, html as parse5Html, serialize, type DefaultTreeAdapterTypes as T } from "parse5";
+import { boundedTreeAdapter, maxOutputLength, ParseLimitExceeded } from "./bounded-parse.ts";
 
 const R = AGENT_DOCUMENT_RULES;
 
@@ -491,225 +492,19 @@ export function agentDocumentPrecheck(html: string): boolean {
 
 // ------------------------------------------------------------------------------------------------------ bounded parse
 
-/** Thrown by the bounded tree adapter; private, so only the sanitiser's own catch sees it. */
-class ParseLimitExceeded extends Error {}
-
-/** Most elements the parser may COPY in one parse (formatting elements it re-opens, adoption agency clones): 20,000 plus twice
- *  the elements parsed so far. Benign mis-nesting copies about one element per tag that crosses an open formatting element
- *  (corpus: at most 1 copy per page; `<p><b><i><u>t` + 1,000 × `<p>x`: 3,000 copies for 1,004 tags). Formatting elements with
- *  distinct attributes escape the parser's own limit of 3 (Noah's Ark), so `<font><p>x<b aN>` × N re-opens N elements per
- *  unit: N²/2 copies, 300 ms at N = 400 (4.6 KB, found by the fuzz test) before this cap. */
-const MAX_COPIES_BASE = 20_000;
-const MAX_COPIES_PER_PARSED = 2;
-
-/** Most tree work one parse may spend beyond plain appends: child visits re-measuring the depth of subtrees the parser moves
- *  (adoption agency, foster parenting) and 2 × the sibling entries read and shifted to insert before or detach (2 per
- *  foster-parented node next to an open table). A benign page moves small subtrees a few times and foster-parents a few stray
- *  texts; 4 × MAX_TAGS (200,000 foster-parented nodes) refuses `<br>` × 99,990 + `<table>` + `a ` × 700,000 in ~60 ms. */
-const MAX_TREE_WORK = 4 * R.maxTags;
-/** A child list longer than this has its leading children removed lazily (see detachNode). */
-const LAZY_HEAD_MIN = 64;
-
-/**
- * A parse5 tree adapter that bounds the parse WHILE parse5 builds the tree (C259): parse5's tree builder is quadratic in the
- * number of open elements (60,000 nested `<div>` cost 10 s before the post-parse depth check could refuse them).
- *
- * - Depth. Each element (and template content) gets a recorded depth on insertion: the parent's + 1, with the walk's numbering
- *   (document 0, `html` 1; template content at its template's depth). Past R.maxDepth it throws at once. A node that is
- *   inserted again (adoption agency, foster parenting) or that already has children when it is inserted (a clone that received
- *   the furthest block's children) has its subtree measured again when it lands deeper than recorded; a node that lands at the
- *   same depth or shallower keeps its larger recorded depth. Recorded depths therefore never fall below the real ones. The
- *   re-measuring is bounded by MAX_TREE_WORK. The post-parse walk checks the final tree again.
- * - Sibling lists. parse5's default adapter finds a foster-parenting reference with indexOf from the FRONT of a growing
- *   child list (`<table>x<b></b>` × 32,000: 0.6 s per parse) and detaches leading children with splice(0, 1). Here the
- *   reference is found from the END (it is the table, next to the end), leading children of a long list are removed lazily,
- *   and the steps are charged to MAX_TREE_WORK.
- * - Copied attributes. An element whose attribute list was already used by an earlier element is a copy made by the parser
- *   (a formatting element re-opened, an adoption agency clone): parse5 did not tokenize it, but every re-parse will. It is
- *   charged attrs² against what is left of MAX_ATTRIBUTE_BUDGET after the precheck's own charge.
- * - `<html>` / `<body>` attribute merging (adoptAttributes): done with an incremental name set (parse5 rebuilds a set per call:
- *   quadratic), the element capped at MAX_ATTRIBUTES_PER_TAG and its growth charged against the same budget.
- * - Element count: at most MAX_ELEMENTS created per parse, of which at most MAX_COPIES_BASE + 2 × (parsed elements) copies.
- *
- * Provenance: reconciled with Live Artifacts `src/bounded-parse.ts` (opt2-tealbrick-live-artifacts, branch
- * feat/C167-s6-hardening, commit c044698, 2026-10-18), which LA deletes after 0.1.34. Same bounds; taken from it: the 2 ×
- * (entries read + shifted) charge for a search from the end. Kept here instead: leading children of a long list are removed
- * lazily, so the adoption agency moving a block's 99,000 children is linear and the page passes (LA charges every detach the
- * whole list and refuses it); template content at its template's depth (the walk's numbering; LA: one below); the attribute
- * budget left after the precheck (LA: a fresh budget per parse); plain Map/Set (LA: WeakMap/WeakSet, slower at 10^5 nodes).
- */
-/** Compacts every child list left with lazily removed leading children, once the parse is done. */
-const FINISH = new WeakMap<object, () => void>();
-function finishTree(adapter: object): void {
-  FINISH.get(adapter)?.();
+// The bounds of every parse the SDK makes (first pass, both verification passes, fillTextSlots) are ONE implementation,
+// ./bounded-parse.ts (ported from Live Artifacts; see its header for each bound). Here only the caller's numbers: depth from the
+// rules; elements as Live Artifacts caps them, from the source being parsed. `parseFn` is parse5's `parse` (or the test seam); it
+// must pass `treeAdapter` on.
+/** Elements one parse may create: three times the "<" of THIS source plus 4,096, at most MAX_ELEMENTS. A benign page makes about
+ *  one element per tag; an unclosed <b> in every list item makes up to 2.5 (the parser re-opens it, at most 3 copies of one kind).
+ *  A page that makes the parser multiply re-opened elements (`<p><b><i>...` + `<p>x` x N) is refused early, not at MAX_ELEMENTS. */
+function elementCap(html: string): number {
+  let lt = 0;
+  for (let i = html.indexOf("<"); i >= 0; i = html.indexOf("<", i + 1)) lt++;
+  return Math.min(MAX_ELEMENTS, 3 * lt + 4096);
 }
-
-function boundedTreeAdapter(budgetLeft: number): typeof defaultTreeAdapter {
-  // plain Map/Set, not Weak*: the adapter lives for one parse, and V8's ephemeron tables made the weak versions the most
-  // expensive part of a parse with 10^5 elements
-  const depthOf = new Map<object, number>();
-  const usedAttrs = new Set<object>();
-  const names = new Map<object, Set<string>>();
-  let left = budgetLeft;
-  let elements = 0;
-  let copies = 0;
-  let work = 0;
-  const step = (n: number): void => {
-    work += n;
-    if (work > MAX_TREE_WORK) over();
-  };
-  // parse5 moves every child of an adoption agency's furthest block with getFirstChild + detachNode: splice(0, 1) on a long
-  // child list is O(length), so 64,000 children cost 6 s. On a long list the leading children are removed lazily: `head`
-  // holds how many leading entries are already detached; every other access to that list compacts it first.
-  const head = new Map<ParentNode, number>();
-  const compact = (p: ParentNode): void => {
-    const k = head.get(p);
-    if (k !== undefined) {
-      head.delete(p);
-      p.childNodes.splice(0, k);
-    }
-  };
-  const over = (): never => {
-    throw new ParseLimitExceeded();
-  };
-  const charge = (cost: number): void => {
-    left -= cost;
-    if (left < 0) over();
-  };
-  const hasChildren = (n: object): n is ParentNode => "childNodes" in n;
-  /** Re-measures the subtree under `node` (recorded at depth d). */
-  const remeasure = (node: ParentNode, d: number): void => {
-    const content = (node as T.Template).content;
-    if (content) {
-      if (d > (depthOf.get(content) ?? -1)) depthOf.set(content, d);
-      remeasure(content, d);
-    }
-    for (const child of node.childNodes) {
-      step(1);
-      if (!hasChildren(child)) continue;
-      const cd = d + 1;
-      if (cd > R.maxDepth) over();
-      if (cd > (depthOf.get(child) ?? -1)) depthOf.set(child, cd);
-      remeasure(child, depthOf.get(child) as number);
-    }
-  };
-  const place = (parent: ParentNode, child: ChildNode): void => {
-    if (!hasChildren(child)) return; // text, comment, doctype: leaves
-    const d = (depthOf.get(parent) ?? 0) + 1;
-    if (d > R.maxDepth) over();
-    const old = depthOf.get(child);
-    if (old !== undefined && d <= old) return; // same depth or shallower: the recorded depth stays an upper bound
-    depthOf.set(child, d);
-    const content = (child as T.Template).content;
-    if (child.childNodes.length > 0 || (content && content.childNodes.length > 0)) remeasure(child, d);
-    else if (content) depthOf.set(content, d);
-  };
-  const adapter: typeof defaultTreeAdapter = {
-    ...defaultTreeAdapter,
-    createElement(tagName, namespaceURI, attrs) {
-      if (++elements > MAX_ELEMENTS) over();
-      if (usedAttrs.has(attrs)) {
-        if (++copies > MAX_COPIES_BASE + MAX_COPIES_PER_PARSED * (elements - copies)) over();
-        if (attrs.length > MAX_ATTRIBUTES_PER_TAG) over();
-        charge(attrs.length * attrs.length);
-      } else usedAttrs.add(attrs);
-      return defaultTreeAdapter.createElement(tagName, namespaceURI, attrs);
-    },
-    appendChild(parent, child) {
-      compact(parent);
-      place(parent, child);
-      defaultTreeAdapter.appendChild(parent, child);
-    },
-    insertBefore(parent, child, reference) {
-      compact(parent);
-      place(parent, child);
-      const list = parent.childNodes;
-      const at = list.lastIndexOf(reference);
-      step(2 * (list.length - at)); // the entries read from the end, and the entries the insert shifts
-      list.splice(at, 0, child);
-      child.parentNode = parent;
-    },
-    insertText(parent, text) {
-      compact(parent);
-      defaultTreeAdapter.insertText(parent, text);
-    },
-    insertTextBefore(parent, text, reference) {
-      compact(parent);
-      const list = parent.childNodes;
-      const at = list.lastIndexOf(reference);
-      step(2 * (list.length - at)); // the entries read from the end, and the entries the insert shifts
-      const prev = list[at - 1];
-      if (prev && defaultTreeAdapter.isTextNode(prev)) prev.value += text;
-      else {
-        const node = defaultTreeAdapter.createTextNode(text);
-        list.splice(at, 0, node);
-        node.parentNode = parent;
-      }
-    },
-    detachNode(node) {
-      const p = node.parentNode;
-      if (!p) return;
-      const list = p.childNodes;
-      const k = head.get(p) ?? 0;
-      if (list[k] === node && list.length >= LAZY_HEAD_MIN) {
-        node.parentNode = null;
-        if (k + 1 === list.length) {
-          head.delete(p);
-          list.length = 0;
-        } else head.set(p, k + 1);
-        return;
-      }
-      compact(p);
-      const at = list.lastIndexOf(node);
-      step(2 * (list.length - at));
-      list.splice(at, 1);
-      node.parentNode = null;
-    },
-    getFirstChild(node) {
-      return node.childNodes[head.get(node) ?? 0];
-    },
-    getChildNodes(node) {
-      compact(node);
-      return node.childNodes;
-    },
-    setDocumentType(document, name, publicId, systemId) {
-      compact(document);
-      defaultTreeAdapter.setDocumentType(document, name, publicId, systemId);
-    },
-    setTemplateContent(template, content) {
-      depthOf.set(content, depthOf.get(template) ?? 0);
-      defaultTreeAdapter.setTemplateContent(template, content);
-    },
-    adoptAttributes(recipient, attrs) {
-      let set = names.get(recipient);
-      if (!set) {
-        set = new Set(recipient.attrs.map((a) => a.name));
-        names.set(recipient, set);
-      }
-      const before = recipient.attrs.length;
-      for (const a of attrs) {
-        if (set.has(a.name)) continue;
-        set.add(a.name);
-        recipient.attrs.push(a);
-      }
-      const after = recipient.attrs.length;
-      if (after > MAX_ATTRIBUTES_PER_TAG) over();
-      charge(after * after - before * before);
-    },
-  };
-  FINISH.set(adapter, () => {
-    for (const p of [...head.keys()]) compact(p);
-  });
-  return adapter;
-}
-
-/** One parse through the bounded adapter. `parseFn` is parse5's `parse` (or the test seam); it must pass `treeAdapter` on. */
-function boundedParse(parseFn: ParseFn, html: string, scripting: boolean, budgetLeft: number): T.Document {
-  const treeAdapter = boundedTreeAdapter(budgetLeft);
-  const doc = parseFn(html, { scriptingEnabled: scripting, treeAdapter });
-  finishTree(treeAdapter);
-  return doc;
-}
+const boundedParse = (parseFn: ParseFn, html: string, scripting: boolean): T.Document => parseFn(html, { scriptingEnabled: scripting, treeAdapter: boundedTreeAdapter({ maxDepth: R.maxDepth, maxElements: elementCap(html) }) });
 
 // ----------------------------------------------------------------------------------------------------------------- walk
 
@@ -901,8 +696,8 @@ function walk(parent: ParentNode, ctx: Ctx, depth: number): void {
   parent.childNodes = kept;
 }
 
-function runPass(input: string, opts: SanitizeAgentDocumentOptions, scripting: boolean, parseFn: ParseFn, budgetLeft: number): { html: string; runsScripts: boolean; removed: { kind: string; count: number }[] } {
-  const doc = boundedParse(parseFn, input, scripting, budgetLeft);
+function runPass(input: string, opts: SanitizeAgentDocumentOptions, scripting: boolean, parseFn: ParseFn): { html: string; runsScripts: boolean; removed: { kind: string; count: number }[] } {
+  const doc = boundedParse(parseFn, input, scripting);
   const counts = new Counts();
   const ctx: Ctx = { allowScripts: opts.allowScripts, assetPrefix: opts.assetPrefix, counts, runsScripts: false };
   walk(doc, ctx, 0);
@@ -922,11 +717,6 @@ function runPass(input: string, opts: SanitizeAgentDocumentOptions, scripting: b
   return { html, runsScripts: ctx.runsScripts, removed: counts.list() };
 }
 
-/** The longest output accepted for an input of `n` characters (C259): max(4 × n, n + 1 MiB). Benign pages grow by the
- *  marker, implied end tags and quoted attribute values (measured: at most 1.4× on the corpus); more is the parser multiplying
- *  re-opened formatting elements. */
-const maxOutputLength = (n: number): number => Math.max(4 * n, n + 1024 * 1024);
-
 /**
  * Removes from agent-written HTML everything that can reach the network or the top window outside the CSP: `link`, `base`,
  * `meta[http-equiv]`, forms, frames, `object`/`embed`/`portal`, `noscript`, `<a ping>`, URL attributes that are not a
@@ -942,7 +732,7 @@ export function sanitizeAgentDocument(html: string, opts: SanitizeAgentDocumentO
     if (!attributesWithin(st) || st.tags > MAX_TAGS) return failed();
     const o: SanitizeAgentDocumentOptions = { allowScripts: opts.allowScripts, assetPrefix: opts.assetPrefix };
     const parseFn = deps?.parse ?? parse;
-    const first = runPass(html, o, true, parseFn, MAX_ATTRIBUTE_BUDGET - st.attributeCost);
+    const first = runPass(html, o, true, parseFn);
     // the output is served, stored and parsed twice more: it may not grow past max(4 × input, input + 1 MiB) (the parser can
     // multiply elements it re-opens), and its own attributes must be within the same budget (copies made by the parser count)
     if (first.html.length > maxOutputLength(html.length)) return failed();
@@ -950,7 +740,7 @@ export function sanitizeAgentDocument(html: string, opts: SanitizeAgentDocumentO
     if (!attributesWithin(out)) return failed();
     // a second pass, parsed with scripting on AND off, must find nothing to remove and change nothing
     for (const scripting of [true, false]) {
-      const again = runPass(first.html, o, scripting, parseFn, MAX_ATTRIBUTE_BUDGET - out.attributeCost);
+      const again = runPass(first.html, o, scripting, parseFn);
       if (again.removed.length > 0 || again.html !== first.html || again.runsScripts !== first.runsScripts) return failed();
     }
     return { ok: true, html: first.html, runsScripts: first.runsScripts, removed: first.removed };
@@ -976,7 +766,7 @@ export function fillTextSlots(html: string, values: Readonly<Record<string, stri
   let doc: T.Document;
   try {
     // the same bounded parse as the sanitiser (depth, copied attributes, element count): past a bound, the inert page
-    doc = boundedParse(deps?.parse ?? parse, html, true, MAX_ATTRIBUTE_BUDGET - st.attributeCost);
+    doc = boundedParse(deps?.parse ?? parse, html, true);
   } catch (e) {
     if (e instanceof ParseLimitExceeded) return AGENT_DOCUMENT_UNAVAILABLE_HTML;
     throw e;
