@@ -60,9 +60,11 @@ export type {
   SessionInfo,
   SliceAgent,
 } from "@opt2-tealbrick/spec/sdk";
-// v0.1.29 (C238, C230): agent documents. Server entry only; the rule list is AGENT_DOCUMENT_RULES (@opt2-tealbrick/manifest 0.1.24).
-export { AGENT_DOCUMENT_UNAVAILABLE_HTML, type AgentDocumentDeps, type AgentDocumentStats, agentDocumentPrecheck, agentDocumentStats, fillTextSlots, MAX_ATTRIBUTES_PER_TAG, MAX_TAGS, NO_SCRIPT_CSP, type SanitizeAgentDocumentOptions, type SanitizeAgentDocumentResult, sanitizeAgentDocument } from "./agent-document.ts";
+export { AGENT_DOCUMENT_UNAVAILABLE_HTML, type AgentDocumentDeps, type AgentDocumentStats, agentDocumentPrecheck, agentDocumentStats, fillTextSlots, MAX_ATTRIBUTE_BUDGET, MAX_ATTRIBUTES_PER_TAG, MAX_ELEMENTS, MAX_TAGS, NO_SCRIPT_CSP, type SanitizeAgentDocumentOptions, type SanitizeAgentDocumentResult, sanitizeAgentDocument } from "./agent-document.ts";
 export { decideHold, defineApp, getKey, onKeysChanged, SDK_MAJOR, SDK_VERSION, startApp } from "./app.ts";
+// v0.1.29 (C238, C230): agent documents. Server entry only; the rule list is AGENT_DOCUMENT_RULES (@opt2-tealbrick/manifest 0.1.24).
+// v0.1.34 (C259): the ONE bounded parse5 parse (ported from live-artifacts), exported so Live Artifacts imports it instead of a copy.
+export { boundedParse, boundedTreeAdapter, maxOutputLength, PARSE_ATTRIBUTE_BUDGET, PARSE_MAX_ATTRIBUTES, PARSE_MAX_CHILD_WORK, type ParseBounds, ParseLimitExceeded } from "./bounded-parse.ts";
 export type {
   AppSecrets,
   CompanionTargetsView,

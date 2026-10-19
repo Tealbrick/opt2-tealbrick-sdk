@@ -10,7 +10,7 @@ runtime dependency (the exact versions and integrity hashes are in `pnpm-lock.ya
 |---|---|---|---|---|
 | `parse5` | 8.0.1 | MIT (Copyright (c) 2013-2019 Ivan Nikulin) | `@opt2-tealbrick/miniapp-sdk` 0.1.29+ (`sanitizeAgentDocument`, server entry only) | https://github.com/inikulin/parse5 |
 | `entities` (dependency of `parse5`) | 8.1.0 | BSD-2-Clause (Copyright (c) Felix Boehm) | `@opt2-tealbrick/miniapp-sdk` 0.1.29+ (through `parse5`) | https://github.com/fb55/entities |
-| `ajv` | 8.17.1 | MIT | `@opt2-tealbrick/manifest` | https://github.com/ajv-validator/ajv |
+| `ajv` | 8.18.0 | MIT | `@opt2-tealbrick/manifest` | https://github.com/ajv-validator/ajv |
 | `fast-deep-equal` (ajv) | 3.1.3 | MIT | `@opt2-tealbrick/manifest` (through `ajv`) | https://github.com/epoberezkin/fast-deep-equal |
 | `fast-uri` (ajv) | 3.1.8 | BSD-3-Clause | `@opt2-tealbrick/manifest` (through `ajv`) | https://github.com/fastify/fast-uri |
 | `json-schema-traverse` (ajv) | 1.0.0 | MIT | `@opt2-tealbrick/manifest` (through `ajv`) | https://github.com/epoberezkin/json-schema-traverse |

@@ -1,6 +1,6 @@
 {
   "name": "@opt2-tealbrick/manifest",
-  "version": "0.1.25",
+  "version": "0.1.26",
   "private": true,
   "description": "Teal Brick opt2 contract primitives: manifest validator, JCS, digests, Ed25519 JWS, key sets, token verifiers, sealing, gate()/authorize().",
   "license": "SEE LICENSE IN LICENSE",
@@ -22,7 +22,7 @@
   },
   "dependencies": {
     "@opt2-tealbrick/spec": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.49/opt2-tealbrick-spec-0.1.49.tgz",
-    "ajv": "8.17.1"
+    "ajv": "8.18.0"
   },
   "devDependencies": {
     "@types/node": "24.19.2",
