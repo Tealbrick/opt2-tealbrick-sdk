@@ -147,7 +147,7 @@ packages:
     os: [win32]
 
   '@opt2-tealbrick/spec@https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.50/opt2-tealbrick-spec-0.1.50.tgz':
-    resolution: {tarball: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.50/opt2-tealbrick-spec-0.1.50.tgz}
+    resolution: {integrity: sha512-lj9n6vjBRqBl5wZIfVW5ehM1Z2r6mWWTJ8cFks22N43AIINMhnaEI9Ht/YJfr/sI5MNJ7we80c7IC+k1MjpEHQ==, tarball: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.50/opt2-tealbrick-spec-0.1.50.tgz}
     version: 0.1.50
 
   '@types/node@24.19.2':
