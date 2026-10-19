@@ -5,6 +5,7 @@
 // removed, revoked, narrowed grant, hold → approve → runs once), status push counts + attention, onStop.
 import assert from "node:assert/strict";
 import { after, afterEach, before, describe, test } from "node:test";
+import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json, PersonPrincipal } from "@opt2-tealbrick/spec/sdk";
 import type { SdkOpContext, StopContext } from "../src/server/context.ts";
 import { decideHold, defineApp, startApp } from "../src/server/index.ts";
@@ -148,7 +149,7 @@ interface Booted {
 
 type Handlers = Record<string, (input: Json, ctx: JobContext, b: Booted) => Promise<unknown>>;
 
-async function boot(opts: { handlers?: Handlers; jobsDrainMs?: number; dir?: string; maxAttempts?: number; leaseMs?: number; sliceOver?: Parameters<typeof slice>[2] } = {}): Promise<Booted> {
+async function boot(opts: { handlers?: Handlers; jobsDrainMs?: number; dir?: string; maxAttempts?: number; leaseMs?: number; sliceOver?: Parameters<typeof slice>[2]; manifest?: (m: Manifest) => Manifest } = {}): Promise<Booted> {
   const w = await world();
   const t = opts.dir ? { dir: opts.dir, cleanup: () => {} } : tempDir();
   const port = await freePort();
@@ -170,7 +171,7 @@ async function boot(opts: { handlers?: Handlers; jobsDrainMs?: number; dir?: str
       };
     }
     const app = defineApp({
-      manifest: fixtureManifest(port),
+      manifest: opts.manifest ? opts.manifest(fixtureManifest(port)) : fixtureManifest(port),
       migrations: migrationsDir(t.dir),
       handlers: {
         note_create: { scope: (input) => String((input as { notebook: string }).notebook), run: async () => ({ id: "n1" }) },
@@ -528,6 +529,14 @@ describe("scheduled ops: authorize() again at fire time (SDK-2, CON-01)", () => 
     assert.ok(!b.ran.note_delete.includes("prd-2"), "the op never ran");
   });
 
+  test("quiet: an op WITHOUT a listing, a free grant and an empty wf still fires at fire time (unchanged by the listing check)", async () => {
+    const g = await grant(b.w, b.w.agents.a, { mode: "free", wf: [] });
+    const j = await settled(await schedule("nolisting-1", 300, g));
+    assert.equal(j.status, "done", j.lastError ?? "");
+    assert.deepEqual(b.ran.note_delete.filter((x) => x === "nolisting-1"), ["nolisting-1"]);
+    assert.equal((await receipts("note_delete")).at(-1)?.status, "run");
+  });
+
   test("fires: the agent is paused before fire time → refused `paused`, never runs, refused receipt", async () => {
     const id = await schedule("paused-1", 400);
     await b.push({ pause: { workspace: false, agents: [b.w.agents.a], instances: [] } });
@@ -602,5 +611,55 @@ describe("scheduled ops: authorize() again at fire time (SDK-2, CON-01)", () => 
       (e: Error & { code?: string }) => e.code === "job_kind_invalid",
     );
     assert.throws(() => b.jobs.enqueue("nope", null), (e: Error & { code?: string }) => e.code === "job_kind_unknown");
+  });
+});
+
+// v0.1.36: fire time reads the op's `listing` like gate() does (C283b item 2)
+describe("scheduled ops: a `listing: \"workflow\"` op at fire time", () => {
+  let b: Booted;
+  before(async () => {
+    b = await boot({ manifest: (m) => ({ ...m, operations: m.operations.map((o) => (o.id === "note_delete" ? { ...o, listing: "workflow" as const } : o)) }) });
+  });
+  after(async () => b.cleanup());
+
+  const schedule = async (id: string, grantToken: string) => {
+    const r = await callOp(b, "note_get", { id, inMs: 300 }, { grantToken });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    return String(r.body.output.job);
+  };
+  const settled = (id: string) => until(async () => {
+    const j = b.jobs.get(id);
+    return j && ["done", "refused", "failed", "waiting"].includes(j.status) ? j : null;
+  });
+  const receipts = async () => {
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(`${b.dir}/app.db`, { readOnly: true });
+    try {
+      return db.prepare("SELECT status, meta FROM tb_receipts WHERE op = 'note_delete' ORDER BY created_at").all() as { status: string; meta: string }[];
+    } finally {
+      db.close();
+    }
+  };
+
+  test("fires on bad: a free grant with an empty wf schedules the listed op; at fire time it is refused `not_in_workflow`, never runs, refused receipt", async () => {
+    const g = await grant(b.w, b.w.agents.a, { mode: "free", wf: [] });
+    const j = await settled(await schedule("listed-bad-1", g));
+    assert.equal(j.status, "refused", j.lastError ?? "");
+    assert.equal(j.lastError, "not_in_workflow");
+    assert.ok(!b.ran.note_delete.includes("listed-bad-1"), "the handler never ran");
+    const r = (await receipts()).at(-1);
+    assert.equal(r?.status, "refused");
+    assert.equal(JSON.parse(String(r?.meta)).reason, "not_in_workflow");
+  });
+
+  test("quiet on good: the grant's wf names the listed op → it fires once, with a run receipt", async () => {
+    const before = (await receipts()).length;
+    const g = await grant(b.w, b.w.agents.a, { mode: "free", wf: ["note_get", "note_delete"] });
+    const j = await settled(await schedule("listed-good-1", g));
+    assert.equal(j.status, "done", j.lastError ?? "");
+    assert.deepEqual(b.ran.note_delete.filter((x) => x === "listed-good-1"), ["listed-good-1"]);
+    const rs = await receipts();
+    assert.equal(rs.length, before + 1);
+    assert.equal(rs.at(-1)?.status, "run");
   });
 });
