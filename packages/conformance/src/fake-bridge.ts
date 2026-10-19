@@ -213,6 +213,8 @@ export class FakeBridge {
   appsPolicy: { held: HoldFamily[] } = { held: [...DEFAULT_HELD_FAMILIES] };
   /** v0.1.14 (C102): instances listed in slice `companionCallers` (Core: the apps holding a companion grant to this one) */
   companionCallers: NonNullable<InstanceSlice["companionCallers"]> = [];
+  /** spec 0.1.49 (C261): slice `appCallers`; `"verified"` = the SDK refuses an app caller without a verified product (`control.setAppCallers`) */
+  appCallers: "verified" | null = null;
   readonly #replay = memoryReplayGuard();
   readonly #waiters = new Set<() => void>();
   readonly #statusWaiters = new Set<() => void>();
@@ -397,6 +399,7 @@ export class FakeBridge {
       companionTargets: (this.manifest.companions ?? []).filter((c) => this.ids.peers[c.product]).map((c) => ({ product: c.product, ins: this.ids.peers[c.product] })),
       companionCallers: this.companionCallers.map((x) => ({ ...x })),
       appsPolicy: { held: [...this.appsPolicy.held] },
+      ...(this.appCallers ? { appCallers: this.appCallers } : {}),
     };
     for (const g of body.grants) this.sliceGrants.add(g);
     const signedSlice = await signSlice(body, over?.signer ?? this.activePortalKey());
@@ -815,6 +818,11 @@ export class FakeBridgeControl {
   /** spec 0.1.46 (GRANT-PRD): removes an app caller from slice `companionCallers` (the slice lags behind a new edge) and publishes the slice. */
   unlistCompanionCaller(ins: InstanceId): Promise<number> {
     this.#b.companionCallers = this.#b.companionCallers.filter((x) => x.ins !== ins);
+    return this.#b.rebuildSlice();
+  }
+  /** spec 0.1.49 (C261): sets (or clears, `null`) the slice flag `appCallers: "verified"` and publishes the slice. */
+  setAppCallers(mode: "verified" | null): Promise<number> {
+    this.#b.appCallers = mode;
     return this.#b.rebuildSlice();
   }
   /** v0.1.15 (C105a): sets the workspace apps policy (companion grant `held` + slice `appsPolicy`) and publishes the slice. */

@@ -74,7 +74,7 @@ export interface OpAnswer extends HttpAnswer {
 }
 
 /** One named deviation from a correct hook call (negative cases); `input` changes `call.input` after signing. */
-export type HookTamper = "no_proof" | "proof_key" | "phase" | "context" | "input" | "op_proof";
+export type HookTamper = "no_proof" | "proof_key" | "phase" | "context" | "input" | "op_proof" | "sub" | "call";
 
 export interface HookAnswer extends HttpAnswer {
   code: string | null;
@@ -243,8 +243,11 @@ export class AppClient {
     // C268 A (spec 0.1.50, SDK >= 0.1.35): the proof `sub` is the CALLER ref of the request body and the proof `call` the id of the
     // request, exactly as the bridge signs them. A caller that is not an agent or an app instance falls back to agent A.
     const callerRef = hookCallerRef(req.call.caller);
-    const sub = callerRef === "" ? `tb:agt:${b.ids.agents[0].id}` : callerRef;
-    const callId = typeof req.call.id === "string" ? (req.call.id as CallId) : undefined;
+    const bodySub = callerRef === "" ? `tb:agt:${b.ids.agents[0].id}` : callerRef;
+    // `sub`: the proof names ANOTHER caller than the body (an agent that is not the body's caller, never a ref the body names)
+    const sub = opts.tamper === "sub" ? `tb:agt:${b.ids.agents.find((a) => `tb:agt:${a.id}` !== bodySub)?.id ?? newId("agt")}` : bodySub;
+    // `call`: the proof names ANOTHER call than the body's
+    const callId = opts.tamper === "call" ? (newId("call") as CallId) : typeof req.call.id === "string" ? (req.call.id as CallId) : undefined;
     const aud = `tb:ins:${b.ids.ins}` as const;
     const t = opts.tamper;
     const call = t === "input" && req.call.input !== undefined ? { ...req.call, input: tamperValue(req.call.input) } : req.call;

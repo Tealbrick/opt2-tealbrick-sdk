@@ -13,6 +13,7 @@ import {
   type Ed25519KeyPair,
   exportPrivateKey,
   generateKeyPair,
+  hookCallerRef,
   importKeyPair,
   KNOWN_HOLD_FAMILIES,
   kekFromEnv,
@@ -159,6 +160,38 @@ export interface MiniAppFaults {
   hookBadShapeNoProduct?: boolean;
   /** package 0.1.15 (NOT a fault, Knowledge-like): the recall output also carries a status array `areas` next to `items` */
   recallStatusArray?: boolean;
+  /** spec 0.1.50 (C283 A1): `tb.scopes_set` writes the row but marks it `bounded` (an owner row never goes above the grant; fails A20.owner_row_above_grant) */
+  scopesSetBounded?: boolean;
+  /** spec 0.1.50: every row is primary, defaults included (a bounded row above the grant runs; fails A20.bounded_above_grant_refused) */
+  allRowsPrimary?: boolean;
+  /** spec 0.1.50: the agent route executes `tb.scopes_set` and writes an owner row (fails A20.agent_cannot_write_owner_row) */
+  agentSetsOwner?: boolean;
+  /** spec 0.1.50: the companion (app) route executes `tb.scopes_set` and writes an owner row (fails A20.app_cannot_write_owner_row) */
+  appSetsOwner?: boolean;
+  /** spec 0.1.50: the person op `scope_grant` leaves an owner row primary (keeps its authority; fails A20.scope_grants_bounded) */
+  scopeGrantKeepsOwner?: boolean;
+  /** spec 0.1.50: an owner row also widens an op WITHOUT a scope type (fails A20.unscoped_above_grant_refused) */
+  ownerWidensUnscoped?: boolean;
+  /** spec 0.1.50: an owner row revives a paused agent (fails A20.paused_agent_owner_row) */
+  ownerRevivesPaused?: boolean;
+  /** spec 0.1.50: scope rows carry no `authority` member in tb.agents_list (fails A20.owner_row_above_grant) */
+  noAuthorityField?: boolean;
+  /** spec 0.1.50: receipts of scoped calls carry no `admittedBy` (fails A20.owner_row_above_grant) */
+  noAdmittedBy?: boolean;
+  /** spec 0.1.50: the catalog marks every entry `admitted: "owner"` for every agent (fails A20.catalog_admitted) */
+  catalogMarksAll?: boolean;
+  /** spec 0.1.50: the catalog never marks an entry (fails A20.catalog_admitted) */
+  catalogNoMarks?: boolean;
+  /** spec 0.1.50: scope_summary names every static scoped op as admitted for every agent (fails A20.admitted_ops) */
+  admittedOpsAlways?: boolean;
+  /** spec 0.1.50: scope_summary never names an admitted op (fails A20.admitted_ops) */
+  noAdmittedOps?: boolean;
+  /** spec 0.1.49 (C261): an app caller without a verified product is NOT refused although the slice says `appCallers: "verified"` (fails A12.caller_unverified_refused) */
+  noCallerUnverified?: boolean;
+  /** spec 0.1.50 (C268 A): the hook route does not compare the proof `sub` with the caller of the body (fails A2.hook_sub_mismatch) */
+  hookIgnoresSub?: boolean;
+  /** spec 0.1.50 (C268 A): the hook route does not compare the proof `call` with the call id of the body (fails A2.hook_call_mismatch) */
+  hookIgnoresCall?: boolean;
 }
 
 /**
@@ -198,6 +231,8 @@ interface Receipt {
   summary: string;
   meta: Json;
   idempotencyKey: string | null;
+  /** spec 0.1.50 (C283 A1): which rule admitted a scoped call */
+  admittedBy?: "app_owner_row" | "portal_grant";
   view?: string;
   input?: Json;
   createdAt: number;
@@ -223,7 +258,7 @@ interface State {
   idem: Record<string, { inputDigest: string; kind: "held" | "result"; holdId?: string; output?: Json }>;
   /** v0.1.18 (SDK-02): one cap slot per run of a capped effect (receipt or not) */
   capSlots?: { caller: string; effect: string; at: number }[];
-  scopes: { agent: string; type: string; instanceId: string; access: string; source?: string; grantedByOp?: string }[];
+  scopes: { agent: string; type: string; instanceId: string; access: string; source?: string; grantedByOp?: string; authority?: "owner" | "bounded" }[];
   defaultsApplied: string[];
   sessions: { digest: string; per: string; createdAt: number; csrf: string; expiresAt: number }[];
   usedJti: string[];
@@ -484,6 +519,22 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
     return { workspace: slice.pause.workspace, instance: slice.pause.instances.includes(ins), agent: agent !== null && slice.pause.agents.includes(agent as never) };
   };
   const levelCrud = (type: string, level: string) => manifest.scopes?.find((s) => s.type === type)?.access.find((a) => a.id === level)?.crud ?? [];
+  /**
+   * spec 0.1.50 (C283 A1): do the OWNER rows of `agent` admit `crud` for `type` across instances? The agent must have rows, EVERY row
+   * an owner row, and the best row's crud (the one with most actions) must contain `crud`. Display only (catalog / scope_summary).
+   */
+  const ownerAdmits = (agent: string, type: string, crud: readonly string[]): boolean => {
+    const rows = st.scopes.filter((r) => r.agent === agent && r.type === type);
+    if (rows.length === 0 || !rows.every((r) => r.authority === "owner")) return false;
+    const best = rows.map((r) => levelCrud(type, r.access)).sort((x, y) => y.length - x.length)[0] ?? [];
+    return crud.every((c) => (best as readonly string[]).includes(c));
+  };
+  /** the agent is in the slice, active and not paused: only then does a display mark apply */
+  const markable = (agent: string): boolean => {
+    const a = (slice?.agents ?? []).find((x) => x.id === agent);
+    const p = pausedFor(agent);
+    return !!a && a.status === "active" && !p.workspace && !p.instance && !p.agent;
+  };
   const newId = (p: string) => `${p}_${randomBytes(16).toString("hex").toUpperCase().slice(0, 26)}`;
 
   async function agentOp(req: IncomingMessage, res: ServerResponse, opId: string, raw: string): Promise<void> {
@@ -515,8 +566,21 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
       callerId = String(g0.sub ?? "tb:agt:unknown").split(":")[2] ?? "unknown";
     }
     void held;
+    // spec 0.1.49 (C261): with the slice flag an app caller must have a verified product (grant prd, else its companionCallers entry)
+    if (callerType === "app" && !faults.noCallerUnverified && slice?.appCallers === "verified") {
+      const product = typeof g0.prd === "string" ? g0.prd : (slice.companionCallers ?? []).find((x) => x.ins === callerId)?.product;
+      if (product === undefined) throw new E(403, "caller_unverified");
+    }
     const op = ops.find((o) => o.id === opId);
     if (!op) throw new E(404, "unknown_tool");
+    // faults: the agent / companion route executes the owner-only tb.scopes_set (spec 0.1.50: refused audience_not_agent)
+    if (op.id === "tb.scopes_set" && (callerType === "agent" ? faults.agentSetsOwner : faults.appSetsOwner)) {
+      const i = (body.input ?? {}) as Record<string, unknown>;
+      st.scopes = st.scopes.filter((r) => !(r.agent === i.agent && r.type === i.type && r.instanceId === i.id));
+      if (i.access !== null) st.scopes.push({ agent: String(i.agent), type: String(i.type), instanceId: String(i.id), access: String(i.access), source: "owner", authority: "owner" });
+      save();
+      return json(res, 200, { status: "ok", output: { access: (i.access ?? null) as Json } });
+    }
     if (op.audience !== "agent") throw new E(403, "audience_not_agent");
     if (op.standard) {
       if (op.id === "tb.holds_pending") {
@@ -576,13 +640,14 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
       if (h?.status === "denied") throw new E(403, "hold_denied");
     }
     const scoped = op.standard ? undefined : op.scopeType;
-    let access: { level: string; crud: typeof op.crud } | null = null;
+    let access: { level: string; crud: typeof op.crud; authority?: "owner" | "bounded" } | null = null;
     if (scoped) {
       // the scope instance: the first required string naming one of the caller's scope rows (else the first string)
       const strs = (op.standard ? [] : ((op.input?.required as string[]) ?? [])).map((k) => (body.input as Record<string, unknown>)[k]).filter((v): v is string => typeof v === "string");
       const sid = strs.find((v) => st.scopes.some((r) => r.agent === callerId && r.type === scoped && r.instanceId === v)) ?? strs[0] ?? "";
       const row = st.scopes.find((r) => r.agent === callerId && r.type === scoped && r.instanceId === sid);
-      access = row ? { level: row.access, crud: levelCrud(scoped, row.access) } : null;
+      // spec 0.1.50 (C283 A1): only the owner's tb.scopes_set marks a row primary (`allRowsPrimary` is the fault: every row is)
+      access = row ? { level: row.access, crud: levelCrud(scoped, row.access), authority: faults.allRowsPrimary || row.authority === "owner" ? "owner" : "bounded" } : null;
       // areaPerAppCaller: the caller's own area grants it full access to that scope instance
       if (ownArea) access = { level: "own_area", crud: ["create", "read", "update", "delete"] };
     }
@@ -609,6 +674,10 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
       // a broken app that runs every app→app call (C105a violated)
     } else if (faults.skipGrantVerify && d.decision === "refuse" && d.reason.startsWith("grant_")) {
       // a broken app that never verifies the grant runs anyway
+    } else if (faults.ownerWidensUnscoped && d.decision === "refuse" && d.reason === "scope_denied" && !scoped && st.scopes.some((r) => r.agent === callerId && r.authority === "owner")) {
+      // a broken app that lets any owner row widen an op without a scope type
+    } else if (faults.ownerRevivesPaused && d.decision === "refuse" && d.reason === "paused" && st.scopes.some((r) => r.agent === callerId && r.authority === "owner")) {
+      // a broken app that lets an owner row revive a paused agent
     } else if (d.decision === "refuse") throw new E(403, d.reason);
     // C102: an app caller is named from slice companionCallers (verified grant sub), fallback the instance id
     const callerName = callerType === "app" && !faults.callerNameIgnoresSlice ? ((slice?.companionCallers ?? []).find((x) => x.ins === callerId)?.name ?? callerId) : callerId;
@@ -640,6 +709,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
       createdAt: Date.now(),
       decidedAt: null,
       decidedBy: null,
+      ...(d.decision !== "refuse" && "admittedBy" in d && d.admittedBy && !faults.noAdmittedBy ? { admittedBy: d.admittedBy } : {}),
       ...(faults.storesRawInput ? { input: body.input } : {}),
     };
     const capsSkipped = faults.capsIgnoredWithWf && d.decision === "hold" && d.reason === "caps_exceeded" && Array.isArray(g0.wf) && g0.wf.length > 0;
@@ -726,11 +796,15 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
         break;
       }
       case "tb.agents_list":
-        out = { agents: (slice?.agents ?? []).map((a) => ({ ...a, access: st.scopes.filter((r) => r.agent === a.id) })) as unknown as Json };
+        out = { agents: (slice?.agents ?? []).map((a) => ({ ...a, access: st.scopes.filter((r) => r.agent === a.id).map((r) => {
+            const { authority, ...rest } = r;
+            return faults.noAuthorityField ? rest : { ...rest, authority: authority ?? "bounded" };
+          }) })) as unknown as Json };
         break;
       case "tb.scopes_set": {
         st.scopes = st.scopes.filter((r) => !(r.agent === input.agent && r.type === input.type && r.instanceId === input.id));
-        if (input.access !== null) st.scopes.push({ agent: String(input.agent), type: String(input.type), instanceId: String(input.id), access: String(input.access), source: "owner" });
+        // spec 0.1.50 (C283 A1): the owner's person op writes a PRIMARY row (also an unchanged level: "make primary")
+        if (input.access !== null) st.scopes.push({ agent: String(input.agent), type: String(input.type), instanceId: String(input.id), access: String(input.access), source: "owner", authority: faults.scopesSetBounded ? "bounded" : "owner" });
         out = { access: input.access as Json };
         break;
       }
@@ -746,8 +820,10 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
         else if (!faults.scopeGrantNoCeiling && above) throw new E(400, "scope_grant_invalid");
         if (faults.scopeGrantWrongLevel) lvl = sc?.access[0]?.id ?? lvl;
         if (!(slice?.agents ?? []).some((a) => a.id === input.agent)) throw new E(400, "scope_grant_invalid");
+        const prior = st.scopes.find((r) => r.agent === input.agent && r.type === "space" && r.instanceId === input.id);
         st.scopes = st.scopes.filter((r) => !(r.agent === input.agent && r.type === "space" && r.instanceId === input.id));
-        st.scopes.push({ agent: String(input.agent), type: "space", instanceId: String(input.id), access: lvl, ...(faults.scopeGrantNoSource ? {} : { source: "app", grantedByOp: "scope_grant" }) });
+        // spec 0.1.50: an app row is bounded, also over an owner row (the fault keeps the old authority)
+        st.scopes.push({ agent: String(input.agent), type: "space", instanceId: String(input.id), access: lvl, authority: faults.scopeGrantKeepsOwner ? (prior?.authority ?? "bounded") : "bounded", ...(faults.scopeGrantNoSource ? {} : { source: "app", grantedByOp: "scope_grant" }) });
         out = { ok: true };
         break;
       }
@@ -802,7 +878,21 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
         const hook = manifest.hooks?.find((h) => h.id === path.slice(13));
         if (!hook) throw new E(404, "unknown_hook");
         const b = JSON.parse(raw) as { phase: string; call: { input?: Json; caller?: unknown }; context: Json };
-        const p = verifyHookProof(String(req.headers["tb-call"] ?? ""), t, { hook: hook.id, phase: hook.phase, contextDigest: digest(b.context), ...(b.call.input !== undefined ? { inputDigest: digest(b.call.input) } : {}) }, replay);
+        // spec 0.1.50 (C268 A): the proof names the caller (`sub`) and the call (`call`) of the request; the faults skip one comparison
+        const callBody = b.call as unknown as { id?: unknown; caller?: unknown };
+        const p = verifyHookProof(
+          String(req.headers["tb-call"] ?? ""),
+          t,
+          {
+            hook: hook.id,
+            phase: hook.phase,
+            contextDigest: digest(b.context),
+            ...(b.call.input !== undefined ? { inputDigest: digest(b.call.input) } : {}),
+            ...(faults.hookIgnoresSub ? {} : { sub: hookCallerRef(callBody.caller) }),
+            ...(faults.hookIgnoresCall ? {} : { call: typeof callBody.id === "string" ? callBody.id : "" }),
+          },
+          replay,
+        );
         if (!p.ok) throw new E(401, "call_proof_invalid");
         if (b.phase !== hook.phase) throw new E(400, "input_invalid");
         if (hook.phase === "before") {
@@ -825,11 +915,35 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
         const b = JSON.parse(raw || "{}") as Record<string, Json>;
         const p = verifyBridgeOpProof(String(req.headers["tb-call"] ?? ""), t, bridgeOpBinding(bop as never, b), replay);
         if (!p.ok) throw new E(401, "call_proof_invalid");
-        if (bop === "scope_summary") return json(res, 200, (slice?.agents ?? []).map((a) => ({ agent: a.id, label: `${st.scopes.filter((r) => r.agent === a.id).length} spaces` })));
+        if (bop === "scope_summary") {
+          // spec 0.1.50: admittedOps = the static scoped agent ops this agent's OWNER rows admit (absent when none)
+          const staticScoped = manifest.operations.filter((o) => o.audience === "agent" && !o.dynamic && o.scopeType !== undefined);
+          return json(
+            res,
+            200,
+            (slice?.agents ?? []).map((a) => {
+              const admittedOps = faults.noAdmittedOps ? [] : staticScoped.filter((o) => (faults.admittedOpsAlways ? true : markable(a.id) && ownerAdmits(a.id, o.scopeType as string, o.crud))).map((o) => o.id);
+              return { agent: a.id, label: `${st.scopes.filter((r) => r.agent === a.id).length} spaces`, ...(admittedOps.length > 0 ? { admittedOps } : {}) };
+            }),
+          );
+        }
         if (bop === "catalog" || bop === "resolve") {
-          const dyn = ops.find((o) => o.id === b.op && !o.standard && o.dynamic);
+          const dyn = ops.find((o): o is Extract<OperationView, { standard: false }> => o.id === b.op && !o.standard && !!o.dynamic);
           if (!dyn) throw new E(404, "unknown_tool");
-          if (bop === "catalog") return json(res, 200, faults.emptyCatalog ? [] : DYN_ENTRIES);
+          if (bop === "catalog") {
+            if (faults.emptyCatalog) return json(res, 200, []);
+            // spec 0.1.50: `admitted: "owner"` only when body.agent's OWNER rows admit the entry's crud for the op's scope type
+            const agent = typeof b.agent === "string" ? b.agent : null;
+            const scopeType = dyn.scopeType;
+            return json(
+              res,
+              200,
+              DYN_ENTRIES.map((e) => {
+                const mark = !faults.catalogNoMarks && (faults.catalogMarksAll || (agent !== null && scopeType !== undefined && markable(agent) && ownerAdmits(agent, scopeType, e.crud)));
+                return mark ? { ...e, admitted: "owner" } : e;
+              }),
+            );
+          }
           const e = DYN_ENTRIES.find((x) => x.name === b.tool);
           if (!e && faults.emptyCatalog) return json(res, 200, null);
           if (!e) throw new E(404, "unknown_tool");
