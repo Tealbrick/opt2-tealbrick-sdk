@@ -1,7 +1,7 @@
 // Grantless bridge→app routes (SDK-API §3.2): hook calls (`verifyHookProof`) and the bridge ops catalog, resolve,
 // mark, scope-summary (`verifyBridgeOpProof`, C16 B5). No receipts, no hooks, no agent action.
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { bridgeOpBinding, digest, hookResponseProblem, mcpToolName, toolNameFits, verifyBridgeOpProof, verifyHookProof } from "@opt2-tealbrick/manifest";
+import { bridgeOpBinding, digest, hookCallerRef, hookResponseProblem, mcpToolName, toolNameFits, verifyBridgeOpProof, verifyHookProof } from "@opt2-tealbrick/manifest";
 import { BRIDGE_HEADERS, type HookRequest, type ScopeSummaryResult } from "@opt2-tealbrick/spec/bridge";
 import type { BridgeOp } from "@opt2-tealbrick/spec/credentials";
 import { type DynamicCatalogEntry, EFFECTS, HOOK_PHASES, type Operation } from "@opt2-tealbrick/spec/manifest";
@@ -55,7 +55,16 @@ export async function handleHook(rt: Runtime, req: IncomingMessage, res: ServerR
     const proof = verifyHookProof(
       header(req, BRIDGE_HEADERS.callProof) ?? "",
       trust,
-      { hook: hookId, phase: hook.phase, contextDigest: digest(r.context as Json), ...(r.call.input !== undefined ? { inputDigest: digest(r.call.input as Json) } : {}) },
+      {
+        hook: hookId,
+        phase: hook.phase,
+        contextDigest: digest(r.context as Json),
+        ...(r.call.input !== undefined ? { inputDigest: digest(r.call.input as Json) } : {}),
+        // v0.1.35 (C268 A): the proof names the caller (`sub`) and the call (`call`) the bridge signed for; the body must name the
+        // SAME caller and call id, else 401 call_proof_invalid. A body without a usable caller ref or call id binds "" and never matches.
+        sub: hookCallerRef((r.call as { caller?: unknown }).caller),
+        call: typeof r.call.id === "string" ? r.call.id : "",
+      },
       rt.replay,
     );
     if (!proof.ok) throw new TbError("call_proof_invalid", "hook call proof missing or not valid", 401);

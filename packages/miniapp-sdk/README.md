@@ -31,6 +31,10 @@ Needs `@opt2-tealbrick/manifest` 0.1.27 (`authorize()` honours `access.authority
 - **Retryable.** The flag and the product are read from the CURRENT slice at every call: the same call runs as soon as a newer slice lists the caller (or the grant carries `prd`).
 - **Unchanged.** Without the flag, or with any value other than the exact string `"verified"`, an unverified app caller runs with `ctx.caller.product` absent as before. Agent and person callers are never affected. Handler jobs (`ctx.jobs`) run no `authorize()` and are not affected.
 
+## 0.1.35 (C268 A): the hook proof must name the caller and the call of the hook request
+
+Needs `@opt2-tealbrick/manifest` 0.1.27 (`verifyHookProof` with `sub` and `call` bindings). The hook route (`POST /tb/v1/hooks/<id>`) compares the proof `sub` with the caller ref of `body.call.caller` (`tb:agt:<id>` for `type: "agent"`, `tb:ins:<id>` for `type: "app"`) and the proof `call` with `body.call.id`. A mismatch, or a body without a usable caller or call id, is 401 `call_proof_invalid` and the hook handler does not run; the one-time proof is not used up by a mismatch. Bridges that sign hook proofs as the spec describes (`sub` = the caller, `call` = the hook request id) are unaffected. The body digest part (C268 B, `bd`) is not in this release.
+
 ## Default hold view from JCS (0.1.33, G7, C275, fix)
 
 - **Fix.** The default view of a dynamic hold (`holdView` answers `null`) is the op title plus the input as indented JSON in the JCS key order (RFC 8785, the same `canonicalize()` as the input digest). Before 0.1.33 it kept the caller's key order, so a replay of the same input with its keys in another order (another client, a JSON round trip) gave another view hash: the approval was not used and the call was held again (`approval not used: the hold view changed`). Now the same input always gives the same view and hash; a changed value is still a new hold, and an approval still runs exactly once. Views the app returns from `holdView` are unchanged (the app owns their text).

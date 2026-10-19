@@ -113,11 +113,18 @@ export function verifyCallProof(
   return { ok: true, claims: c };
 }
 
-/** Hook call proof (`hook` variant): `hook`, `phase`, `ctx`, `in` (present iff `bind.inputDigest`) bound; no grant. */
+/**
+ * Hook call proof (`hook` variant): `hook`, `phase`, `ctx`, `in` (present iff `bind.inputDigest`) bound; no grant.
+ * v0.1.27 (C268 A): optional `sub` and `call`. When given they must equal the proof's `sub` (the CALLER ref of the hook request:
+ * `callerRef(call.caller)`) and its `call` claim (the id of the hook request, `call.id`): a hook request whose body names another
+ * caller or another call than the one the bridge signed for is refused `invalid_token`, so a captured proof cannot be replayed for a
+ * body that claims a different caller. Absent = not compared (callers older than 0.1.27 pass neither). A value that is given but
+ * empty or not a string never matches (fail closed).
+ */
 export function verifyHookProof(
   token: string,
   ctx: TrustContext,
-  bind: { hook: string; phase: HookPhase; contextDigest: Sha256Digest; inputDigest?: Sha256Digest },
+  bind: { hook: string; phase: HookPhase; contextDigest: Sha256Digest; inputDigest?: Sha256Digest; sub?: string; call?: string },
   replay?: ReplayGuard,
 ): VerifiedCallProof<CallProofHookClaims> | Refusal {
   const r = verifyProof<CallProofHookClaims>(token, ctx);
@@ -126,8 +133,21 @@ export function verifyHookProof(
   if (!("hook" in c)) return kindFail("not a hook proof");
   if (c.hook !== bind.hook || c.phase !== bind.phase) return kindFail("hook/phase");
   if (c.ctx !== bind.contextDigest || c.in !== bind.inputDigest) return kindFail("body digests");
+  if (bind.sub !== undefined && (typeof bind.sub !== "string" || bind.sub === "" || c.sub !== bind.sub)) return kindFail("sub");
+  if (bind.call !== undefined && (typeof bind.call !== "string" || bind.call === "" || c.call !== bind.call)) return kindFail("call");
   if (!once(replay, c, ctx.now)) return refusal(INVALID_TOKEN, "step 10: jti replay");
   return { ok: true, claims: c };
+}
+
+/**
+ * v0.1.27 (C268 A): the proof `sub` ref of a hook request's caller (`call.caller`): an agent is `tb:agt:<id>`, an app instance
+ * `tb:ins:<id>`. Anything else (a missing caller, another type, a non-string or empty id) gives `""`, which never matches a proof.
+ */
+export function hookCallerRef(caller: unknown): string {
+  if (!caller || typeof caller !== "object" || Array.isArray(caller)) return "";
+  const { type, id } = caller as { type?: unknown; id?: unknown };
+  if (typeof id !== "string" || id === "") return "";
+  return type === "agent" ? `tb:agt:${id}` : type === "app" ? `tb:ins:${id}` : "";
 }
 
 /**
