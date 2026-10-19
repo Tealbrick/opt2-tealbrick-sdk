@@ -856,7 +856,8 @@ export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: Abor
   base.caller = receiptCallerOf(caller, callerId);
   // v0.1.35 (C261): a scheduled fire, and the resume of a held one, is a call like any other: no verified product, no run
   if (callerUnverified(rt, caller)) return refuse("caller_unverified");
-  if (!opInGrantWorkflow(g.claims, op.id)) return refuse(DECISION_REASON.notInWorkflow);
+  // v0.1.36: the op's listing counts like in gate() (a `listing: "workflow"` op passes only when the grant's wf names it, in any mode)
+  if (!opInGrantWorkflow(g.claims, op.id, op.listing)) return refuse(DECISION_REASON.notInWorkflow);
 
   let access: AuthorizeInput["access"] = null;
   let viewAccess: ScopeAccessView["access"] = null;
