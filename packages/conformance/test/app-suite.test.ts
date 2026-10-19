@@ -900,3 +900,98 @@ describe("A2 hook probes from an app caller (conformance 0.1.23)", () => {
     assert.deepEqual(parseConformanceConfig({ hookCallerProduct: good }, "t").hookCallerProduct, good);
   });
 });
+
+// ── spec 0.1.50 (C283 A1), spec 0.1.49 (C261), spec 0.1.50 (C268 A), conformance 0.1.24: A20, A12.caller_unverified_refused, A2 hook sub/call ──
+describe("A20 owner-set access is primary + caller_unverified + hook proof binding (conformance 0.1.24)", () => {
+  const am = structuredClone(manifest) as Manifest;
+  const space = am.scopes?.[0];
+  if (!space) throw new Error("sample has no scope");
+  space.access.push({ id: "manage", label: "Manage", crud: ["read", "create", "update", "delete"] });
+  am.operations.push(
+    // person op that gives one agent one space (ctx.scopeGrants), like A18
+    { id: "scope_grant", title: "Start draft", description: "Person op that gives one agent access to one space.", input: { type: "object" }, output: { type: "object" }, crud: ["update"], effect: "write", idempotency: "supported", receipt: false, audience: "person" } as Manifest["operations"][number],
+    // an agent op WITHOUT a scope type that needs more than read
+    { id: "purge_all", title: "Purge", description: "Delete everything (no scope type).", input: { type: "object" }, output: { type: "object" }, crud: ["delete"], effect: "destructive", holdFamily: "destructive", idempotency: "supported", receipt: true, audience: "agent" } as Manifest["operations"][number],
+    // a dynamic op with a scope type (catalog marks)
+    { id: "item_lookup", title: "Look up items", description: "Search-mode dynamic operation.", crud: ["read"], effect: "read", scopeType: "space", idempotency: "supported", receipt: false, audience: "agent", dynamic: { mode: "search", crudCeiling: ["read", "create"], effectCeiling: "money" } } as Manifest["operations"][number],
+  );
+  const cfg = (over: Record<string, unknown> = {}) =>
+    parseConformanceConfig({ scopeGrantOp: { op: "scope_grant", input: { agent: "${tb.agentA}", id: "space-draft", access: "read_write" }, aboveCeiling: { agent: "${tb.agentA}", id: "space-draft", access: "manage" }, ...over } }, "test config");
+  const runA = (faults: MiniAppFaults = {}, config: ConformanceConfig | null = cfg()) => runApp({ manifest: am, manifestPath: path, config, start: (env) => startMiniApp(am, env, faults), deployTemplate: template, timeoutMs: 8000 });
+  const st = (r: Report, id: string) => r.checks.find((c) => c.id === id);
+  const NEW_IDS = [
+    "A12.caller_unverified_refused",
+    "A2.hook_sub_mismatch",
+    "A2.hook_call_mismatch",
+    "A20.bounded_above_grant_refused",
+    "A20.owner_row_above_grant",
+    "A20.agent_cannot_write_owner_row",
+    "A20.app_cannot_write_owner_row",
+    "A20.scope_grants_bounded",
+    "A20.unscoped_above_grant_refused",
+    "A20.paused_agent_owner_row",
+    "A20.catalog_admitted",
+    "A20.admitted_ops",
+  ];
+
+  it("a correct app passes every new row (and every other check) with a manifest that has an unscoped op, a dynamic scoped op and a scopeGrantOp", async () => {
+    const r = await runA();
+    assert.deepEqual(failing(r), [], renderMarkdown(r));
+    for (const id of NEW_IDS) assert.equal(st(r, id)?.status, "pass", `${id}: ${st(r, id)?.asserted}`);
+    assert.match(st(r, "A20.bounded_above_grant_refused")?.asserted ?? "", /403 scope_denied.*default row .*\/bounded.*200 ok/);
+    assert.match(st(r, "A20.owner_row_above_grant")?.asserted ?? "", /\/owner.*200 ok; receipt admittedBy "app_owner_row"/);
+    assert.match(st(r, "A20.scope_grants_bounded")?.asserted ?? "", /source "app" authority "bounded"/);
+    assert.match(st(r, "A20.unscoped_above_grant_refused")?.asserted ?? "", /purge_all \(no scopeType\) above the grant.*403 scope_denied/);
+    assert.match(st(r, "A20.paused_agent_owner_row")?.asserted ?? "", /active 200 ok; paused 403 paused; released 200 ok/);
+    assert.match(st(r, "A20.catalog_admitted")?.asserted ?? "", /marked dyn_read,dyn_send,dyn_pay of 3; plain agent: marked none; no agent in the body: marked none/);
+    assert.match(st(r, "A20.admitted_ops")?.asserted ?? "", /plain agent \[\] \(expected none\)/);
+  });
+
+  it("the sample (no unscoped op, no dynamic op, no scopeGrantOp) passes: the rows that need them are not_applicable", async () => {
+    const r = await run();
+    assert.deepEqual(failing(r), [], renderMarkdown(r));
+    for (const id of ["A20.scope_grants_bounded", "A20.unscoped_above_grant_refused", "A20.catalog_admitted"]) assert.equal(st(r, id)?.status, "not_applicable", id);
+    for (const id of ["A12.caller_unverified_refused", "A2.hook_sub_mismatch", "A2.hook_call_mismatch", "A20.bounded_above_grant_refused", "A20.owner_row_above_grant", "A20.agent_cannot_write_owner_row", "A20.app_cannot_write_owner_row", "A20.paused_agent_owner_row", "A20.admitted_ops"]) {
+      assert.equal(st(r, id)?.status, "pass", `${id}: ${st(r, id)?.asserted}`);
+    }
+  });
+
+  it("an SDK older than 0.1.35 gets not_applicable by version for every new row, whatever it does", async () => {
+    const r = await runA({ reportedSdkVersion: "0.1.34", scopesSetBounded: true, noCallerUnverified: true, hookIgnoresSub: true, hookIgnoresCall: true, agentSetsOwner: true });
+    for (const id of NEW_IDS) {
+      assert.equal(st(r, id)?.status, "not_applicable", `${id}: ${st(r, id)?.asserted}`);
+      assert.match(st(r, id)?.asserted ?? "", /predates 0\.1\.35.*not applicable by version/);
+    }
+    const ok = await runA({ reportedSdkVersion: "0.1.35", noCallerUnverified: true });
+    assert.equal(st(ok, "A12.caller_unverified_refused")?.status, "fail");
+  });
+
+  // each fault breaks exactly one rule; the matching row MUST fail and a row of another rule MUST still pass
+  const bad: [string, MiniAppFaults, string, RegExp | null, string][] = [
+    ["marks an owner row bounded (an owner row never goes above the grant)", { scopesSetBounded: true }, "A20.owner_row_above_grant", /no row has authority "owner"|scope_denied|expected "app_owner_row"/, "A20.bounded_above_grant_refused"],
+    ["treats every row as primary, defaults included", { allRowsPrimary: true }, "A20.bounded_above_grant_refused", /a bounded row must not admit it/, "A20.owner_row_above_grant"],
+    ["lets an agent write an owner row through tb.scopes_set", { agentSetsOwner: true }, "A20.agent_cannot_write_owner_row", /an agent must never write an owner row/, "A20.app_cannot_write_owner_row"],
+    ["lets an app (companion) caller write an owner row through tb.scopes_set", { appSetsOwner: true }, "A20.app_cannot_write_owner_row", /an app must never write an owner row/, "A20.agent_cannot_write_owner_row"],
+    ["leaves an owner row primary after ctx.scopeGrants wrote it", { scopeGrantKeepsOwner: true }, "A20.scope_grants_bounded", /authority "owner"/, "A20.owner_row_above_grant"],
+    ["lets an owner row widen an op without a scope type", { ownerWidensUnscoped: true }, "A20.unscoped_above_grant_refused", /must not widen an op that has no scope type/, "A20.owner_row_above_grant"],
+    ["lets an owner row revive a paused agent", { ownerRevivesPaused: true }, "A20.paused_agent_owner_row", /a paused agent ran on the strength of an owner row/, "A20.owner_row_above_grant"],
+    ["reports no authority member on scope rows", { noAuthorityField: true }, "A20.owner_row_above_grant", /no row has authority "owner"/, "A20.bounded_above_grant_refused"],
+    ["writes no admittedBy on the receipts of scoped calls", { noAdmittedBy: true }, "A20.owner_row_above_grant", /admittedBy undefined/, "A20.bounded_above_grant_refused"],
+    ["marks every catalog entry admitted for every agent", { catalogMarksAll: true }, "A20.catalog_admitted", null, "A20.admitted_ops"],
+    ["never marks a catalog entry admitted", { catalogNoMarks: true }, "A20.catalog_admitted", null, "A20.admitted_ops"],
+    ["names every scoped op as admitted for every agent", { admittedOpsAlways: true }, "A20.admitted_ops", /plain agent \[.+\] \(expected none\)/, "A20.catalog_admitted"],
+    ["never names an admitted op", { noAdmittedOps: true }, "A20.admitted_ops", /admittedOps \[\] \(expected \[/, "A20.catalog_admitted"],
+    ["does not refuse an unverified app caller under appCallers: verified (C261)", { noCallerUnverified: true }, "A12.caller_unverified_refused", /an app caller with no verified product ran under appCallers: verified/, "A20.owner_row_above_grant"],
+    ["does not compare the hook proof sub with the caller of the body (C268 A)", { hookIgnoresSub: true }, "A2.hook_sub_mismatch", null, "A2.hook_call_mismatch"],
+    ["does not compare the hook proof call with the call id of the body (C268 A)", { hookIgnoresCall: true }, "A2.hook_call_mismatch", null, "A2.hook_sub_mismatch"],
+  ];
+  for (const [title, faults, failId, why, passId] of bad) {
+    it(`fire-on-bad: an app that ${title} fails ${failId}`, async () => {
+      const r = await runA(faults);
+      const c = st(r, failId);
+      assert.ok(c?.status === "fail" || c?.status === "not_run", `${failId}: ${c?.status} ${c?.asserted}`);
+      if (why) assert.match(c?.asserted ?? "", why, c?.asserted);
+      assert.equal(st(r, passId)?.status, "pass", `${passId}: ${st(r, passId)?.asserted}`);
+    });
+  }
+});

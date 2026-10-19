@@ -50,6 +50,7 @@ import type { ClaimRecord, EnrolResponse, HookEntry, WorkspaceConfig } from "@op
 import { BRIDGE_OP_PATH, type BridgeOp, type Ed25519PublicJwk, type HoldVerdictClaim, type PortalKeyEntry } from "@opt2-tealbrick/spec/credentials";
 import type { DynamicCatalogEntry, Manifest, Operation } from "@opt2-tealbrick/spec/manifest";
 import type { Json, OperationView } from "@opt2-tealbrick/spec/sdk";
+import { versionBelow } from "../../src/version.ts";
 
 export interface MiniFlags {
   /** pre-C98: a required op without a _meta key is refused input_invalid, a supported one is forwarded keyless (no derived key) */
@@ -101,6 +102,10 @@ export interface MiniFlags {
   catalogWithIn?: boolean;
   /** the bridge version reported at enrolment and in acks (default "0.0.0": predates 0.2.2, so B28 is not_applicable) */
   version?: string;
+  /** spec 0.1.50 (C283 A1, bridge 0.2.4): reports the version but never lists the ops an app's scope_summary names in admittedOps (fails B5.gate_scoped_above_grant) */
+  ignoresAdmittedOps?: boolean;
+  /** pre-C283 gate: refuses a scoped op above the grant's crud with crud_exceeds_grant although it lists it (fails B5.gate_scoped_above_grant) */
+  oldGateCrud?: boolean;
   /** spec 0.1.45 (bridge < 0.2.2): hook requests carry no call.caller.product (fails B28.hook_caller_product) */
   noHookCallerProduct?: boolean;
   /** spec 0.1.45 (security): takes call.caller.product from the call input when it names one (fails B28.hook_caller_product) */
@@ -296,8 +301,22 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
       // not reachable yet
     }
   }
+  /** spec 0.1.50 (C283 A1, bridge 0.2.4): lists the static scoped ops an app's scope_summary names in `admittedOps` for an agent */
+  const adoptsAdmitted = !versionBelow(flags.version ?? "0.0.0", "0.2.4") && !flags.ignoresAdmittedOps;
+  /** `<ins>|<agent>` → op ids the app admits (read at every tools/list and tools/call) */
+  const admittedOps = new Map<string, Set<string>>();
+  const refreshAdmitted = async () => {
+    admittedOps.clear();
+    for (const a of (cfg?.apps ?? []) as (WorkspaceConfig["apps"][number] & { ownInfra?: boolean })[]) {
+      if (!routable(a)) continue;
+      const r = await bridgeOp(a.ins, "scope_summary", {});
+      if (r.status !== 200 || !Array.isArray(r.body)) continue;
+      for (const e of r.body as { agent?: unknown; admittedOps?: unknown }[]) if (typeof e.agent === "string" && Array.isArray(e.admittedOps)) admittedOps.set(`${a.ins}|${e.agent}`, new Set(e.admittedOps.map(String)));
+    }
+  };
   const ensureManifests = async () => {
     for (const a of (cfg?.apps ?? []) as (WorkspaceConfig["apps"][number] & { ownInfra?: boolean })[]) if (routable(a) && !manifests.has(a.ins)) await fetchManifest(a);
+    if (adoptsAdmitted) await refreshAdmitted();
   };
   /** bridge op call (C16 B5) with THE binding rule (bridgeOpProofClaims, C91) */
   const bridgeOp = async (ins: string, bop: BridgeOp, body: Json): Promise<{ status: number; body: unknown }> => {
@@ -360,7 +379,10 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
         }
         if (o.standard || o.dynamic) continue;
         if (o.audience !== "agent" && !flags.listPerson) continue;
-        if (!o.crud.every((x) => g.claims.crud.includes(x)) || (g.claims.mode === "bound" && !g.claims.wf.includes(o.id))) continue;
+        const crudOk = o.crud.every((x) => g.claims.crud.includes(x));
+        // spec 0.1.50: a scoped op above the grant is listed when the app's scope_summary names it in admittedOps for this agent
+        const admitted = adoptsAdmitted && o.scopeType !== undefined && (admittedOps.get(`${ins}|${agt}`)?.has(o.id) ?? false);
+        if ((!crudOk && !admitted) || (g.claims.mode === "bound" && !g.claims.wf.includes(o.id))) continue;
         out.push({ name: mcpToolName(m.id, o.id), ins, op: o.id, inputSchema: o.input });
       }
       out.push({ name: mcpToolName(m.id, "tb_hold_status"), ins, op: "tb.hold_status", inputSchema: { type: "object" } }, { name: mcpToolName(m.id, "tb_skills"), ins, op: "", inputSchema: { type: "object" } });
@@ -559,6 +581,7 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     const trust = { now: nowS(), self: `tb:ins:${t.ins}` as never, ws: c.ws, bridge: enrol.bridgeId, issuers: keySetFromPortalKeys(trusted), bridgeKeys: { keys: [] }, revokedJtis: new Set(c.revoked.jtis.map((j) => j.jti)) };
     const paused = flags.skipPause ? { workspace: false, agent: false, connection: false, instance: false } : { workspace: c.pause.workspace, agent: c.pause.agents.includes(agt as never), connection: false, instance: c.pause.instances.includes(t.ins as never) };
     const d = gate({ paused, grant: g.jws, trust, op, declaredScopeTypes: (m.scopes ?? []).map((x) => x.type) });
+    if (flags.oldGateCrud && d.decision === "pass" && !op.standard && op.scopeType !== undefined && !op.crud.every((x) => g.claims.crud.includes(x))) return toolError("crud_exceeds_grant");
     const preC111a = flags.wfOnlyBound && d.decision === "refuse" && d.reason === "not_in_workflow" && g.claims.mode !== "bound";
     if (d.decision === "refuse" && !preC111a) return toolError(d.reason);
     const context: Record<string, Json> = {};

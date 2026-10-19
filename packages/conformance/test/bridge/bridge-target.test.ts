@@ -113,6 +113,31 @@ describe("bridge target", () => {
     }
   });
 
+  it("spec 0.1.50 (C283 A1, B5.gate_scoped_above_grant): a bridge reporting 0.2.4 forwards a scoped op above the grant that the app admits; older bridges are not_applicable by version", async () => {
+    const good = await run({ version: "0.2.4" }, ["call"]);
+    const c = good.checks.find((x) => x.id === "B5.gate_scoped_above_grant");
+    assert.equal(c?.status, "pass", c?.asserted);
+    assert.match(c?.asserted ?? "", /note_delete \(crud delete, beyond the free grant's .*\) reached the app/);
+    // the example manifest has no UNSCOPED op beyond the Free grant's crud: the 0.2.4 gate passes the scoped ones, so this row is n/a there
+    assert.equal(status(good, "B5.crud_exceeds_grant"), "not_applicable", good.checks.find((x) => x.id === "B5.crud_exceeds_grant")?.asserted);
+    for (const version of ["0.0.0", "0.2.3"]) {
+      const r = await run({ version }, ["call"]);
+      const old = r.checks.find((x) => x.id === "B5.gate_scoped_above_grant");
+      assert.equal(old?.status, "not_applicable", `${version}: ${old?.asserted}`);
+      assert.match(old?.asserted ?? "", /predates 0\.2\.4.*not applicable by version/);
+      assert.equal(status(r, "B5.crud_exceeds_grant"), "pass", `${version}: the CRUD ceiling check of older bridges is unchanged`);
+    }
+  });
+
+  it("fire-on-bad (B5.gate_scoped_above_grant): a bridge that reports 0.2.4 but never lists the app's admittedOps, or still refuses a scoped op above the grant, fails", async () => {
+    for (const flags of [{ version: "0.2.4", ignoresAdmittedOps: true }, { version: "0.2.4", oldGateCrud: true }] as const) {
+      const r = await run(flags, ["call"]);
+      const c = r.checks.find((x) => x.id === "B5.gate_scoped_above_grant");
+      assert.equal(c?.status, "fail", `${JSON.stringify(flags)}: ${c?.asserted}`);
+      assert.match(c?.asserted ?? "", /named in the app's admittedOps never reached the app/);
+    }
+  });
+
   it("real SDK app behind the bridge (C91, group real_app): a correct bridge passes every B25 check against @opt2-tealbrick/miniapp-sdk", async () => {
     const r = await run({}, ["real_app"]);
     for (const id of REAL_APP_IDS) assert.equal(status(r, id), "pass", `${id}: ${r.checks.find((c) => c.id === id)?.asserted}`);

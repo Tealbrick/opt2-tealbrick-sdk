@@ -14,7 +14,11 @@ import { errorCode, type HttpAnswer, request } from "../http.ts";
 import { rpcMessages, type ToolCallResult } from "../mcp-agent.ts";
 import { bad, na, type Outcome, ok, verdict } from "../suite.ts";
 import { Mint, newId, nowS, peek, rawSign } from "../tokens.ts";
+import { versionBelow } from "../version.ts";
 import { type BridgeCtx, describeCall, httpRefused, isObj, sleep, toolRefused } from "./bridge-ctx.ts";
+
+/** First bridge release whose gate() skips the CRUD ceiling for ops with a scopeType and lists `admittedOps` (spec 0.1.50, C283 A1). */
+const GATE_SCOPED_SINCE = "0.2.4";
 
 const NOT_PUBLIC_INTERNAL: [string, string][] = [
   ["POST", "/tb/v1/claim"],
@@ -560,9 +564,13 @@ export async function callChecks(c: BridgeCtx): Promise<void> {
     return verdict(o.pass === true && calls === 0, `${o.asserted}; app requests ${calls}`);
   };
   await c.run("B5.no_grant", "agent without a grant is refused before any app call", "isError no_grant (or unknown_tool: not in its table); no app request", () => refusedNoCall("none", p, read.id, ["no_grant", "unknown_tool"]));
-  const del = c.pick(p, (o) => o.crud.some((x) => !["read", "create", "update"].includes(x)));
-  await c.run("B5.crud_exceeds_grant", "op crud beyond the grant refused", "isError crud_exceeds_grant (or unknown_tool); no app request", () =>
-    del ? refusedNoCall("free", p, del.id, ["crud_exceeds_grant", "unknown_tool"]) : bad("no op outside the free grant's crud"),
+  // spec 0.1.50 (C283 A1, bridge 0.2.4): gate() skips the CRUD ceiling for an op WITH a scopeType (the app's own owner-set access may be
+  // primary above the Portal grant, the SDK decides); an op without one keeps it. Older bridges refuse both.
+  const gateSkipsScoped = !versionBelow(enrolRequests(c)[0]?.version, GATE_SCOPED_SINCE);
+  const aboveFree = (o: Operation) => o.crud.some((x) => !["read", "create", "update"].includes(x));
+  const del = c.pick(p, (o) => aboveFree(o) && (!gateSkipsScoped || o.scopeType === undefined));
+  await c.run("B5.crud_exceeds_grant", "op crud beyond the grant refused", "isError crud_exceeds_grant (or unknown_tool); no app request; for a bridge 0.2.4 or newer only an op WITHOUT a scopeType is refused here (B5.gate_scoped_above_grant covers the scoped ones)", () =>
+    del ? refusedNoCall("free", p, del.id, ["crud_exceeds_grant", "unknown_tool"]) : gateSkipsScoped ? Promise.resolve(na("every op beyond the free grant's crud has a scopeType: bridges 0.2.4+ pass those to the app (B5.gate_scoped_above_grant)")) : Promise.resolve(bad("no op outside the free grant's crud")),
   );
   const person = p.manifest.operations.find((o) => o.audience === "person");
   await c.run("B5.audience_not_agent", "person-audience op refused on the agent path", "isError audience_not_agent (or unknown_tool); no app request", () =>
@@ -659,6 +667,34 @@ export async function callChecks(c: BridgeCtx): Promise<void> {
       await c.apply();
     }
   });
+  // spec 0.1.50 (C283 A1, bridge 0.2.4+): the app names a scoped op beyond the grant's crud in scope_summary `admittedOps` for the Free
+  // agent (its OWNER rows admit it); the bridge lists the tool and its gate() passes the call to the app, which decides (SDK authorize()).
+  const scopedAbove = c.pick(p, (o) => o.scopeType !== undefined && !o.dynamic && !inFreeCrud(o));
+  await c.run(
+    "B5.gate_scoped_above_grant",
+    "a scoped op above the grant's crud that the app admits reaches the app: gate() skips the CRUD ceiling for ops with a scopeType (C283 A1)",
+    "the app's scope_summary names a scoped agent op beyond the Free grant's crud in admittedOps for the Free agent → the tool is listed and a tools/call is forwarded to the app (the app answers; the bridge does not refuse crud_exceeds_grant); bridges older than 0.2.4 are not_applicable by version",
+    async () => {
+      const version = enrolRequests(c)[0]?.version;
+      if (versionBelow(version, GATE_SCOPED_SINCE)) return na(`bridge ${version} predates ${GATE_SCOPED_SINCE} (gate() skips the CRUD ceiling for scoped ops, spec 0.1.50): not applicable by version`);
+      if (!scopedAbove) return na("no scoped agent op beyond the free grant's crud in the primary manifest");
+      const agent = c.w.agents.free.agt;
+      const was = p.scopeSummary;
+      p.scopeSummary = () => [{ agent, label: "conformance", admittedOps: [scopedAbove.id] }];
+      try {
+        const r = await c.until(async () => {
+          const s0 = c.w.seqNow();
+          const a = await c.call("free", p, scopedAbove.id);
+          const got = lastOp(c, p, s0, scopedAbove.id);
+          return got ? { a, got } : null;
+        }, c.h.pauseLatencyMs);
+        if (!r.value) return bad(`${scopedAbove.id} (crud ${scopedAbove.crud.join("+")}, beyond the free grant's ${freeCrud.join("+")}) named in the app's admittedOps never reached the app: ${describeCall(await c.call("free", p, scopedAbove.id))}`);
+        return ok(`${scopedAbove.id} (crud ${scopedAbove.crud.join("+")}, beyond the free grant's ${freeCrud.join("+")}) reached the app after ${r.ms} ms: ${describeCall(r.value.a)}`);
+      } finally {
+        p.scopeSummary = was;
+      }
+    },
+  );
   const capOp = c.pick(p, (o) => o.effect === "write" && inFreeCrud(o) && !o.dynamic);
   await c.run("B5.free_wf_caps", "a Free grant with wf + caps: caps travel to the app and still hold (C111a)", "config grant (mode free) with wf [<write op>] + caps {write: {max: 0, per: hour}} → the call is forwarded (grant with that wf and caps) and the app's hold (caps) comes back as held", async () => {
     if (!spec) return bad("no free-agent grant spec for the primary app");

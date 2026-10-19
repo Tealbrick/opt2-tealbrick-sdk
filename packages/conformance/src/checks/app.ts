@@ -5,6 +5,7 @@
 import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { digest, type Ed25519KeyPair, HOLDS_PENDING_OP, hookResponseProblem, KNOWN_HOLD_FAMILIES, manifestDigest, normalizeTag, opaqueDigest, PUBLIC_ROUTE_PURPOSES, ulid, validateInput, withStandardOps } from "@opt2-tealbrick/manifest";
+import type { AgentId } from "@opt2-tealbrick/spec/credentials";
 import { type HoldVerdictClaim, type InstanceId, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { CrudAction, HoldFamily, Hook, Manifest, Operation, ProductId } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
@@ -114,6 +115,12 @@ const SCOPE_GRANT_SINCE = "0.1.31";
 
 /** First miniapp-sdk release with `ctx.companionCallers` (spec 0.1.48, SDK-COMPANION-CALLERS). */
 const COMPANION_CALLERS_SINCE = "0.1.32";
+
+/**
+ * First miniapp-sdk release with the owner-set primary scope row (C283 A1, spec 0.1.50), `caller_unverified` (C261, spec 0.1.49
+ * slice flag) and the hook proof `sub` / `call` binding (C268 A). Older SDKs are `not_applicable` by version.
+ */
+const OWNER_ROW_SINCE = "0.1.35";
 
 /** Runs every app-target check into `s`; returns the payload scan for the report. */
 export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<PayloadScan> {
@@ -636,6 +643,39 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
       return ok(seen.join("; "));
     });
   }
+  // spec 0.1.50 (C268 A, SDK >= 0.1.35): the hook proof names the caller (`sub`) and the call (`call`) of the request. A body that
+  // names another caller or another call than the one the bridge signed for is refused 401 call_proof_invalid (a captured proof
+  // cannot be replayed for a body that claims a different caller). The untampered call must be answered first (quiet on good).
+  for (const [id, title, tamper] of [
+    ["A2.hook_sub_mismatch", "hook proof sub differs from the caller of the request body (C268 A)", "sub"],
+    ["A2.hook_call_mismatch", "hook proof call differs from the call id of the request body (C268 A)", "call"],
+  ] as const) {
+    await s.run(
+      id,
+      title,
+      `at every declared hook, for an agent caller and an app caller: the matching call is answered 200; the same request whose proof ${tamper === "sub" ? "names another caller (sub)" : "names another call (call)"} → 401 call_proof_invalid`,
+      async () => {
+        const v = b.claims[0]?.request.sdkVersion;
+        if (versionBelow(v, OWNER_ROW_SINCE)) return na(`SDK ${v} predates ${OWNER_ROW_SINCE} (hook proof binding, C268 A): not applicable by version`);
+        if (hooks.length === 0) return na("manifest declares no hooks");
+        const seen: string[] = [];
+        for (const h of hooks) {
+          for (const [who, caller] of [
+            ["agent", undefined],
+            ["app", { type: "app", id: appCaller, product: "tbconf-caller-app" } as Record<string, Json>],
+          ] as const) {
+            const req = () => hookReq(h, caller ? { caller } : {});
+            const good = await c().callHook(h.id, h.phase, req());
+            if (good.status !== 200) return bad(`${[...seen, `${h.id} (${who}): the matching call was ${show(good)}`].join("; ")} — the baseline call must be answered`);
+            const o = refusedWith(await c().callHook(h.id, h.phase, req(), { tamper }), PROOF_CODES);
+            seen.push(`${h.id} (${who}): ${o.asserted}`);
+            if (!o.pass) return bad(seen.join("; "));
+          }
+        }
+        return ok(seen.join("; "));
+      },
+    );
+  }
   await s.run("C6.hook_proof_replay", "hook proof one-time (replay set)", "the same hook request sent twice → second refused call_proof_invalid", async () => {
     const h = hooks[0];
     if (!h) return na("manifest declares no hooks");
@@ -1059,6 +1099,48 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     const pass = isOk(same) && isHeld(again) && holdIdOf(again) !== id;
     return verdict(pass, `${op.id} (${first.how}): first ${show(first.answer)}; after approval same input${first.key ? " + key" : ""} ${show(same)}; again${first.key ? " (new key)" : ""} ${show(again)}`);
   });
+  // spec 0.1.49 (C261 = C243, SDK >= 0.1.35): with slice `appCallers: "verified"` Core mints the grant `prd` for every companion grant
+  // to this instance, so an app caller with no verified product (no `prd`, not in companionCallers) is refused 403 `caller_unverified`
+  // and nothing runs; without the flag the lenient rule holds (the call runs with `product` absent).
+  await s.run(
+    "A12.caller_unverified_refused",
+    "with the slice flag appCallers: verified an app caller without a verified product is refused 403 caller_unverified, nothing runs (C261)",
+    "slice appCallers \"verified\": the app caller (not in companionCallers, grant without prd) → 403 caller_unverified and no new run receipt; the same instance listed in companionCallers, and an unlisted one whose grant carries prd, are not refused as unverified; with the flag cleared the unverified caller is not refused caller_unverified (the earlier lenient rule)",
+    async () => {
+      const v = b.claims[0]?.request.sdkVersion;
+      if (versionBelow(v, OWNER_ROW_SINCE)) return na(`SDK ${v} predates ${OWNER_ROW_SINCE} (caller_unverified, spec 0.1.49): not applicable by version`);
+      const op = prdOp();
+      if (!op) return na("no agent op with receipt: true");
+      if (!sess) return bad("no person session");
+      const runsOf = async () => (await receiptRows()).filter((x) => isObj(x.caller) && x.caller.id === appCaller && x.status === "run").length;
+      const shownOf = (label: string, r: { answer: OpAnswer; how: string }) => `${label} ${show(r.answer)} (${r.how})`;
+      try {
+        await b.control.waitForSliceRevision(await b.control.unlistCompanionCaller(appCaller), T);
+        await b.control.waitForSliceRevision(await b.control.setAppCallers("verified"), T);
+        const runs0 = await runsOf();
+        const refused = await appCall(appCaller, op, { held: [] });
+        const runs1 = await runsOf();
+        await b.control.waitForSliceRevision(await b.control.listCompanionCaller({ product: "tbconf-verified" as ProductId, ins: appCaller, name: `Conformance caller ${ulid().slice(-6)}` }), T);
+        const listed = await appCall(appCaller, op, { held: [] });
+        await b.control.waitForSliceRevision(await b.control.unlistCompanionCaller(appCaller), T);
+        const withPrd = await appCall(appCaller, op, { held: [], prd: "tbconf-verified-prd" });
+        await b.control.waitForSliceRevision(await b.control.setAppCallers(null), T);
+        const lenient = await appCall(appCaller, op, { held: [] });
+        const shown = [shownOf("unverified", refused), shownOf("listed", listed), shownOf("prd", withPrd), shownOf("flag cleared", lenient)].join("; ");
+        if (isOk(refused.answer) || isHeld(refused.answer)) return bad(`${shown}; an app caller with no verified product ran under appCallers: verified`);
+        if (refused.answer.status !== 403 || refused.answer.code !== "caller_unverified") return bad(`${shown}; expected 403 caller_unverified for the unverified caller`);
+        if (runs1 !== runs0) return bad(`${shown}; the refused call left a run receipt (${runs0} -> ${runs1}): nothing may run`);
+        for (const [label, r] of [["listed", listed], ["with prd", withPrd]] as const) {
+          if (r.answer.code === "caller_unverified") return bad(`${shown}; a ${label} caller was refused as unverified`);
+        }
+        if (lenient.answer.code === "caller_unverified") return bad(`${shown}; with the flag cleared the unverified caller is still refused (no flag, no refusal)`);
+        if (![listed, withPrd, lenient].every((r) => isOk(r.answer) || isHeld(r.answer))) return notRun(`${shown} — a verified caller did not run; supply an inputs fixture an app caller can run`);
+        return ok(shown);
+      } finally {
+        await b.control.waitForSliceRevision(await b.control.setAppCallers(null), T);
+      }
+    },
+  );
   // v0.1.18 (C106a, Connect F21): the fake slice carries agents[].scopeRequest for agent A; whether the app reads it
   // (ctx.agentScopeRequest) is not observable black-box
   s.record("A12.scope_request", "agent A's slice scopeRequest reaches the app (C106a)", `slice agents[].scopeRequest {product: ${product}, kind: connect_inbox, createName: conformance} for agent A → ctx.agentScopeRequest(agt)`, na("black-box apps need not expose the slice scopeRequest (CONFORMANCE v0.1.18); the fake slice carries it for agent A; the SDK's ctx.agentScopeRequest is covered by SDK unit tests"));
@@ -1191,7 +1273,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     return null;
   };
   /** Full scope rows (with source / grantedByOp) from tb.agents_list, by agent|type|instance. */
-  type FullRow = { agent: string; type: string; instanceId: string; access: string; source?: string; grantedByOp?: string };
+  type FullRow = { agent: string; type: string; instanceId: string; access: string; source?: string; grantedByOp?: string; authority?: string };
   const rowKey = (r: { agent: string; type: string; instanceId: string }) => `${r.agent}|${r.type}|${r.instanceId}`;
   const rowSig = (r: FullRow | undefined) => (r ? `${r.access}|${r.source ?? "-"}|${r.grantedByOp ?? "-"}` : "none");
   const fullRows = async (): Promise<Map<string, FullRow>> => {
@@ -1203,7 +1285,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
       if (Array.isArray(v)) for (const x of v) walk(x, depth + 1);
       else if (isObj(v)) {
         if (typeof v.agent === "string" && typeof v.type === "string" && typeof v.instanceId === "string" && typeof v.access === "string") {
-          out.set(rowKey(v as FullRow), { agent: v.agent, type: v.type, instanceId: v.instanceId, access: v.access, ...(typeof v.source === "string" ? { source: v.source } : {}), ...(typeof v.grantedByOp === "string" ? { grantedByOp: v.grantedByOp } : {}) });
+          out.set(rowKey(v as FullRow), { agent: v.agent, type: v.type, instanceId: v.instanceId, access: v.access, ...(typeof v.source === "string" ? { source: v.source } : {}), ...(typeof v.grantedByOp === "string" ? { grantedByOp: v.grantedByOp } : {}), ...(typeof v.authority === "string" ? { authority: v.authority } : {}) });
         }
         for (const x of Object.values(v)) walk(x, depth + 1);
       }
@@ -1459,6 +1541,331 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
       const shown = `${op.id}: listed → output${path} ${JSON.stringify(listed.value)}; slice dropped the instance → ${isOk(dropped.a) ? JSON.stringify(dropped.value) : show(dropped.a)}`;
       if (!isOk(dropped.a)) return notRun(`${shown} (the second call was not ok)`);
       return verdict(listed.value === true && dropped.value === false, `${shown} (expected true, then false)`);
+    },
+  );
+
+  // ── A20 owner-set access is primary (C283 A1, spec 0.1.50, C277; SDK >= 0.1.35) ──────────────────────────────────────────────
+  // A row the OWNER wrote with `tb.scopes_set` (a person op) is PRIMARY for a scoped op: its access applies even above the Portal
+  // grant's crud (`authority: "owner"` in tb.agents_list). EVERY other row (manifest defaults, app rows) is `bounded`: the Portal grant
+  // stays its ceiling. An op without a scope type keeps the grant. Agent and companion calls can never write an owner row; pause and
+  // revoke still win. Each check takes a FRESH agent (its default rows are bounded and no other check sees its rows), puts the
+  // Portal grant at crud ["read"] and calls a scoped op that needs more: "above the grant". Fresh agents and their rows stay in the
+  // fake world (the world is discarded with the run).
+  const a20Gate = (): Outcome | null => {
+    const v = b.claims[0]?.request.sdkVersion;
+    return versionBelow(v, OWNER_ROW_SINCE) ? na(`SDK ${v} predates ${OWNER_ROW_SINCE} (owner-set primary scope rows, spec 0.1.50): not applicable by version`) : null;
+  };
+  const a20Op = () => byRank(agentOps.filter((o) => o.scopeType !== undefined && o.crud.some((x) => x !== "read") && o.effect !== "money"))[0];
+  const levelsOf = (type: string) => m.scopes?.find((x) => x.type === type)?.access ?? [];
+  /** the lowest level of `type` whose crud contains all of `crud` (null = none) */
+  const levelFor = (type: string, crud: readonly CrudAction[]): string | null =>
+    [...levelsOf(type)].filter((a) => crud.every((x) => a.crud.includes(x))).sort((x, y) => x.crud.length - y.crud.length)[0]?.id ?? null;
+  const A20_READ: CrudAction[] = ["read"];
+  const a20Fresh = async (label: string, op: Operation): Promise<{ id: AgentId; name: string }> => {
+    const { agent, rev } = await b.control.addAgent(`Conformance A20 ${label}`.slice(0, 80));
+    await b.control.waitForSliceRevision(rev, T);
+    // first sight (the default rows) through a call whose grant is too narrow: refused before any run
+    const taint0 = taint.length;
+    await c().callOp(op.id, inputFor(op, agent.id), { agent: agent.id, crud: A20_READ, held: [], ...(idemKey(op) ? { idempotencyKey: idemKey(op) as string } : {}) });
+    taint.length = taint0;
+    await refreshRows();
+    return agent;
+  };
+  const rowsOfAgent = async (agent: string, type: string): Promise<FullRow[]> => [...(await fullRows()).values()].filter((r) => r.agent === agent && r.type === type);
+  /** instance ids to give an agent an owner row on: its own rows, then agent A's (an `inputs` fixture may name an instance of A) */
+  const a20Instances = async (agent: string, type: string): Promise<string[]> => {
+    const all = [...(await fullRows()).values()].filter((r) => r.type === type);
+    return [...new Set([...all.filter((r) => r.agent === agent), ...all.filter((r) => r.agent === agentA.id)].map((r) => r.instanceId))].slice(0, 8);
+  };
+  /** the owner (person session) writes `level` on `instances` for `agent`; the rows it wrote, re-read */
+  const ownerSets = async (agent: string, type: string, level: string, instances: readonly string[]): Promise<{ problems: string[]; rows: FullRow[] }> => {
+    const problems: string[] = [];
+    for (const id of instances) {
+      const r = await c().personOp(sess as PersonSession, "tb.scopes_set", { agent, type, id, access: level });
+      if (r.status !== 200) problems.push(`tb.scopes_set ${id}: ${show(r)}`);
+    }
+    return { problems, rows: (await rowsOfAgent(agent, type)).filter((r) => instances.includes(r.instanceId)) };
+  };
+  const rowsShown = (rs: readonly FullRow[]) => rs.map((r) => `${r.instanceId}=${r.access}/${r.authority ?? "-"}`).join(",") || "none";
+  const a20Above = (op: Operation, agent: AgentId, key = idemKey(op)) => c().callOp(op.id, inputFor(op, agent), { agent, crud: A20_READ, held: [], ...(key ? { idempotencyKey: key } : {}) });
+
+  await s.run(
+    "A20.bounded_above_grant_refused",
+    "a bounded row (a manifest default) does not admit a call above the Portal grant: scope_denied (C283 A1)",
+    "fresh agent, default row that covers a scoped op, Portal grant crud [read] and an op that needs more → 403 scope_denied; the same input with a grant that has the op's crud runs (the row covers it)",
+    async () => {
+      const gate = a20Gate();
+      if (gate) return gate;
+      const op = a20Op();
+      if (!op) return na("no scoped agent op with a non-read crud (the Portal grant cannot be put below it)");
+      if (!sess) return bad("no person session");
+      const agent = await a20Fresh("bounded", op);
+      const own = (await rowsOfAgent(agent.id, op.scopeType as string)).filter((r) => levelsOf(r.type).find((a) => a.id === r.access)?.crud && subset(op.crud, levelCrud(r.type, r.access)));
+      if (own.length === 0) return na(`the manifest's default grants give a fresh agent no ${op.scopeType} row that covers ${op.id} (crud ${op.crud.join("+")}): nothing bounded to test`);
+      const input = inputFor(op, agent.id);
+      const above = track(await a20Above(op, agent.id));
+      if (isOk(above) || isHeld(above)) return bad(`${op.id} above the grant (grant crud [read], needs ${op.crud.join("+")}), default row ${rowsShown(own)}: ${show(above)} — a bounded row must not admit it`);
+      const control = track(await c().callOp(op.id, input, { agent: agent.id, crud: [...new Set<CrudAction>(["read", ...op.crud])], held: [], ...(idemKey(op) ? { idempotencyKey: idemKey(op) as string } : {}) }));
+      if (!(isOk(control) || isHeld(control))) return notRun(`${op.id} above the grant: ${show(above)}; with the op's crud in the grant: ${show(control)} — the default row does not run this input either, so the refusal proves nothing; supply an inputs fixture`);
+      return verdict(above.status === 403 && above.code === "scope_denied", `${op.id} above the grant: ${show(above)} (expected 403 scope_denied); default row ${rowsShown(own)} with the op's crud in the grant: ${show(control)}`);
+    },
+  );
+  await s.run(
+    "A20.owner_row_above_grant",
+    "an owner-set row (tb.scopes_set from the owner session) admits a call above the Portal grant, and the receipt says app_owner_row (C283 A1)",
+    "fresh agent; the owner saves a row of a level that covers a scoped op with tb.scopes_set → tb.agents_list shows authority owner; Portal grant crud [read], the op needs more → 200 ok (or 202 held), the receipt row has admittedBy app_owner_row",
+    async () => {
+      const gate = a20Gate();
+      if (gate) return gate;
+      const op = a20Op();
+      if (!op) return na("no scoped agent op with a non-read crud (the Portal grant cannot be put below it)");
+      if (!sess) return bad("no person session");
+      const type = op.scopeType as string;
+      const level = levelFor(type, op.crud);
+      if (!level) return na(`no ${type} access level covers ${op.id} (crud ${op.crud.join("+")})`);
+      const agent = await a20Fresh("owner", op);
+      const set = await ownerSets(agent.id, type, level, await a20Instances(agent.id, type));
+      if (set.problems.length > 0) return bad(set.problems.join("; "));
+      if (!set.rows.some((r) => r.authority === "owner")) return bad(`tb.scopes_set wrote ${rowsShown(set.rows)} but no row has authority "owner": an SDK >= ${OWNER_ROW_SINCE} marks the owner's rows primary`);
+      await refreshRows();
+      const a = track(await a20Above(op, agent.id));
+      const shown = `${op.id} above the grant (grant crud [read], needs ${op.crud.join("+")}), owner rows ${rowsShown(set.rows)}: ${show(a)}`;
+      if (a.code === "scope_denied") return bad(`${shown} — the owner-set row must be primary, also above the Portal grant`);
+      if (!(isOk(a) || isHeld(a))) return notRun(`${shown} — the call neither ran nor was held; supply an inputs fixture`);
+      const id = rowIdOf(a);
+      const row = id ? (await receiptRows()).find((x) => x.id === id) : undefined;
+      if (!row) return ok(`${shown} (no receipt row to read admittedBy)`);
+      return verdict(row.admittedBy === "app_owner_row", `${shown}; receipt admittedBy ${JSON.stringify(row.admittedBy)} (expected "app_owner_row")`);
+    },
+  );
+  await s.run(
+    "A20.agent_cannot_write_owner_row",
+    "an agent call cannot write an owner row: tb.scopes_set is refused on the agent route and no row changes (C283 A1, S1)",
+    "a fresh agent calls tb.scopes_set (grant crud with everything) at /tb/v1/ops → refused audience_not_agent; no scope row changed (level, source, authority); its call above the Portal grant is still scope_denied",
+    async () => {
+      const gate = a20Gate();
+      if (gate) return gate;
+      const op = a20Op();
+      if (!op) return na("no scoped agent op with a non-read crud");
+      if (!sess) return bad("no person session");
+      const type = op.scopeType as string;
+      const level = levelFor(type, op.crud);
+      if (!level) return na(`no ${type} access level covers ${op.id}`);
+      const agent = await a20Fresh("agent write", op);
+      const inst = (await a20Instances(agent.id, type))[0];
+      if (!inst) return na(`the fresh agent has no ${type} instance to write a row for`);
+      const before = await fullRows();
+      const a = await c().callOp("tb.scopes_set", { agent: agent.id, type, id: inst, access: level }, { agent: agent.id, crud: ["read", "create", "update", "delete"], held: [] });
+      const changed = changedRows(before, await fullRows());
+      const authorityChanged = [...(await fullRows()).values()].filter((r) => (before.get(rowKey(r))?.authority ?? "bounded") !== (r.authority ?? "bounded"));
+      const refused = refusedWith(a, ["audience_not_agent", "unknown_tool"]);
+      const above = track(await a20Above(op, agent.id));
+      const shown = `tb.scopes_set by an agent: ${refused.asserted}; rows changed ${changed.length + authorityChanged.length}; ${op.id} above the grant afterwards: ${show(above)}`;
+      if (!refused.pass || changed.length > 0 || authorityChanged.length > 0) return bad(`${shown} — an agent must never write an owner row`);
+      return verdict(!(isOk(above) || isHeld(above)), shown);
+    },
+  );
+  await s.run(
+    "A20.app_cannot_write_owner_row",
+    "an app (companion) call cannot write an owner row: tb.scopes_set is refused on the companion route and no row changes (C283 A1, S1)",
+    "the suite's app caller (grant wf [tb.scopes_set]) calls tb.scopes_set at /tb/v1/ops → refused audience_not_agent; no scope row changed (level, source, authority)",
+    async () => {
+      const gate = a20Gate();
+      if (gate) return gate;
+      const op = a20Op();
+      if (!op) return na("no scoped agent op with a non-read crud");
+      if (!sess) return bad("no person session");
+      const type = op.scopeType as string;
+      const level = levelFor(type, op.crud);
+      const inst = (await a20Instances(agentA.id, type))[0];
+      if (!level || !inst) return na(`no ${type} level covering ${op.id} / no ${type} instance to write a row for`);
+      const before = await fullRows();
+      const a = await c().callOp("tb.scopes_set", { agent: appCaller, type, id: inst, access: level }, { caller: appCaller, crud: ["read", "create", "update", "delete"], held: [], wf: ["tb.scopes_set"] });
+      const after = await fullRows();
+      const changed = changedRows(before, after);
+      const authorityChanged = [...after.values()].filter((r) => (before.get(rowKey(r))?.authority ?? "bounded") !== (r.authority ?? "bounded"));
+      const refused = refusedWith(a, ["audience_not_agent", "unknown_tool"]);
+      const shown = `tb.scopes_set by an app caller: ${refused.asserted}; rows changed ${changed.length + authorityChanged.length}`;
+      const clean = refused.pass === true && changed.length === 0 && authorityChanged.length === 0;
+      return verdict(clean, clean ? shown : `${shown} — an app must never write an owner row`);
+    },
+  );
+  await s.run(
+    "A20.scope_grants_bounded",
+    "a row the app writes with ctx.scopeGrants over an owner row is bounded afterwards (C283 A1, S2)",
+    "scopeGrantOp as the owner → a new app row; the owner saves it with tb.scopes_set → authority owner; scopeGrantOp again → the row has source app and authority bounded (not owner); every changed row is restored",
+    async () => {
+      const gate = grantGate() ?? a20Gate();
+      if (gate || !grantCfg) return gate ?? na("no scopeGrantOp");
+      const problem = grantOpProblem();
+      if (problem) return bad(problem);
+      if (!sess) return bad("no person session");
+      const before = await fullRows();
+      const input = grantInput(grantCfg.input);
+      const named = agentNamedBy(input);
+      const first = await c().personOp(sess, grantCfg.op, input);
+      const created = changedRows(before, await fullRows()).filter((x) => x.after?.source === "app" && x.after.grantedByOp === grantCfg.op && (named === undefined || x.after.agent === named));
+      let o: Outcome;
+      const row = created[0]?.after;
+      if (first.status !== 200) o = bad(`${grantCfg.op}: ${show(first)} (expected 200 ok)`);
+      else if (!row) o = notRun(`${grantCfg.op}: 200 ok but no NEW row with source "app" appeared (an identical row may already exist): use a fresh instance in scopeGrantOp.input`);
+      else {
+        const set = await c().personOp(sess, "tb.scopes_set", { agent: row.agent, type: row.type, id: row.instanceId, access: row.access });
+        const owned = (await fullRows()).get(rowKey(row));
+        if (set.status !== 200 || owned?.authority !== "owner") o = bad(`tb.scopes_set on ${rowKey(row)}: ${show(set)}, authority ${JSON.stringify(owned?.authority)} (expected "owner")`);
+        else {
+          const again = await c().personOp(sess, grantCfg.op, input);
+          const now = (await fullRows()).get(rowKey(row));
+          o =
+            again.status !== 200
+              ? bad(`${grantCfg.op} over the owner row: ${show(again)} (expected 200 ok)`)
+              : verdict(now?.source === "app" && now.authority !== "owner", `${grantCfg.op} over the owner row ${rowKey(row)}: ${show(again)}; the row is now source ${JSON.stringify(now?.source)} authority ${JSON.stringify(now?.authority)} (expected app / bounded)`);
+        }
+      }
+      return withRestore(before, o);
+    },
+  );
+  await s.run(
+    "A20.unscoped_above_grant_refused",
+    "an owner row does not widen an op without a scope type: still scope_denied above the Portal grant (C283 A1, gate + authorize)",
+    "fresh agent whose rows are ALL owner rows at the top level; Portal grant crud [read] and an agent op without scopeType that needs more → 403 scope_denied; the same call with the op's crud in the grant is not refused for scope",
+    async () => {
+      const gate = a20Gate();
+      if (gate) return gate;
+      const un = byRank(agentOps.filter((o) => o.scopeType === undefined && o.crud.some((x) => x !== "read") && o.effect !== "money"))[0];
+      if (!un) return na("no agent op without a scope type and with a non-read crud (the owner-row rule applies to scoped ops only)");
+      const scoped = a20Op();
+      if (!sess) return bad("no person session");
+      const agent = await a20Fresh("unscoped", scoped ?? un);
+      let setShown = "no scoped op: the agent has no rows";
+      if (scoped) {
+        const type = scoped.scopeType as string;
+        const top = [...levelsOf(type)].sort((x, y) => y.crud.length - x.crud.length)[0]?.id;
+        if (top) {
+          const set = await ownerSets(agent.id, type, top, (await rowsOfAgent(agent.id, type)).map((r) => r.instanceId));
+          setShown = `owner rows ${rowsShown(set.rows)}`;
+        }
+      }
+      const input = inputFor(un, agent.id);
+      const above = track(await c().callOp(un.id, input, { agent: agent.id, crud: A20_READ, held: [], ...(idemKey(un) ? { idempotencyKey: idemKey(un) as string } : {}) }));
+      const control = track(await c().callOp(un.id, input, { agent: agent.id, crud: [...new Set<CrudAction>(["read", ...un.crud])], held: [], ...(idemKey(un) ? { idempotencyKey: idemKey(un) as string } : {}) }));
+      const shown = `${un.id} (no scopeType) above the grant, ${setShown}: ${show(above)}; with the op's crud in the grant: ${show(control)}`;
+      if (isOk(above) || isHeld(above)) return bad(`${shown} — an owner row must not widen an op that has no scope type`);
+      if (control.code === "scope_denied") return notRun(`${shown} — the op is refused for scope even with its crud in the grant; supply an inputs fixture`);
+      return verdict(above.status === 403 && above.code === "scope_denied", shown);
+    },
+  );
+  await s.run(
+    "A20.paused_agent_owner_row",
+    "an owner row never revives a paused agent: the call is refused paused, and runs again once the agent is released (C283 A1, S4)",
+    "fresh agent with an owner row above the Portal grant (runs); the agent is paused in the slice → 403 paused; released → runs again",
+    async () => {
+      const gate = a20Gate();
+      if (gate) return gate;
+      const op = a20Op();
+      if (!op) return na("no scoped agent op with a non-read crud");
+      if (!sess) return bad("no person session");
+      const type = op.scopeType as string;
+      const level = levelFor(type, op.crud);
+      if (!level) return na(`no ${type} access level covers ${op.id}`);
+      const agent = await a20Fresh("paused", op);
+      const set = await ownerSets(agent.id, type, level, await a20Instances(agent.id, type));
+      if (set.problems.length > 0) return bad(set.problems.join("; "));
+      await refreshRows();
+      const running = track(await a20Above(op, agent.id));
+      if (!(isOk(running) || isHeld(running))) return notRun(`${op.id} above the grant with an owner row, agent active: ${show(running)} — the precondition (A20.owner_row_above_grant) does not hold`);
+      let paused: OpAnswer;
+      try {
+        await b.control.waitForSliceRevision(await b.control.pauseAgent(agent.id, true), T);
+        paused = await a20Above(op, agent.id);
+      } finally {
+        await b.control.waitForSliceRevision(await b.control.pauseAgent(agent.id, false), T);
+      }
+      const released = track(await a20Above(op, agent.id));
+      const shown = `active ${show(running)}; paused ${show(paused)}; released ${show(released)}`;
+      if (isOk(paused) || isHeld(paused)) return bad(`${shown} — a paused agent ran on the strength of an owner row`);
+      return verdict(paused.code === "paused" && (isOk(released) || isHeld(released)), shown);
+    },
+  );
+  // Display marks (spec 0.1.50): the bridge asks the app for the entries/ops an agent's OWNER rows admit (catalog `agent`, scope_summary).
+  /** every row of `agent` for `type` becomes an owner row at the level it already has; returns the best crud afterwards */
+  const ownerAll = async (agent: string, type: string): Promise<{ problems: string[]; best: CrudAction[]; all: boolean }> => {
+    const problems: string[] = [];
+    for (const r of await rowsOfAgent(agent, type)) {
+      const x = await c().personOp(sess as PersonSession, "tb.scopes_set", { agent, type, id: r.instanceId, access: r.access });
+      if (x.status !== 200) problems.push(`tb.scopes_set ${r.instanceId}: ${show(x)}`);
+    }
+    const now = await rowsOfAgent(agent, type);
+    const best = now.map((r) => levelCrud(type, r.access)).sort((x, y) => y.length - x.length)[0] ?? [];
+    return { problems, best, all: now.length > 0 && now.every((r) => r.authority === "owner") };
+  };
+  await s.run(
+    "A20.catalog_admitted",
+    "the catalog marks admitted: owner for the entries an agent's OWNER rows admit, for that agent only (C283 A1, spec 0.1.50)",
+    "bridge op catalog with body {op, agent}: for a fresh agent whose rows are all owner rows every entry whose crud its best row contains is marked admitted \"owner\" and the others are not; for a fresh agent with default rows only, and with no agent in the body, no entry is marked",
+    async () => {
+      const gate = a20Gate();
+      if (gate) return gate;
+      const dyn = m.operations.find((o) => o.dynamic && o.scopeType !== undefined);
+      if (!dyn) return na("no dynamic agent op with a scopeType");
+      const warm = a20Op() ?? agentOps[0];
+      if (!warm) return na("no static agent op to give a fresh agent its first-sight rows");
+      if (!sess) return bad("no person session");
+      const type = dyn.scopeType as string;
+      const owner = await a20Fresh("catalog owner", warm);
+      const plain = await a20Fresh("catalog plain", warm);
+      const set = await ownerAll(owner.id, type);
+      if (set.problems.length > 0) return bad(set.problems.join("; "));
+      if (!set.all) return na(`the fresh agent has no ${type} rows that tb.scopes_set can mark (rows: ${rowsShown(await rowsOfAgent(owner.id, type))})`);
+      const ask = async (body: Record<string, Json>) => c().callBridgeOp("catalog", body as Json, { op: dyn.id });
+      const asOwner = await ask({ op: dyn.id, agent: owner.id });
+      const asPlain = await ask({ op: dyn.id, agent: plain.id });
+      const none = await ask({ op: dyn.id });
+      for (const [label, a] of [["owner agent", asOwner], ["plain agent", asPlain], ["no agent", none]] as const) {
+        if (a.status !== 200 || !Array.isArray(a.body)) return bad(`catalog (${label}): ${show(a)} (expected 200 with an entry list)`);
+      }
+      const entries = (a: { body: unknown }) => (a.body as unknown[]).filter(isObj) as { name?: string; crud?: string[]; admitted?: unknown }[];
+      const list = entries(asOwner);
+      if (list.length === 0) return notRun("the app's catalog is empty (an engine that lists nothing without its backend): nothing to mark");
+      const wrong = list.filter((e) => ((e.crud ?? []).every((x) => (set.best as string[]).includes(x)) ? e.admitted !== "owner" : e.admitted !== undefined));
+      const marked = (a: { body: unknown }) => entries(a).filter((e) => e.admitted !== undefined).map((e) => e.name);
+      const shown = `owner agent (best crud ${set.best.join("+")}): marked ${marked(asOwner).join(",") || "none"} of ${list.length}; plain agent: marked ${marked(asPlain).join(",") || "none"}; no agent in the body: marked ${marked(none).join(",") || "none"}`;
+      if (wrong.length > 0) return bad(`${shown} — expected exactly the entries within ${set.best.join("+")} to be marked "owner": ${wrong.map((e) => `${e.name} admitted ${JSON.stringify(e.admitted)}`).join(", ")}`);
+      return verdict(marked(asPlain).length === 0 && marked(none).length === 0, shown);
+    },
+  );
+  await s.run(
+    "A20.admitted_ops",
+    "scope_summary names the static scoped ops an agent's OWNER rows admit in admittedOps, per agent (C283 A1, spec 0.1.50)",
+    "bridge op scope_summary: for a fresh agent whose rows of every scope type are owner rows, admittedOps = exactly the static scoped agent ops whose crud its best row of that type contains; a fresh agent with default rows only has none",
+    async () => {
+      const gate = a20Gate();
+      if (gate) return gate;
+      const staticScoped = agentOps.filter((o) => o.scopeType !== undefined);
+      const warm = a20Op() ?? staticScoped[0];
+      if (!warm) return na("no static scoped agent op");
+      if (!sess) return bad("no person session");
+      const owner = await a20Fresh("summary owner", warm);
+      const plain = await a20Fresh("summary plain", warm);
+      const types = [...new Set(staticScoped.map((o) => o.scopeType as string))];
+      const best = new Map<string, CrudAction[]>();
+      for (const type of types) {
+        const set = await ownerAll(owner.id, type);
+        if (set.problems.length > 0) return bad(set.problems.join("; "));
+        if (set.all) best.set(type, set.best);
+      }
+      const expected = staticScoped.filter((o) => subset(o.crud, best.get(o.scopeType as string) ?? [])).map((o) => o.id).sort();
+      if (expected.length === 0) return na("no static scoped op is covered by the fresh agent's owner rows");
+      const a = await c().callBridgeOp("scope_summary", {});
+      if (a.status !== 200 || !Array.isArray(a.body)) return bad(`scope_summary: ${show(a)} (expected 200 with a list)`);
+      const entry = (id: string) => (a.body as unknown[]).filter(isObj).find((x) => x.agent === id);
+      const got = (id: string): string[] => {
+        const ops = entry(id)?.admittedOps;
+        return Array.isArray(ops) ? ops.map(String).sort() : [];
+      };
+      const shown = `owner agent admittedOps [${got(owner.id).join(",")}] (expected [${expected.join(",")}]); plain agent [${got(plain.id).join(",")}] (expected none)`;
+      if (!entry(owner.id) || !entry(plain.id)) return bad(`${shown} — scope_summary lists no entry for a slice agent`);
+      return verdict(got(owner.id).join(",") === expected.join(",") && got(plain.id).length === 0, shown);
     },
   );
 
