@@ -203,6 +203,15 @@ export class TrustState {
     return this.companionCallers().some((x) => x.ins === ins && x.product === product);
   }
 
+  /**
+   * v0.1.35 (C261 = C243, spec 0.1.49): the verified slice says Core mints the grant `prd` claim for EVERY companion grant to this
+   * instance (`appCallers: "verified"`), so an app caller without a verified product is refused `caller_unverified`. Only the exact
+   * value "verified" counts; absent or any other value keeps the earlier lenient rule. Read from the CURRENT slice at each call.
+   */
+  appCallersVerified(): boolean {
+    return this.slice?.appCallers === "verified";
+  }
+
   /** v0.1.18 (C106a): the slice's scopeRequest of `agt`, only when it targets `product` */
   agentScopeRequest(agt: string, product: string): ScopeRequest | null {
     const r = this.slice?.agents.find((a) => a.id === agt)?.scopeRequest;
