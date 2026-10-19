@@ -1,9 +1,9 @@
 // Drives an app the way the bridge does (CORE §8, BRIDGE §8.1 step 10, §9.1): op calls with a grant + `TB-Call` op
 // proof, hook calls with a hook proof, bridge ops with a bridge-op proof, and person launch (K11) + session + person
 // ops. Every call can be tampered with in one named way so negative cases stay one line in the checks.
-import { bridgeOpProofClaims, DEFAULT_HELD_FAMILIES, type Ed25519KeyPair, ulid, withStandardOps } from "@opt2-tealbrick/manifest";
+import { bridgeOpProofClaims, DEFAULT_HELD_FAMILIES, type Ed25519KeyPair, hookCallerRef, ulid, withStandardOps } from "@opt2-tealbrick/manifest";
 import { BRIDGE_HEADERS } from "@opt2-tealbrick/spec/bridge";
-import { type AgentId, BRIDGE_OP_PATH, type BridgeOp, type FreeCaps, type HoldVerdictClaim, type InstanceId } from "@opt2-tealbrick/spec/credentials";
+import { type AgentId, BRIDGE_OP_PATH, type BridgeOp, type CallId, type FreeCaps, type HoldVerdictClaim, type InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { AgentMode, CrudAction, HoldFamily, HookPhase } from "@opt2-tealbrick/spec/manifest";
 import type { Json, OperationView } from "@opt2-tealbrick/spec/sdk";
 import type { FakeBridge } from "./fake-bridge.ts";
@@ -240,7 +240,11 @@ export class AppClient {
   ): Promise<HookAnswer> {
     const b = this.#b;
     const context = req.context ?? {};
-    const sub = `tb:agt:${b.ids.agents[0].id}`;
+    // C268 A (spec 0.1.50, SDK >= 0.1.35): the proof `sub` is the CALLER ref of the request body and the proof `call` the id of the
+    // request, exactly as the bridge signs them. A caller that is not an agent or an app instance falls back to agent A.
+    const callerRef = hookCallerRef(req.call.caller);
+    const sub = callerRef === "" ? `tb:agt:${b.ids.agents[0].id}` : callerRef;
+    const callId = typeof req.call.id === "string" ? (req.call.id as CallId) : undefined;
     const aud = `tb:ins:${b.ids.ins}` as const;
     const t = opts.tamper;
     const call = t === "input" && req.call.input !== undefined ? { ...req.call, input: tamperValue(req.call.input) } : req.call;
@@ -255,6 +259,7 @@ export class AppClient {
               sub,
               aud,
               hook: hookId,
+              ...(callId !== undefined ? { call: callId } : {}),
               phase: t === "phase" ? (phase === "before" ? "after" : "before") : phase,
               context,
               ...(req.call.input !== undefined ? { input: req.call.input } : {}),
