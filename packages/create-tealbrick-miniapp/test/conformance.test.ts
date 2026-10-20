@@ -77,7 +77,9 @@ function runPnpm(args: string[], cwd: string, limitMs: number): Promise<Ran> {
   return NPM_EXECPATH ? run(process.execPath, [NPM_EXECPATH, ...args], cwd, limitMs) : run("corepack", ["pnpm", ...args], cwd, limitMs);
 }
 
-const tail = (r: Ran) => `exit ${r.status}${r.timedOut ? " (wall-clock limit)" : ""}\n${r.stderr.slice(-1500)}\n${r.stdout.slice(-1500)}`;
+/** The last `n` lines of a child's output (the generated app writes its log to the runner's stderr). */
+const lastLines = (text: string, n = 60) => text.trimEnd().split("\n").slice(-n).join("\n").slice(-12_000);
+const tail = (r: Ran) => `exit ${r.status}${r.timedOut ? " (wall-clock limit)" : ""}\n--- stderr (last 60 lines) ---\n${lastLines(r.stderr)}\n--- stdout (last 60 lines) ---\n${lastLines(r.stdout)}`;
 const A21 = ["A21.owner_row_widened_level", "A21.owner_row_narrowed_level"] as const;
 
 describe("a generated app runs the conformance suite it pins", () => {
@@ -102,25 +104,25 @@ describe("a generated app runs the conformance suite it pins", () => {
   });
 
   /** `tb-conformance app` with the given start module, exactly as the generated `conformance` script calls it, as JSON. */
-  async function conformance(start: string): Promise<Report> {
+  async function conformance(start: string): Promise<{ report: Report; diag: string }> {
     const r = await run(join(dir, "node_modules", ".bin", "tb-conformance"), ["app", "--start", start, "--manifest", "tealbrick.manifest.json", "--test-roots", "--json"], dir, 55_000);
     assert.equal(r.timedOut, false, `tb-conformance hit the wall-clock limit: ${tail(r)}`);
     try {
-      return JSON.parse(r.stdout) as Report;
+      return { report: JSON.parse(r.stdout) as Report, diag: tail({ ...r, stdout: "" }) };
     } catch {
       assert.fail(`tb-conformance printed no JSON report: ${tail(r)}`);
     }
   }
 
   it("A21 owner_row_widened_level and owner_row_narrowed_level PASS with the generated start module", { timeout: 60_000 }, async () => {
-    const report = await conformance("conformance.start.ts");
-    assert.equal(report.sdk.reported, "0.1.36", "the app reports the SDK that makes the A21 update rows mandatory (not not_applicable by version)");
+    const { report, diag } = await conformance("conformance.start.ts");
+    assert.equal(report.sdk.reported, "0.1.36", `${diag}\nthe app reports the SDK that makes the A21 update rows mandatory (not not_applicable by version)`);
     for (const id of A21) {
       const row = report.checks.find((c) => c.id === id);
-      assert.ok(row, `${id} is in the report`);
-      assert.equal(row.status, "pass", `${id}: ${row.status} ${row.asserted}`);
+      assert.ok(row, `${id} is in the report\n${diag}`);
+      assert.equal(row.status, "pass", `${id}: ${row.status} ${row.asserted}\n${diag}`);
     }
-    assert.equal(report.ok, true, `conformance: ${JSON.stringify(report.counts)} ${report.checks.filter((c) => c.status === "fail").map((c) => `${c.id}: ${c.asserted}`).join("; ")}`);
+    assert.equal(report.ok, true, `${diag}\nconformance: ${JSON.stringify(report.counts)} ${report.checks.filter((c) => c.status === "fail").map((c) => `${c.id}: ${c.asserted}`).join("; ")}`);
     assert.equal(report.counts.fail, 0);
   });
 
@@ -132,13 +134,13 @@ describe("a generated app runs the conformance suite it pins", () => {
     assert.notEqual(without, original);
     assert.doesNotMatch(without, /applyLevelCrud\(/, "no applyLevelCrud call is left");
     writeFileSync(join(dir, "conformance.without.start.ts"), without);
-    const report = await conformance("conformance.without.start.ts");
+    const { report, diag } = await conformance("conformance.without.start.ts");
     for (const id of A21) {
       const row = report.checks.find((c) => c.id === id);
-      assert.ok(row, `${id} is in the report`);
-      assert.equal(row.status, "fail", `${id}: ${row.status} ${row.asserted}`);
+      assert.ok(row, `${id} is in the report\n${diag}`);
+      assert.equal(row.status, "fail", `${id}: ${row.status} ${row.asserted}\n${diag}`);
       assert.match(row.asserted, /did not apply TBCONF_LEVEL_CRUD/);
     }
-    assert.equal(report.ok, false);
+    assert.equal(report.ok, false, diag);
   });
 });
