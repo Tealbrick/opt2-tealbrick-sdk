@@ -1,7 +1,7 @@
 // The SDK's only client of the bridge internal API (BRIDGE §3.2, §8.3, §9.4, §10): every request after the claim
 // carries an instance assertion in `TB-Assert` (htm, htu, bd).
 import { type Ed25519KeyPair, signInstanceAssertion } from "@opt2-tealbrick/manifest";
-import { BRIDGE_HEADERS, BRIDGE_INTERNAL_PATHS, type ClaimRequest, type ClaimResponse } from "@opt2-tealbrick/spec/bridge";
+import { BRIDGE_HEADERS, BRIDGE_INTERNAL_PATHS, type ClaimRequest, type ClaimResponse, type ProofClaimCap } from "@opt2-tealbrick/spec/bridge";
 import type { BridgeId, InstanceId } from "@opt2-tealbrick/spec/credentials";
 import { TbError } from "./errors.ts";
 
@@ -11,6 +11,13 @@ export interface BridgeResponse {
 }
 
 const REQUEST_TIMEOUT_MS = 35_000;
+
+/**
+ * v0.1.36 (C268 B/C268c, spec 0.1.52): the optional call-proof claims this SDK's hook verifier accepts. The APP INSTANCE sends it in
+ * its claim and in EVERY status push (also failed mode); the bridge adds `bd` to a hook proof only for an app that lists it. A service
+ * (exec) never sends it. The route (bridge-routes.ts handleHook) hashes the raw body whenever a proof carries `bd`.
+ */
+export const SDK_PROOF_CLAIMS: readonly ProofClaimCap[] = ["bd"];
 
 async function readBody(res: Response): Promise<unknown> {
   const text = await res.text();

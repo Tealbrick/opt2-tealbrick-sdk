@@ -117,5 +117,7 @@ export const SDK_AUDIT_ACTIONS = [
   "backup.restore",
   "migration.apply",
   "claim.complete",
+  "scope.snapshot_backfill",
+  "scope.offer_accepted",
 ] as const satisfies typeof SPEC_SDK_AUDIT_ACTIONS;
 export type SdkAuditAction = (typeof SDK_AUDIT_ACTIONS)[number];

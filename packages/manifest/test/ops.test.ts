@@ -3,6 +3,7 @@ import { describe, test } from "node:test";
 import example from "@opt2-tealbrick/spec/examples/notes.manifest.json" with { type: "json" };
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import { STANDARD_OPERATIONS } from "@opt2-tealbrick/spec/manifest";
+import type { Json } from "@opt2-tealbrick/spec/sdk";
 import {
   agentOperations,
   DYNAMIC_CALL_INPUT_SCHEMA,
@@ -115,6 +116,18 @@ describe("standard op ids and schemas", () => {
     assert.equal(validateAgainstSchema(standardOpInputSchema("tb.holds_decide"), { holdId: "hld_1", decision: "maybe" }).ok, false);
     assert.equal(validateAgainstSchema(standardOpInputSchema("tb.scopes_set"), { agent: "a", type: "t", id: "i", access: null }).ok, true);
     assert.equal(validateAgainstSchema(standardOpInputSchema("tb.export"), { x: 1 }).ok, false);
+  });
+  test("tb.scopes_set input (manifest 0.1.28, C283c): acceptOffer is {adds: crud actions} and nothing else", { timeout: 60_000 }, () => {
+    const schema = standardOpInputSchema("tb.scopes_set");
+    const base = { agent: "a", type: "t", id: "i", access: "write" };
+    assert.equal(validateAgainstSchema(schema, { ...base, acceptOffer: { adds: ["delete"] } }).ok, true);
+    assert.equal(validateAgainstSchema(schema, { ...base, acceptOffer: { adds: [] } }).ok, true);
+    assert.equal(validateAgainstSchema(schema, { ...base, acceptOffer: { adds: ["read", "create", "update", "delete"] } }).ok, true);
+    for (const bad of [{ adds: ["drop"] }, {}, { adds: "delete" }, { adds: ["delete"], extra: 1 }, { adds: [1] }, "delete", null, ["delete"], { adds: Array(9).fill("read") }] as Json[]) {
+      assert.equal(validateAgainstSchema(schema, { ...base, acceptOffer: bad }).ok, false, JSON.stringify(bad));
+    }
+    assert.equal(validateAgainstSchema(schema, base).ok, true, "acceptOffer is optional");
+    assert.equal(validateAgainstSchema(schema, { ...base, acceptsOffer: { adds: [] } }).ok, false, "an unknown key is still refused");
   });
   test("dynamic call and search input schemas", () => {
     assert.equal(validateAgainstSchema(DYNAMIC_CALL_INPUT_SCHEMA, { tool: "send_mail", arguments: {} }).ok, true);

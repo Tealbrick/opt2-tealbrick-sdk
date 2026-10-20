@@ -1016,10 +1016,10 @@ async function runStandardPersonOp(rt: Runtime, principal: PersonPrincipal, id: 
       return { agents: out };
     }
     case "tb.scopes_set": {
-      const { agent, type, id: inst, access } = input as { agent: AgentId; type: string; id: string; access: string | null };
+      const { agent, type, id: inst, access, acceptOffer } = input as { agent: AgentId; type: string; id: string; access: string | null; acceptOffer?: { adds: CrudAction[] } };
       // v0.1.35 (C283 A1): THE one place an owner row is written: the verified owner session of this person route. Agent and app
       // callers never reach runStandardPersonOp (audience person); app code holding the store can only write bounded rows.
-      await scopeGrantOps(rt.scopes).ownerSet(principal, agent, type, inst, access);
+      await scopeGrantOps(rt.scopes).ownerSet(principal, agent, type, inst, access, acceptOffer);
       return { access: (await rt.scopes.access(agent, type, inst)) as unknown as Json };
     }
     case "tb.keys_status":

@@ -2,13 +2,13 @@
 // SDK-API §9) over real HTTP: a fake bridge, hook proofs and grants from the manifest package signers.
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
-import { digest, signGrant, signHookProof, ulid } from "@opt2-tealbrick/manifest";
+import { digest, sha256Bytes, signGrant, signHookProof, ulid } from "@opt2-tealbrick/manifest";
 import type { InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { HookPhase, Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { HookRequest, Json, OpContext, RunningApp } from "@opt2-tealbrick/spec/sdk";
 import { defineApp, startApp } from "../src/server/index.ts";
 import { fixtureManifest } from "./fixtures/manifest.ts";
-import { callProof, FakeBridge, freePort, grant, migrationsDir, nowS, slice, tempDir, testRoots, until, type World, world } from "./helpers.ts";
+import { callProof, FakeBridge, freePort, grant, migrationsDir, nowS, rawSign, slice, tempDir, testRoots, until, type World, world } from "./helpers.ts";
 
 const PRODUCT = "jotter";
 const PEER = "peer-app";
@@ -79,16 +79,25 @@ async function boot(): Promise<Booted> {
       redact_after: async (req) => (mode(req) === "bad" ? ({ allow: true } as never) : mode(req) === "pointer" ? { redactions: ["no-slash"] } : { output: { seen: req.phase === "after" ? (req.output as Json) : null }, redactions: ["/secret"] }),
     },
   });
-  const running = await startApp(app, {
-    TB_INSTANCE_ID: w.ins,
-    TB_ENROL_CODE: "tbe_test",
-    TB_BRIDGE_URL: bridgeUrl,
-    TB_PORTAL_KEYS: JSON.stringify({ keys: [w.portal.publicJwk] }),
-    TB_DATA_DIR: t.dir,
-    TB_DATA_EPHEMERAL: "1",
-    TB_LOG_LEVEL: "error",
-  }, testRoots(w));
-  await until(async () => running.status() === "ok");
+  // a boot that fails must not leave the bridge or the app listening: an open handle would keep the test process alive for ever
+  let running: RunningApp | undefined;
+  try {
+    running = await startApp(app, {
+      TB_INSTANCE_ID: w.ins,
+      TB_ENROL_CODE: "tbe_test",
+      TB_BRIDGE_URL: bridgeUrl,
+      TB_PORTAL_KEYS: JSON.stringify({ keys: [w.portal.publicJwk] }),
+      TB_DATA_DIR: t.dir,
+      TB_DATA_EPHEMERAL: "1",
+      TB_LOG_LEVEL: "error",
+    }, testRoots(w));
+    await until(async () => running?.status() === "ok");
+  } catch (e) {
+    await running?.stop().catch(() => {});
+    await bridge.stop();
+    t.cleanup();
+    throw e;
+  }
   return {
     w,
     bridge,
@@ -106,13 +115,15 @@ async function boot(): Promise<Booted> {
 /**
  * `caller` = the `call.caller` of the request body (default: agent A); `sub` = the proof `sub` (default: the ref of `caller`);
  * `proofCall` = the proof `call` claim (default: the request's `call.id`); `callId` = the request's `call.id`.
+ * v0.1.36 (C268 B): `withBd` puts `bd` = sha256 of the exact body text into the proof; `bd` = an explicit claim value (e.g. malformed);
+ * `tamper` changes the body TEXT after the proof was signed (the bytes sent differ from the bytes the proof covers).
  */
 async function callHook(
   b: Booted,
   hook: string,
   phase: HookPhase,
   input: Json,
-  opts: { proof?: string | null; sentInput?: Json; output?: Json; caller?: Record<string, Json> | null; sub?: string; proofCall?: string; callId?: string } = {},
+  opts: { proof?: string | null; sentInput?: Json; output?: Json; caller?: Record<string, Json> | null; sub?: string; proofCall?: string; callId?: string; withBd?: boolean; bd?: unknown; tamper?: (text: string) => string } = {},
 ) {
   const context = { "other-app.flag": true };
   const callerBody = opts.caller === undefined ? { type: "agent", id: b.w.agents.a, mode: "free" } : opts.caller;
@@ -123,6 +134,8 @@ async function callHook(
     target: { instance: `ins_${ulid()}`, product: "other-app", op: "other_op", crud: ["create"], effect: "write" },
     input: opts.sentInput ?? input,
   };
+  const text = JSON.stringify({ phase, call, context, ...(phase === "after" ? { output: opts.output ?? { secret: "s", keep: 1 } } : {}) });
+  const bd = opts.bd !== undefined ? opts.bd : opts.withBd ? sha256Bytes(new TextEncoder().encode(text)) : undefined;
   const proof =
     opts.proof === undefined
       ? await signHookProof(
@@ -136,6 +149,7 @@ async function callHook(
             phase,
             ctx: digest(context),
             in: digest(input),
+            ...(bd !== undefined ? { bd: bd as never } : {}),
           },
           b.w.bridgeKey,
         )
@@ -143,7 +157,7 @@ async function callHook(
   const res = await fetch(`${b.base}/tb/v1/hooks/${hook}`, {
     method: "POST",
     headers: { "content-type": "application/json", ...(proof ? { "tb-call": proof } : {}) },
-    body: JSON.stringify({ phase, call, context, ...(phase === "after" ? { output: opts.output ?? { secret: "s", keep: 1 } } : {}) }),
+    body: opts.tamper ? opts.tamper(text) : text,
   });
   return { status: res.status, body: (await res.json()) as Record<string, any> };
 }
@@ -273,6 +287,120 @@ describe("hook proof binds the caller and the call (C268 A, v0.1.35)", () => {
     assert.equal(await send({ type: "agent", id: other, mode: "free" }), 401);
     assert.equal(await send({ type: "agent", id: b.w.agents.a, mode: "free" }), 200);
     assert.equal(await send({ type: "agent", id: b.w.agents.a, mode: "free" }), 401, "one-time");
+  });
+});
+
+describe("hook proof binds the whole request body (C268 B, v0.1.36)", { timeout: 60_000 }, () => {
+  let b: Booted;
+  before(async () => {
+    b = await boot();
+  });
+  after(async () => b.cleanup());
+
+  const refused = (a: { status: number; body: Record<string, any> }, why: string) => {
+    assert.equal(a.status, 401, `${why}: ${JSON.stringify(a.body)}`);
+    assert.equal(a.body.error.code, "call_proof_invalid", why);
+  };
+  // fields OUTSIDE ctx (`context`) and `in` (`call.input`) that no other proof claim binds (call.id and call.caller are bound by `call`/`sub`, C268 A)
+  const flipWs = (text: string) => text.replace(/"ws":"[^"]+"/, '"ws":"ws_tampered"');
+  const flipTarget = (text: string) => text.replace('"op":"other_op"', '"op":"another_op"');
+
+  test("quiet on good: a proof with bd = sha256 of the exact body is answered in every phase; so is a proof without bd", { timeout: 60_000 }, async () => {
+    assert.equal((await callHook(b, "check_before", "before", { mode: "ok" }, { withBd: true })).status, 200);
+    assert.deepEqual((await callHook(b, "tag_context", "context", {}, { withBd: true })).body, { add: { [`${PRODUCT}.caller`]: b.w.agents.a } });
+    const after = await callHook(b, "redact_after", "after", {}, { withBd: true, output: { secret: "x" } });
+    assert.equal(after.status, 200, JSON.stringify(after.body));
+    assert.equal((await callHook(b, "check_before", "before", { mode: "ok" })).status, 200, "no bd: not compared (a later slice flag makes it required)");
+  });
+
+  test("a field outside ctx and in changed after signing → 401 call_proof_invalid with bd; the same change without bd is answered 200 (fires on bad)", { timeout: 60_000 }, async () => {
+    // control: without bd nothing else binds ws or the target op, so only bd stops the change
+    assert.equal((await callHook(b, "check_before", "before", { mode: "ok" }, { tamper: flipWs })).status, 200, "without bd the change goes through");
+    assert.equal((await callHook(b, "check_before", "before", { mode: "ok" }, { tamper: flipTarget })).status, 200, "without bd the change goes through");
+    refused(await callHook(b, "check_before", "before", { mode: "ok" }, { withBd: true, tamper: flipWs }), "call.ws changed");
+    refused(await callHook(b, "check_before", "before", { mode: "ok" }, { withBd: true, tamper: flipTarget }), "call.target.op changed");
+    refused(await callHook(b, "tag_context", "context", {}, { withBd: true, tamper: flipWs }), "context phase");
+    refused(await callHook(b, "redact_after", "after", {}, { withBd: true, tamper: flipTarget }), "after phase");
+  });
+
+  test("the digest covers the bytes, not the parsed object: the same JSON with other whitespace or key order is refused", { timeout: 60_000 }, async () => {
+    refused(await callHook(b, "check_before", "before", { mode: "ok" }, { withBd: true, tamper: (t) => `${t}\n` }), "trailing newline");
+    refused(await callHook(b, "check_before", "before", { mode: "ok" }, { withBd: true, tamper: (t) => JSON.stringify(JSON.parse(t), null, 2) }), "re-serialised with indentation");
+    refused(await callHook(b, "check_before", "before", { mode: "ok" }, { withBd: true, tamper: (t) => JSON.stringify(Object.fromEntries(Object.entries(JSON.parse(t)).reverse())) }), "top-level keys reordered");
+  });
+
+  test("a bd that is the digest of another body is refused", { timeout: 60_000 }, async () => {
+    const other = sha256Bytes(new TextEncoder().encode("{}"));
+    refused(await callHook(b, "check_before", "before", { mode: "ok" }, { bd: other }), "bd of another body");
+  });
+
+  test("a malformed bd is refused (shape)", { timeout: 60_000 }, async () => {
+    for (const bad of ["", "sha256:abc", `sha256:${"A".repeat(64)}`, `md5:${"a".repeat(32)}`, 7, null, ["x"]]) {
+      const context = { "other-app.flag": true };
+      const callId = `call_${ulid()}`;
+      const call = { id: callId, ws: b.w.ws, caller: { type: "agent", id: b.w.agents.a, mode: "free" }, target: { instance: `ins_${ulid()}`, product: "other-app", op: "other_op", crud: ["create"], effect: "write" }, input: { mode: "ok" } };
+      const now = nowS();
+      const proof = await rawSign(
+        { alg: "EdDSA", typ: "tb-call+jwt", kid: b.w.bridgeKey.kid },
+        { iss: `tb:brg:${b.w.brg}`, sub: `tb:agt:${b.w.agents.a}`, aud: `tb:ins:${b.w.ins}`, iat: now, exp: now + 60, jti: ulid(), call: callId, hook: "check_before", phase: "before", ctx: digest(context), in: digest(call.input), bd: bad },
+        b.w.bridgeKey,
+      );
+      refused(await callHook(b, "check_before", "before", { mode: "ok" }, { proof }), `malformed bd ${JSON.stringify(bad)}`);
+    }
+  });
+
+  test("a proof for another variant never opens a hook: bd on an op proof or a bridge-op proof is refused at its own route and at the hook route", { timeout: 60_000 }, async () => {
+    const bd = sha256Bytes(new TextEncoder().encode("{}"));
+    const now = nowS();
+    // bd on an op proof, at the op route
+    const g = await grant(b.w, b.w.agents.a);
+    const gjti = (JSON.parse(Buffer.from(g.split(".")[1] as string, "base64url").toString("utf8")) as { jti: string }).jti;
+    const opProof = await rawSign(
+      { alg: "EdDSA", typ: "tb-call+jwt", kid: b.w.bridgeKey.kid },
+      { iss: `tb:brg:${b.w.brg}`, sub: `tb:agt:${b.w.agents.a}`, aud: `tb:ins:${b.w.ins}`, iat: now, exp: now + 60, jti: ulid(), call: `call_${ulid()}`, gjti, op: "note_get", in: digest({ id: "n1" }), ctx: digest({}), bd },
+      b.w.bridgeKey,
+    );
+    const opRes = await fetch(`${b.base}/tb/v1/ops/note_get`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${g}`, "tb-call": opProof }, body: JSON.stringify({ input: { id: "n1" }, context: {} }) });
+    assert.equal(opRes.status, 401, "bd on an op proof");
+    assert.equal(((await opRes.json()) as Record<string, any>).error.code, "call_proof_invalid");
+    // bd on a bridge-op proof, at the bridge-op route
+    const bopProof = await rawSign(
+      { alg: "EdDSA", typ: "tb-call+jwt", kid: b.w.bridgeKey.kid },
+      { iss: `tb:brg:${b.w.brg}`, sub: `tb:brg:${b.w.brg}`, aud: `tb:ins:${b.w.ins}`, iat: now, exp: now + 60, jti: ulid(), call: `call_${ulid()}`, bop: "scope_summary", bd },
+      b.w.bridgeKey,
+    );
+    const bopRes = await fetch(`${b.base}/tb/v1/bridge/scope-summary`, { method: "POST", headers: { "content-type": "application/json", "tb-call": bopProof }, body: "{}" });
+    assert.equal(bopRes.status, 401, "bd on a bridge-op proof");
+    assert.equal(((await bopRes.json()) as Record<string, any>).error.code, "call_proof_invalid");
+    // control: the same bridge-op proof without bd is answered
+    const okProof = await rawSign(
+      { alg: "EdDSA", typ: "tb-call+jwt", kid: b.w.bridgeKey.kid },
+      { iss: `tb:brg:${b.w.brg}`, sub: `tb:brg:${b.w.brg}`, aud: `tb:ins:${b.w.ins}`, iat: now, exp: now + 60, jti: ulid(), call: `call_${ulid()}`, bop: "scope_summary" },
+      b.w.bridgeKey,
+    );
+    assert.equal((await fetch(`${b.base}/tb/v1/bridge/scope-summary`, { method: "POST", headers: { "content-type": "application/json", "tb-call": okProof }, body: "{}" })).status, 200, "quiet on good: the control proof is accepted");
+  });
+
+  test("an empty body and a non-JSON body are refused 400 input_invalid before anything else runs; the handler gets the parsed bytes", { timeout: 60_000 }, async () => {
+    for (const [why, body] of [["empty", ""], ["not JSON", "{nope"], ["truncated", '{"phase":"before"']] as const) {
+      const res = await fetch(`${b.base}/tb/v1/hooks/check_before`, { method: "POST", headers: { "content-type": "application/json", "tb-call": "x.y.z" }, body });
+      assert.equal(res.status, 400, why);
+      assert.equal(((await res.json()) as Record<string, any>).error.code, "input_invalid", why);
+    }
+    // also for a hook the app does not declare (the body is read and parsed first), and with a body that is JSON but not an object
+    const undeclared = await fetch(`${b.base}/tb/v1/hooks/nope_hook`, { method: "POST", headers: { "content-type": "application/json" }, body: "" });
+    assert.equal(undeclared.status, 400);
+    const arr = await fetch(`${b.base}/tb/v1/hooks/check_before`, { method: "POST", headers: { "content-type": "application/json", "tb-call": "x.y.z" }, body: "[]" });
+    assert.equal(arr.status, 400);
+    // quiet on good: the parsed object reaches the handler (tag_context echoes the caller id of the body the digest covered)
+    assert.deepEqual((await callHook(b, "tag_context", "context", {}, { withBd: true })).body, { add: { [`${PRODUCT}.caller`]: b.w.agents.a } });
+  });
+
+  test("the claim and every status push declare proofClaims [\"bd\"]", { timeout: 60_000 }, async () => {
+    assert.ok(b.bridge.claimBodies.length >= 1, "the app claimed");
+    for (const c of b.bridge.claimBodies) assert.deepEqual(c.proofClaims, ["bd"], "claim");
+    assert.ok(b.bridge.statuses.length >= 1, "the app pushed a status");
+    for (const s of b.bridge.statuses) assert.deepEqual(s.proofClaims, ["bd"], "status");
   });
 });
 

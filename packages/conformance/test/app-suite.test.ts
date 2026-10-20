@@ -995,3 +995,74 @@ describe("A20 owner-set access is primary + caller_unverified + hook proof bindi
     });
   }
 });
+
+// ── spec 0.1.52 (C283b/C283c, C268 B/C268c), conformance 0.1.25: A21 owner rows keep their CRUD, hook proof bd, proofClaims ──────────
+describe("A21 owner rows keep their CRUD + hook proof bd + proofClaims (conformance 0.1.25)", { timeout: 300_000 }, () => {
+  const am = structuredClone(manifest) as Manifest;
+  const space = am.scopes?.[0];
+  if (!space) throw new Error("sample has no scope");
+  space.access.push({ id: "manage", label: "Manage", crud: ["read", "create", "update", "delete"] });
+  const runB = (faults: MiniAppFaults = {}) => runApp({ manifest: am, manifestPath: path, config: null, start: (env) => startMiniApp(am, env, faults), deployTemplate: template, timeoutMs: 8000 });
+  const st = (r: Report, id: string) => r.checks.find((c) => c.id === id);
+  const UPDATE_IDS = ["A21.owner_row_widened_level", "A21.owner_row_narrowed_level"];
+  const BD_IDS = ["A2.proof_claims_declared", "A2.hook_bd_binds_body", "A2.hook_bd_malformed", "A2.proof_bd_other_variants"];
+  const NEW_IDS = [...UPDATE_IDS, "A21.accept_offer_rules", ...BD_IDS];
+
+  it("a correct app passes every new row; the row text names what was refused and accepted", { timeout: 120_000 }, async () => {
+    const r = await runB();
+    assert.deepEqual(failing(r), [], renderMarkdown(r));
+    for (const id of NEW_IDS) assert.equal(st(r, id)?.status, "pass", `${id}: ${st(r, id)?.asserted}`);
+    assert.equal(st(r, "A21.snapshot_backfill")?.status, "not_applicable");
+    assert.match(st(r, "A21.owner_row_widened_level")?.asserted ?? "", /before 403 scope_denied.*after the update 403 scope_denied.*offer \[create\].*plain re-set and wrong adds changed nothing; accepted with \[.*\] -> 200 ok/);
+    assert.match(st(r, "A21.owner_row_narrowed_level")?.asserted ?? "", /before 200 ok.*after the update 403 scope_denied.*offer none/);
+    assert.match(st(r, "A21.accept_offer_rules")?.asserted ?? "", /409 offer_changed.*400 input_invalid.*400 input_invalid/);
+    assert.match(st(r, "A2.proof_claims_declared")?.asserted ?? "", /claim \["bd"\]; (\d+) of \1 status pushes carry \["bd"\]/);
+    assert.match(st(r, "A2.hook_bd_binds_body")?.asserted ?? "", /\(agent\): 401 call_proof_invalid.*\(app\): 401 call_proof_invalid/);
+  });
+
+  it("an SDK older than 0.1.36 gets not_applicable by version for every new row, whatever it does", async () => {
+    const r = await runB({ reportedSdkVersion: "0.1.35", ownerRowFollowsLevel: true, hookIgnoresBd: true, noProofClaims: true, acceptNullDeletes: true });
+    for (const id of NEW_IDS) {
+      assert.equal(st(r, id)?.status, "not_applicable", `${id}: ${st(r, id)?.asserted}`);
+      assert.match(st(r, id)?.asserted ?? "", /predates 0\.1\.36.*not applicable by version/);
+    }
+    const ok = await runB({ reportedSdkVersion: "0.1.36", noProofClaims: true });
+    assert.equal(st(ok, "A2.proof_claims_declared")?.status, "fail");
+  });
+
+  it("a start module that does not apply TBCONF_LEVEL_CRUD: the update rows are not_applicable (never a silent pass), the others still run", async () => {
+    const r = await runB({ ignoresLevelCrud: true });
+    for (const id of UPDATE_IDS) {
+      assert.equal(st(r, id)?.status, "not_applicable", `${id}: ${st(r, id)?.asserted}`);
+      assert.match(st(r, id)?.asserted ?? "", /did not apply TBCONF_LEVEL_CRUD/);
+    }
+    for (const id of ["A21.accept_offer_rules", ...BD_IDS]) assert.equal(st(r, id)?.status, "pass", `${id}: ${st(r, id)?.asserted}`);
+    assert.deepEqual(failing(r), [], renderMarkdown(r));
+  });
+
+  // each fault breaks exactly one rule; the matching row MUST fail and a row of another rule MUST still pass
+  const bad: [string, MiniAppFaults, string, RegExp | null, string][] = [
+    ["gives an owner row the level's crud NOW (the 0.1.35 rule: no snapshot)", { ownerRowFollowsLevel: true }, "A21.owner_row_widened_level", /must not widen the owner row/, "A21.owner_row_narrowed_level"],
+    ["lets a plain re-set of the same level accept the offer", { plainResetAccepts: true }, "A21.owner_row_widened_level", /plain re-set of .*must not accept the offer/, "A21.accept_offer_rules"],
+    ["does not compare acceptOffer.adds with the current offer", { acceptNoCompare: true }, "A21.owner_row_widened_level", /expected 409 offer_changed/, "A21.owner_row_narrowed_level"],
+    ["lists no offer on a widened level", { noOffer: true }, "A21.owner_row_widened_level", /offer\.adds/, "A21.owner_row_narrowed_level"],
+    ["lists no effective crud on the rows", { noEffectiveCrud: true }, "A21.owner_row_widened_level", /must list crud/, "A21.accept_offer_rules"],
+    ["keeps the snapshot only (no intersection with the narrowed level)", { ownerRowSnapshotOnly: true }, "A21.owner_row_narrowed_level", /must narrow the owner row at once/, "A21.owner_row_widened_level"],
+    ["accepts any adds when there is no offer", { acceptPhantomOk: true }, "A21.accept_offer_rules", /accepting an offer that does not exist must be refused/, "A21.owner_row_widened_level"],
+    ["deletes the row on acceptOffer with access null", { acceptNullDeletes: true }, "A21.accept_offer_rules", /DELETED|expected 400 input_invalid/, "A21.owner_row_widened_level"],
+    ["accepts an offer for another level than the row's", { acceptOtherLevelOk: true }, "A21.accept_offer_rules", /another level|expected 400 input_invalid/, "A21.owner_row_widened_level"],
+    ["declares no proofClaims", { noProofClaims: true }, "A2.proof_claims_declared", /claim null/, "A2.hook_bd_binds_body"],
+    ["does not compare a hook proof's bd with the body", { hookIgnoresBd: true }, "A2.hook_bd_binds_body", null, "A2.hook_bd_malformed"],
+    ["does not verify a proof that carries bd", { bdProofsUnverified: true }, "A2.hook_bd_malformed", null, "A2.proof_claims_declared"],
+    ["does not verify an op or bridge-op proof that carries bd", { bdProofsUnverified: true }, "A2.proof_bd_other_variants", null, "A2.proof_claims_declared"],
+  ];
+  for (const [title, faults, failId, why, passId] of bad) {
+    it(`fire-on-bad: an app that ${title} fails ${failId}`, { timeout: 120_000 }, async () => {
+      const r = await runB(faults);
+      const c = st(r, failId);
+      assert.ok(c?.status === "fail" || c?.status === "not_run", `${failId}: ${c?.status} ${c?.asserted}`);
+      if (why) assert.match(c?.asserted ?? "", why, c?.asserted);
+      assert.equal(st(r, passId)?.status, "pass", `${passId}: ${st(r, passId)?.asserted}`);
+    });
+  }
+});

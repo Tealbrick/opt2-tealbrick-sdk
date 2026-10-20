@@ -1,7 +1,7 @@
 // Drives an app the way the bridge does (CORE §8, BRIDGE §8.1 step 10, §9.1): op calls with a grant + `TB-Call` op
 // proof, hook calls with a hook proof, bridge ops with a bridge-op proof, and person launch (K11) + session + person
 // ops. Every call can be tampered with in one named way so negative cases stay one line in the checks.
-import { bridgeOpProofClaims, DEFAULT_HELD_FAMILIES, type Ed25519KeyPair, hookCallerRef, ulid, withStandardOps } from "@opt2-tealbrick/manifest";
+import { bridgeOpProofClaims, DEFAULT_HELD_FAMILIES, type Ed25519KeyPair, hookCallerRef, sha256Bytes, ulid, withStandardOps } from "@opt2-tealbrick/manifest";
 import { BRIDGE_HEADERS } from "@opt2-tealbrick/spec/bridge";
 import { type AgentId, BRIDGE_OP_PATH, type BridgeOp, type CallId, type FreeCaps, type HoldVerdictClaim, type InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { AgentMode, CrudAction, HoldFamily, HookPhase } from "@opt2-tealbrick/spec/manifest";
@@ -57,6 +57,8 @@ export interface CallOptions {
   hv?: HoldVerdictClaim;
   /** spec 0.1.46 (GRANT-PRD): the companion grant (`caller` only) carries `prd` = this product, as Portal Core's grants do */
   prd?: string;
+  /** spec 0.1.52 (C268 B): the op proof is re-signed with these extra claims (a forged token: `bd` is only valid on a hook proof) */
+  extraProofClaims?: Record<string, unknown>;
 }
 
 export interface SentRequest {
@@ -75,6 +77,13 @@ export interface OpAnswer extends HttpAnswer {
 
 /** One named deviation from a correct hook call (negative cases); `input` changes `call.input` after signing. */
 export type HookTamper = "no_proof" | "proof_key" | "phase" | "context" | "input" | "op_proof" | "sub" | "call";
+
+/**
+ * Spec 0.1.52 (C268 B): how a hook proof carries `bd`. `match`: sha256 of the exact bytes sent. `body_changed`: the proof's `bd`
+ * covers the body as built, but the bytes SENT differ in a field outside `ctx` and `in` (`call.ws`; not bound by any other claim).
+ * `{ forged }`: the proof carries this value as `bd` (a forged token, for malformed digests).
+ */
+export type HookBd = "match" | "body_changed" | { forged: unknown };
 
 export interface HookAnswer extends HttpAnswer {
   code: string | null;
@@ -215,6 +224,7 @@ export class AppClient {
         proof = await rawSign({ alg: "EdDSA", typ: "tb-call+jwt", kid: b.bridgeKeys[0].kid }, c, b.bridgeKeys[0]);
       }
     }
+    if (opts.extraProofClaims && proof !== undefined) proof = await m.withExtraClaim(proof, opts.extraProofClaims);
     const headers: Record<string, string> = { "content-type": "application/json", ...(opts.headers ?? {}) };
     const authorization = opts.authorization ?? (t === "no_grant" ? undefined : `Bearer ${grant}`);
     if (authorization !== undefined) headers.authorization = authorization;
@@ -236,7 +246,7 @@ export class AppClient {
     hookId: string,
     phase: HookPhase,
     req: { call: Record<string, Json>; context?: Record<string, Json>; output?: Json },
-    opts: { tamper?: HookTamper } = {},
+    opts: { tamper?: HookTamper; bd?: HookBd } = {},
   ): Promise<HookAnswer> {
     const b = this.#b;
     const context = req.context ?? {};
@@ -254,6 +264,11 @@ export class AppClient {
     const body: Record<string, Json> = { phase, call, context: t === "context" ? { ...context, "tb-conformance.tampered": true } : context };
     if (phase === "after") body.output = req.output ?? {};
     const headers: Record<string, string> = { "content-type": "application/json" };
+    const raw = JSON.stringify(body);
+    // C268 B: `bd` covers the bytes of `raw`; `body_changed` sends other bytes (one field outside ctx and in changed)
+    const bdOpt = opts.bd;
+    const bd = bdOpt === "match" || bdOpt === "body_changed" ? sha256Bytes(new TextEncoder().encode(raw)) : undefined;
+    const sent = bdOpt === "body_changed" ? JSON.stringify({ ...body, call: { ...call, ws: `${String(call.ws ?? "ws")}-changed` } }) : raw;
     if (t !== "no_proof") {
       headers[BRIDGE_HEADERS.callProof.toLowerCase()] =
         t === "op_proof"
@@ -267,19 +282,20 @@ export class AppClient {
               context,
               ...(req.call.input !== undefined ? { input: req.call.input } : {}),
               ...(t === "proof_key" ? { key: b.stranger } : {}),
+              ...(bd !== undefined ? { bd } : {}),
             });
+      if (isObj(bdOpt) && "forged" in bdOpt) headers[BRIDGE_HEADERS.callProof.toLowerCase()] = await b.mint.withExtraClaim(headers[BRIDGE_HEADERS.callProof.toLowerCase()] as string, { bd: bdOpt.forged });
     }
     const path = `/tb/v1/hooks/${encodeURIComponent(hookId)}`;
-    const raw = JSON.stringify(body);
-    const a = await this.#send("POST", path, headers, raw);
-    return { ...a, code: errorCode(a.body), sent: { path, headers, body: raw } };
+    const a = await this.#send("POST", path, headers, sent);
+    return { ...a, code: errorCode(a.body), sent: { path, headers, body: sent } };
   }
 
   // ── bridge ops (C16 B5) ─────────────────────────────────────────────────────
   async callBridgeOp(
     bop: BridgeOp,
     body: Json,
-    opts: { op?: string; tamper?: "no_proof" | "op_proof" | "hook_proof" | "bop_mismatch" | "body" | "proof_key" } = {},
+    opts: { op?: string; tamper?: "no_proof" | "op_proof" | "hook_proof" | "bop_mismatch" | "body" | "proof_key"; /** spec 0.1.52: the proof carries this extra `bd` claim (forged; a bridge-op proof never carries one) */ extraClaims?: Record<string, unknown> } = {},
   ): Promise<HttpAnswer & { code: string | null }> {
     const b = this.#b;
     const aud = `tb:ins:${b.ids.ins}` as const;
@@ -302,7 +318,7 @@ export class AppClient {
           ...(t === "proof_key" ? { key: b.stranger } : {}),
         });
       }
-      headers[BRIDGE_HEADERS.callProof.toLowerCase()] = proof;
+      headers[BRIDGE_HEADERS.callProof.toLowerCase()] = opts.extraClaims ? await b.mint.withExtraClaim(proof, opts.extraClaims) : proof;
     }
     const a = await this.#send("POST", `/tb/v1/bridge/${BRIDGE_OP_PATH[bop]}`, headers, JSON.stringify(body));
     return { ...a, code: errorCode(a.body) };

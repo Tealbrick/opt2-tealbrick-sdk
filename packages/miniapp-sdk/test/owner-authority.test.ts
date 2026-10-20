@@ -46,6 +46,8 @@ function manifestFor(port: number): Manifest {
   m.operations.push(
     // scoped, delete: above a read/create Portal grant
     agentOp("note_purge", ["delete"], "destructive", { scopeType: "notebook", holdFamily: "destructive" }),
+    // v0.1.36: reads what ctx.scope says about the target notebook (can / readable / writable / access.crud)
+    agentOp("note_can", ["read"], "read", { scopeType: "notebook", receipt: false }),
     // UNSCOPED, delete: the Portal grant is its only ceiling
     agentOp("purge_all", ["delete"], "destructive", { holdFamily: "destructive" }),
     // an agent / app handler that tries to write an owner row through every handle it can reach
@@ -77,14 +79,28 @@ const CATALOG: DynamicCatalogEntry[] = [
   { name: "liar_item", title: "Liar", description: "claims owner", inputSchema: { type: "object" }, crud: ["delete"], effect: "destructive", admitted: "owner" },
 ];
 
-const holder: { running?: RunningApp; w?: World } = {};
+const holder: { running?: RunningApp; w?: World; manifest?: Manifest } = {};
 
 function testApp(port: number, migrations: string) {
+  const manifest = manifestFor(port);
+  holder.manifest = manifest;
   const person = () => ({ type: "person", id: holder.w?.per, ws: holder.w?.ws, instance: holder.w?.ins }) as unknown as PersonPrincipal;
   return defineApp({
-    manifest: manifestFor(port),
+    manifest,
     migrations,
     handlers: {
+      note_can: {
+        scope: (input) => ((input as { notebook?: string }).notebook ?? null),
+        run: async (input, ctx: OpContext) => {
+          const id = String((input as { notebook?: string }).notebook ?? "");
+          return {
+            can: { read: await ctx.scope.can("notebook", id, "read"), create: await ctx.scope.can("notebook", id, "create"), update: await ctx.scope.can("notebook", id, "update"), delete: await ctx.scope.can("notebook", id, "delete") },
+            readable: await ctx.scope.readable("notebook"),
+            writable: await ctx.scope.writable("notebook"),
+            crud: (ctx.scope.access?.crud ?? null) as unknown as Json,
+          } as unknown as Json;
+        },
+      },
       note_create: { scope: (input) => String((input as { notebook: string }).notebook), run: async () => ({ id: "n" }) },
       note_get: async () => ({}),
       note_delete: async () => ({}),
@@ -458,7 +474,7 @@ describe("C283 A1: owner-set access is primary, everything else is bounded (HTTP
     const sum = await bridgeOp(b, "scope_summary", {});
     assert.equal(sum.status, 200, JSON.stringify(sum.body));
     const forB = sum.body.find((x: { agent: string }) => x.agent === agent);
-    assert.deepEqual([...forB.admittedOps].sort(), ["note_create", "note_purge"], "static scoped agent ops only (not the dynamic op, not unscoped ops, not person ops)");
+    assert.deepEqual([...forB.admittedOps].sort(), ["note_can", "note_create", "note_purge"], "static scoped agent ops only (not the dynamic op, not unscoped ops, not person ops)");
     const forA = sum.body.find((x: { agent: string }) => x.agent === A());
     assert.equal("admittedOps" in forA, false, "agent A has bounded rows: nothing admitted by an owner row");
     // paused: no marks
@@ -526,7 +542,7 @@ describe("C283 A1: owner-set access is primary, everything else is bounded (HTTP
       await push("active");
       const good = await adm();
       assert.ok(good.marked > 0, "quiet on good: an active agent with owner rows is marked");
-      assert.deepEqual([...(good.ops ?? [])].sort(), ["note_create", "note_purge"]);
+      assert.deepEqual([...(good.ops ?? [])].sort(), ["note_can", "note_create", "note_purge"]);
       for (const status of ["retired", "suspended", ""]) {
         await push(status);
         const bad = await adm();
@@ -570,7 +586,7 @@ describe("C283 A1: SDK schema 8 sdk_scope_authority + schema 9 sdk_receipt_admit
       ins.run("agt_default_row", "read", "default", null);
       ins.run("agt_null_source", "read", null, null);
       const applied = applySdkMigrations(db as never);
-      assert.deepEqual(applied.map((m) => `${m.version}:${m.name}`), ["8:sdk_scope_authority", "9:sdk_receipt_admitted_by"]);
+      assert.deepEqual(applied.map((m) => `${m.version}:${m.name}`), ["8:sdk_scope_authority", "9:sdk_receipt_admitted_by", "10:sdk_scope_crud_snapshot"]);
       assert.equal(storedSchema(db as never).sdk, SDK_SCHEMA);
       const rows = db.prepare("SELECT agent, source, authority, access FROM tb_scopes ORDER BY agent").all() as { agent: string; source: string | null; authority: string; access: string }[];
       assert.equal(rows.length, 4);
@@ -688,11 +704,11 @@ describe("C283 A1: store rows feed authorize()", () => {
       applySdkMigrations(db);
       db.exec("DROP TABLE tb_scopes");
       db.exec(
-        "CREATE TABLE tb_scopes (agent TEXT NOT NULL, type TEXT NOT NULL, instance_id TEXT NOT NULL, access TEXT NOT NULL, source TEXT, granted_by_op TEXT, authority TEXT, PRIMARY KEY (agent, type, instance_id)) STRICT",
+        "CREATE TABLE tb_scopes (agent TEXT NOT NULL, type TEXT NOT NULL, instance_id TEXT NOT NULL, access TEXT NOT NULL, source TEXT, granted_by_op TEXT, authority TEXT, crud_snapshot TEXT, PRIMARY KEY (agent, type, instance_id)) STRICT",
       );
       const st = createScopeStore(db, manifestFor(1), createAuditLog(db, []), () => {});
       await st.instances.create("notebook", "a", "A");
-      const ins = db.prepare("INSERT INTO tb_scopes (agent, type, instance_id, access, source, authority) VALUES (?, 'notebook', 'a', 'manage', 'owner', ?)");
+      const ins = db.prepare("INSERT INTO tb_scopes (agent, type, instance_id, access, source, authority, crud_snapshot) VALUES (?, 'notebook', 'a', 'manage', 'owner', ?, '[\"read\",\"create\",\"update\",\"delete\"]')");
       const values: [string, string | null][] = [["agt_null", null], ["agt_cap", "Owner"], ["agt_x", "x"], ["agt_ok", "owner"]];
       for (const [agent, v] of values) ins.run(agent, v);
       for (const agent of ["agt_null", "agt_cap", "agt_x"]) {
@@ -717,6 +733,547 @@ describe("C283 A1: store rows feed authorize()", () => {
       const st = createScopeStore(db, manifestFor(1), createAuditLog(db, []), () => {});
       assert.equal("ownerSet" in st, false);
       assert.equal(typeof (st as unknown as { ownerSet?: unknown }).ownerSet, "undefined");
+      db.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+});
+
+// ── C283b / C283c (spec 0.1.52): an owner row keeps the CRUD it was set with ─────────────────────────────────────────────────────
+// The "app update widens a level" is simulated by changing the crud of the level in the manifest object the running app holds
+// (the SDK reads the level's crud at call time, exactly what a new manifest version changes). Each test says what fails without
+// its guard ("fires on bad"); the mutations that were run are listed in the PR.
+describe("C283b/c: an owner row keeps the CRUD it was set with (HTTP)", { timeout: 60_000 }, () => {
+  type Crud = ("read" | "create" | "update" | "delete")[];
+  const WRITE: Crud = ["read", "create", "update"];
+  const WRITE_PLUS_DELETE: Crud = ["read", "create", "update", "delete"];
+  let b: Booted;
+  let s: { cookie: string; csrf: string };
+  let n = 0;
+  before(async () => {
+    b = await boot();
+    s = await signIn(b);
+  });
+  after(async () => b.cleanup());
+
+  const A = () => b.w.agents.a;
+  const fresh = async (): Promise<string> => {
+    const id = `sn${++n}`;
+    await b.running.scopes.instances.create("notebook", id, id);
+    return id;
+  };
+  const setOwner = (agent: string, id: string, access: string | null, acceptOffer?: Json) =>
+    personOp(b, s, "tb.scopes_set", { agent, type: "notebook", id, access, ...(acceptOffer !== undefined ? { acceptOffer } : {}) });
+  const rowOf = (agent: string, id: string) => b.running.scopes.access(agent as never, "notebook", id);
+  const listed = async (agent: string, id: string) =>
+    (await personOp(b, s, "tb.agents_list")).body.output.agents.find((a: { id: string }) => a.id === agent).access.find((x: { instanceId: string }) => x.instanceId === id);
+  const raw = <T>(fn: (db: DatabaseSync) => T): T => {
+    const db = new DatabaseSync(join(b.dataDir, "app.db"));
+    try {
+      db.exec("PRAGMA busy_timeout = 5000");
+      return fn(db);
+    } finally {
+      db.close();
+    }
+  };
+  const snapshotOf = (agent: string, id: string): string | null =>
+    raw((db) => (db.prepare("SELECT crud_snapshot AS c FROM tb_scopes WHERE agent = ? AND type = 'notebook' AND instance_id = ?").get(agent, id) as { c: string | null }).c);
+  const level = (id: string) => {
+    const l = holder.manifest?.scopes?.[0]?.access.find((a) => a.id === id);
+    assert.ok(l, `level ${id}`);
+    return l;
+  };
+  /** an "app update": `levelId` has `crud` while `fn` runs, then the manifest is what it was */
+  async function updated(levelId: string, crud: Crud, fn: () => Promise<void>): Promise<void> {
+    const l = level(levelId);
+    const before = [...l.crud];
+    l.crud = [...crud];
+    try {
+      await fn();
+    } finally {
+      l.crud = before;
+    }
+  }
+  const purge = (id: string, agent?: string) => agentOp(b, "note_purge", { notebook: id }, agent ? { agent } : {});
+  const can = async (id: string) => (await agentOp(b, "note_can", { notebook: id })).body;
+  const receipts = async (op: string): Promise<Receipt[]> => (await b.running.receipts.list({ op })).items;
+
+  test("WIDENING: a level widened by an app update does not widen an owner row: refused scope_denied, can() false, the offer is listed (fires on bad: the 0.1.35 rule widened it)", { timeout: 60_000 }, async () => {
+    const id = await fresh();
+    assert.equal((await setOwner(A(), id, "write")).status, 200);
+    assert.equal(snapshotOf(A(), id), JSON.stringify(WRITE), "the owner write stores the level's crud as the snapshot");
+    // before the update: create runs (quiet on good), delete is not in `write`
+    assert.equal((await agentOp(b, "note_create", { notebook: id, title: "t" })).status, 200);
+    assert.equal((await purge(id)).body.error.code, "scope_denied");
+    await updated("write", WRITE_PLUS_DELETE, async () => {
+      const p = await purge(id);
+      assert.equal(p.status, 403, "the widened level must not admit delete for this row");
+      assert.equal(p.body.error.code, "scope_denied");
+      const c = await can(id);
+      assert.equal(c.status, "ok", JSON.stringify(c));
+      assert.equal(c.output.can.delete, false, "ctx.scope.can follows the effective crud");
+      assert.deepEqual([c.output.can.read, c.output.can.create, c.output.can.update], [true, true, true]);
+      assert.deepEqual(c.output.crud, WRITE, "ctx.scope.access.crud is the effective crud");
+      assert.ok(c.output.readable.includes(id));
+      assert.ok(c.output.writable.includes(id));
+      const row = await listed(A(), id);
+      assert.deepEqual(row.crud, WRITE, "ScopeGrantRow.crud is effective");
+      assert.deepEqual(row.offer, { adds: ["delete"] });
+      assert.deepEqual((await rowOf(A(), id))?.offer, { adds: ["delete"] }, "also through the store");
+      // a plain re-set of the same level does NOT accept
+      assert.equal((await setOwner(A(), id, "write")).status, 200);
+      assert.equal(snapshotOf(A(), id), JSON.stringify(WRITE), "fires on bad: a plain re-set must keep the snapshot");
+      assert.equal((await purge(id)).body.error.code, "scope_denied");
+      assert.deepEqual((await listed(A(), id)).offer, { adds: ["delete"] });
+      // another set of adds → 409 offer_changed, the row is not changed
+      for (const adds of [[], ["create"], ["delete", "update"], ["read", "delete"]]) {
+        const r = await setOwner(A(), id, "write", { adds });
+        assert.equal(r.status, 409, JSON.stringify(adds));
+        assert.equal(r.body.error.code, "offer_changed");
+      }
+      assert.equal(snapshotOf(A(), id), JSON.stringify(WRITE));
+      assert.equal((await purge(id)).body.error.code, "scope_denied");
+      // the current adds: accepted, the call runs, the audit says so
+      const ok = await setOwner(A(), id, "write", { adds: ["delete"] });
+      assert.equal(ok.status, 200, JSON.stringify(ok.body));
+      assert.equal(ok.body.output.access.offer, undefined, "no offer left");
+      assert.deepEqual(ok.body.output.access.crud, WRITE_PLUS_DELETE);
+      assert.equal(snapshotOf(A(), id), JSON.stringify(WRITE_PLUS_DELETE));
+      const run = await purge(id);
+      assert.equal(run.status, 200, JSON.stringify(run.body));
+      assert.equal((await receipts("note_purge")).find((r) => r.id === run.body.receiptId)?.admittedBy, "app_owner_row");
+      assert.equal((await can(id)).output.can.delete, true);
+      const accepted = (await b.running.audit.list({ action: "scope.offer_accepted" })).items.find((e) => (e.detail as { instance?: string }).instance === id);
+      assert.ok(accepted, "scope.offer_accepted is audited");
+      assert.deepEqual(accepted.detail, { type: "notebook", instance: id, access: "write", adds: ["delete"] });
+      assert.equal(accepted.target, A());
+    });
+  });
+
+  test("the adds are compared as a SET (any order, duplicates ignored); a wrong or partial set is refused", { timeout: 60_000 }, async () => {
+    const ids = [await fresh(), await fresh(), await fresh()];
+    for (const id of ids) assert.equal((await setOwner(A(), id, "read")).status, 200);
+    await updated("read", ["read", "create", "delete"], async () => {
+      for (const id of ids) assert.deepEqual((await listed(A(), id)).offer, { adds: ["create", "delete"] }, "level order");
+      assert.equal((await setOwner(A(), ids[0] as string, "read", { adds: ["create"] })).body.error.code, "offer_changed", "partial");
+      assert.equal((await setOwner(A(), ids[0] as string, "read", { adds: ["create", "delete", "update"] })).body.error.code, "offer_changed", "superset");
+      assert.equal((await setOwner(A(), ids[0] as string, "read", { adds: ["delete", "create"] })).status, 200, "other order");
+      assert.equal((await setOwner(A(), ids[1] as string, "read", { adds: ["delete", "create", "delete", "create"] })).status, 200, "duplicates");
+      assert.deepEqual((await rowOf(A(), ids[0] as string))?.crud, ["read", "create", "delete"]);
+      assert.equal((await rowOf(A(), ids[0] as string))?.offer, undefined);
+      // the third row was never accepted: still an offer
+      assert.deepEqual((await rowOf(A(), ids[2] as string))?.offer, { adds: ["create", "delete"] });
+    });
+  });
+
+  test("acceptOffer with another level or access null → 400 input_invalid (nothing changes, the row is not deleted); a malformed acceptOffer → 400", { timeout: 60_000 }, async () => {
+    const id = await fresh();
+    await setOwner(A(), id, "write");
+    await updated("write", WRITE_PLUS_DELETE, async () => {
+      const other = await setOwner(A(), id, "manage", { adds: ["delete"] });
+      assert.equal(other.status, 400);
+      assert.equal(other.body.error.code, "input_invalid");
+      const gone = await setOwner(A(), id, null, { adds: ["delete"] });
+      assert.equal(gone.status, 400);
+      assert.equal(gone.body.error.code, "input_invalid");
+      const row = await rowOf(A(), id);
+      assert.ok(row, "fires on bad: access null with acceptOffer must not delete the row");
+      assert.equal(row.access, "write");
+      assert.equal(snapshotOf(A(), id), JSON.stringify(WRITE));
+      assert.deepEqual(row.offer, { adds: ["delete"] });
+      for (const bad of [{ adds: ["nope"] }, {}, { adds: "delete" }, { adds: ["delete"], extra: 1 }, "delete", ["delete"]] as Json[]) {
+        const r = await setOwner(A(), id, "write", bad);
+        assert.equal(r.status, 400, JSON.stringify(bad));
+        assert.equal(r.body.error.code, "input_invalid", JSON.stringify(bad));
+      }
+      assert.equal(snapshotOf(A(), id), JSON.stringify(WRITE));
+    });
+    // without acceptOffer, another level is a new choice: it stores THAT level's crud now (no accept involved)
+    await updated("write", WRITE_PLUS_DELETE, async () => {
+      assert.equal((await setOwner(A(), id, "manage")).status, 200);
+      assert.equal(snapshotOf(A(), id), JSON.stringify(WRITE_PLUS_DELETE));
+      assert.equal((await rowOf(A(), id))?.offer, undefined);
+    });
+  });
+
+  test("with NO offer only adds [] is accepted (a no-op that keeps the snapshot); any other adds → 409 offer_changed; on a bounded row it makes the row primary", { timeout: 60_000 }, async () => {
+    const id = await fresh();
+    await setOwner(A(), id, "write");
+    assert.equal((await setOwner(A(), id, "write", { adds: [] })).status, 200);
+    assert.equal(snapshotOf(A(), id), JSON.stringify(WRITE));
+    assert.equal((await b.running.audit.list({ action: "scope.offer_accepted" })).items.filter((e) => (e.detail as { instance?: string }).instance === id).length, 0, "nothing was accepted, nothing is audited as accepted");
+    const bad = await setOwner(A(), id, "write", { adds: ["delete"] });
+    assert.equal(bad.status, 409, "fires on bad: accepting an offer that does not exist");
+    assert.equal(bad.body.error.code, "offer_changed");
+    // a bounded row: no offer exists, adds [] works as the "make primary" re-set, adds ["delete"] does not
+    const id2 = await fresh();
+    await b.running.scopes.set({ type: "person", id: b.w.per, ws: b.w.ws, instance: b.w.ins } as never, A(), "notebook", id2, "write");
+    assert.equal(snapshotOf(A(), id2), null, "a bounded row has no snapshot");
+    assert.equal((await setOwner(A(), id2, "write", { adds: ["delete"] })).body.error.code, "offer_changed");
+    assert.equal((await rowOf(A(), id2))?.authority, "bounded");
+    const made = await setOwner(A(), id2, "write", { adds: [] });
+    assert.equal(made.status, 200, JSON.stringify(made.body));
+    assert.equal(made.body.output.access.authority, "owner");
+    assert.equal(snapshotOf(A(), id2), JSON.stringify(WRITE));
+  });
+
+  test("NARROWING applies at once: a narrowed level refuses the call and can(); the row lists no offer (fires on bad: a snapshot-only reader keeps the old crud)", { timeout: 60_000 }, async () => {
+    const id = await fresh();
+    await setOwner(A(), id, "manage");
+    assert.equal(snapshotOf(A(), id), JSON.stringify(WRITE_PLUS_DELETE));
+    assert.equal((await can(id)).output.can.delete, true, "quiet on good: before the update");
+    await updated("manage", WRITE, async () => {
+      const p = await purge(id);
+      assert.equal(p.status, 403);
+      assert.equal(p.body.error.code, "scope_denied");
+      const c = await can(id);
+      assert.equal(c.output.can.delete, false);
+      assert.deepEqual(c.output.crud, WRITE);
+      const row = await listed(A(), id);
+      assert.deepEqual(row.crud, WRITE);
+      assert.equal(row.offer, undefined, "narrowing is not an offer");
+      assert.equal(snapshotOf(A(), id), JSON.stringify(WRITE_PLUS_DELETE), "the stored snapshot is not rewritten by a read");
+    });
+    // the update is gone again: the row is what the owner set (snapshot ∩ level)
+    assert.equal((await purge(id)).status, 200);
+  });
+
+  test("a level removed from the manifest gives []; the row keeps its level name and offers all of the level once it is back", { timeout: 60_000 }, async () => {
+    const id = await fresh();
+    await setOwner(A(), id, "write");
+    const access = holder.manifest?.scopes?.[0]?.access;
+    assert.ok(access);
+    const i = access.findIndex((a) => a.id === "write");
+    const [gone] = access.splice(i, 1);
+    try {
+      assert.deepEqual((await rowOf(A(), id))?.crud, []);
+      assert.equal((await agentOp(b, "note_create", { notebook: id, title: "t" })).status, 403);
+    } finally {
+      access.splice(i, 0, gone as never);
+    }
+    assert.equal((await agentOp(b, "note_create", { notebook: id, title: "t" })).status, 200, "the level is back: the snapshot applies again");
+  });
+
+  test("a NULL, unparsable or non-array snapshot on an owner row reads [] in every reader and offers the whole level; only an explicit accept recovers it", { timeout: 60_000 }, async () => {
+    const bads: (string | null)[] = [null, "", "{", "null", "{}", '"read"', "0", '{"0":"read"}', '["bogus"]', "[1,2]"];
+    for (const bad of bads) {
+      const id = await fresh();
+      await setOwner(A(), id, "manage");
+      raw((db) => db.prepare("UPDATE tb_scopes SET crud_snapshot = ? WHERE agent = ? AND type = 'notebook' AND instance_id = ?").run(bad, A(), id));
+      const label = JSON.stringify(bad);
+      const row = await rowOf(A(), id);
+      assert.deepEqual(row?.crud, [], `fires on bad: ${label} must fail closed, never widen`);
+      assert.equal(row?.authority, "owner");
+      assert.deepEqual(row?.offer, { adds: WRITE_PLUS_DELETE }, `${label}: the whole level is offered`);
+      const c = await agentOp(b, "note_create", { notebook: id, title: "t" });
+      assert.equal(c.status, 403, label);
+      assert.equal(c.body.error.code, "scope_denied", label);
+      assert.equal((await purge(id)).body.error.code, "scope_denied", label);
+      // a plain re-set keeps the corrupt value (it is not an accept); the explicit accept writes a fresh snapshot
+      assert.equal((await setOwner(A(), id, "manage")).status, 200);
+      assert.equal((await rowOf(A(), id))?.crud?.length, 0, `${label}: a plain re-set does not repair`);
+      assert.equal((await setOwner(A(), id, "manage", { adds: WRITE_PLUS_DELETE })).status, 200, label);
+      assert.equal(snapshotOf(A(), id), JSON.stringify(WRITE_PLUS_DELETE), label);
+      assert.equal((await purge(id)).status, 200, label);
+    }
+  });
+
+  test("BOUNDED rows are unchanged: no snapshot, no offer, the crud follows the level, the Portal grant stays the ceiling; every non-owner write path clears a snapshot", { timeout: 60_000 }, async () => {
+    const id = await fresh();
+    await b.running.scopes.set({ type: "person", id: b.w.per, ws: b.w.ws, instance: b.w.ins } as never, A(), "notebook", id, "write");
+    assert.equal(snapshotOf(A(), id), null);
+    await updated("write", WRITE_PLUS_DELETE, async () => {
+      const row = await rowOf(A(), id);
+      assert.equal(row?.authority, "bounded");
+      assert.deepEqual(row?.crud, WRITE_PLUS_DELETE, "a bounded row is the level now");
+      assert.equal(row?.offer, undefined, "bounded rows never offer");
+      assert.equal((await purge(id)).body.error.code, "scope_denied", "the Portal grant (read, create) is the ceiling");
+      const wide = await agentOp(b, "note_purge", { notebook: id }, { crud: WRITE_PLUS_DELETE });
+      assert.equal(wide.status, 200, "inside the grant it runs");
+      assert.equal((await receipts("note_purge")).find((r) => r.id === wide.body.receiptId)?.admittedBy, "portal_grant");
+    });
+    // owner row → ctx.scopeGrants and the store handle make it bounded and drop the snapshot
+    const id2 = await fresh();
+    await setOwner(A(), id2, "write");
+    assert.ok(snapshotOf(A(), id2));
+    assert.equal((await personOp(b, s, "draft_grant", { agent: A(), id: id2, access: "write" })).status, 200);
+    assert.equal(snapshotOf(A(), id2), null, "fires on bad: an app row over an owner row must not keep the snapshot");
+    const id3 = await fresh();
+    await setOwner(A(), id3, "write");
+    await b.running.scopes.set({ type: "person", id: b.w.per, ws: b.w.ws, instance: b.w.ins } as never, A(), "notebook", id3, "write");
+    assert.equal(snapshotOf(A(), id3), null, "the store handle writes a bounded row without a snapshot");
+    assert.equal((await rowOf(A(), id3))?.authority, "bounded");
+  });
+
+  test("bestOf/rank order rows by their EFFECTIVE crud, not by the level now (a widened row does not win a spanning op)", { timeout: 60_000 }, async () => {
+    const agent = b.w.agents.b;
+    assert.equal((await agentOp(b, "note_create", { notebook: agent, title: "t" }, { agent })).status, 200, "first sight of agent B");
+    for (const r of await b.running.scopes.list(agent as never)) await setOwner(agent, r.instanceId, "read");
+    const id1 = await fresh();
+    const id2 = await fresh();
+    const levels = holder.manifest?.scopes?.[0]?.access;
+    assert.ok(levels);
+    levels.push({ id: "mid", label: "Mid", crud: [...WRITE] });
+    try {
+      await setOwner(agent, id1, "write");
+      await setOwner(agent, id2, "mid");
+      await updated("write", WRITE_PLUS_DELETE, async () => {
+        // id1: level `write` is 4 actions now, its effective crud 3; id2: `mid` is 3. By the level id1 would win (4 > 3); by the effective crud id2 (same size, later in access[]).
+        assert.equal((await b.running.scopes.best(agent as never, "notebook"))?.access, "mid");
+        assert.equal((await rowOf(agent, id1))?.crud?.length, 3);
+      });
+    } finally {
+      levels.pop();
+    }
+    // the rows of the later tests do not depend on these: put agent B's rows back to bounded defaults for isolation
+    for (const r of await b.running.scopes.list(agent as never)) await b.running.scopes.set({ type: "person", id: b.w.per, ws: b.w.ws, instance: b.w.ins } as never, agent as never, "notebook", r.instanceId, "read");
+  });
+
+  test("DISPLAY marks follow the effective crud: catalog `admitted` and scope_summary `admittedOps` (fires on bad: the level's crud would mark the widened delete)", { timeout: 60_000 }, async () => {
+    const agent = b.w.agents.b;
+    assert.equal((await agentOp(b, "note_can", { notebook: agent }, { agent })).status, 200, "agent B has been seen (its rows exist)");
+    await fresh();
+    const mine = async () => b.running.scopes.list(agent as never);
+    for (const r of await mine()) assert.equal((await setOwner(agent, r.instanceId, "write")).status, 200);
+    const marks = async () => {
+      const cat = await bridgeOp(b, "catalog", { op: "tools", agent });
+      const sum = await bridgeOp(b, "scope_summary", {});
+      const forB = sum.body.find((x: { agent: string }) => x.agent === agent);
+      const adm = (name: string) => (cat.body as DynamicCatalogEntry[]).find((e) => e.name === name)?.admitted;
+      return { read: adm("read_item"), write: adm("write_item"), del: adm("delete_item"), ops: [...(forB.admittedOps ?? [])].sort() as string[] };
+    };
+    const before = await marks();
+    assert.deepEqual([before.read, before.write, before.del], ["owner", "owner", undefined]);
+    assert.deepEqual(before.ops, ["note_can", "note_create"]);
+    await updated("write", WRITE_PLUS_DELETE, async () => {
+      const widened = await marks();
+      assert.equal(widened.del, undefined, "the widened level is only an offer: delete_item is not marked");
+      assert.deepEqual(widened.ops, ["note_can", "note_create"], "note_purge is not admitted by the widened level");
+      for (const r of await mine()) assert.deepEqual(r.offer, { adds: ["delete"] });
+      for (const r of await mine()) assert.equal((await setOwner(agent, r.instanceId, "write", { adds: ["delete"] })).status, 200);
+      const accepted = await marks();
+      assert.equal(accepted.del, "owner", "after the owner accepted the offer the mark follows");
+      assert.deepEqual(accepted.ops, ["note_can", "note_create", "note_purge"]);
+    });
+    // back to the original manifest: the accepted rows are the level again (snapshot ∩ level)
+    const after = await marks();
+    assert.equal(after.del, undefined);
+    assert.deepEqual(after.ops, ["note_can", "note_create"]);
+  });
+});
+
+// ── schema 10 (spec text: "schema 9") sdk_scope_crud_snapshot: the one-time backfill ─────────────────────────────────────────────
+describe("C283b/c: SDK schema 10 sdk_scope_crud_snapshot (backfill, once, audited)", { timeout: 60_000 }, () => {
+  const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+  const CRUD4: ("read" | "create" | "update" | "delete")[] = ["read", "create", "update", "delete"];
+  /** a database exactly as SDK 0.1.35 left it: the migrations up to schema 9 */
+  function schema9(dir: string): DatabaseSync {
+    const db = openDb(dir);
+    for (const m of SDK_MIGRATIONS.filter((x) => x.version <= 9)) {
+      db.exec(m.sql);
+      db.prepare("INSERT INTO tb_migrations (scope, version, name, sha256, applied_at) VALUES ('sdk', ?, ?, ?, ?)").run(m.version, m.name, sha(m.sql), Date.now());
+    }
+    return db as unknown as DatabaseSync;
+  }
+  function fill(db: DatabaseSync): void {
+    for (const id of ["a", "b", "c", "d"]) db.prepare("INSERT INTO tb_scope_instances (type, id, label, shared, created_at) VALUES ('notebook', ?, ?, 0, 1)").run(id, id);
+    const ins = db.prepare("INSERT INTO tb_scopes (agent, type, instance_id, access, source, authority) VALUES (?, 'notebook', ?, ?, ?, ?)");
+    ins.run("agt_o_manage", "a", "manage", "owner", "owner");
+    ins.run("agt_o_write", "b", "write", "owner", "owner");
+    ins.run("agt_o_gone", "c", "retired_level", "owner", "owner"); // a level the manifest does not have
+    ins.run("agt_bounded", "a", "manage", "owner", "bounded");
+    ins.run("agt_app", "d", "write", "app", "bounded");
+  }
+  const person = { type: "person", id: "per_x", ws: "ws_x", instance: "ins_x" } as unknown as PersonPrincipal;
+
+  test("a schema-9 DB: every OWNER row gets the snapshot of its level in the manifest that runs it, with one audit line each; bounded rows keep NULL", async () => {
+    const t = tempDir();
+    try {
+      const db = schema9(t.dir);
+      assert.equal(storedSchema(db as never).sdk, 9);
+      fill(db);
+      const m = manifestFor(1);
+      const applied = applySdkMigrations(db as never, undefined, { manifest: m });
+      assert.deepEqual(applied.map((x) => `${x.version}:${x.name}`), ["10:sdk_scope_crud_snapshot"]);
+      assert.equal(SDK_SCHEMA, 10);
+      const rows = (db.prepare("SELECT agent, crud_snapshot AS c FROM tb_scopes ORDER BY agent").all() as { agent: string; c: string | null }[]).map((r) => ({ agent: r.agent, c: r.c }));
+      assert.deepEqual(rows, [
+        { agent: "agt_app", c: null },
+        { agent: "agt_bounded", c: null },
+        { agent: "agt_o_gone", c: "[]" },
+        { agent: "agt_o_manage", c: JSON.stringify(CRUD4) },
+        { agent: "agt_o_write", c: JSON.stringify(["read", "create", "update"]) },
+      ]);
+      const audit = (db.prepare("SELECT actor, action, target, detail FROM tb_audit WHERE action = 'scope.snapshot_backfill' ORDER BY target").all() as { actor: string; action: string; target: string; detail: string }[]).map((e) => ({ ...e, detail: JSON.parse(e.detail) }));
+      assert.deepEqual(audit, [
+        { actor: "system", action: "scope.snapshot_backfill", target: "agt_o_gone", detail: { type: "notebook", instance: "c", level: "retired_level", crud: [] } },
+        { actor: "system", action: "scope.snapshot_backfill", target: "agt_o_manage", detail: { type: "notebook", instance: "a", level: "manage", crud: CRUD4 } },
+        { actor: "system", action: "scope.snapshot_backfill", target: "agt_o_write", detail: { type: "notebook", instance: "b", level: "write", crud: ["read", "create", "update"] } },
+      ]);
+      // through the store: effective crud = snapshot ∩ level; no offer right after the backfill
+      const st = createScopeStore(db as never, m, createAuditLog(db as never, []), () => {});
+      assert.deepEqual((await st.access("agt_o_write" as never, "notebook", "b"))?.crud, ["read", "create", "update"]);
+      assert.equal((await st.access("agt_o_write" as never, "notebook", "b"))?.offer, undefined);
+      assert.deepEqual((await st.access("agt_o_gone" as never, "notebook", "c"))?.crud, []);
+      assert.deepEqual((await st.access("agt_bounded" as never, "notebook", "a"))?.crud, CRUD4, "bounded: the level");
+      db.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a widening shipped in the SAME update as the first 0.1.36 boot is baked in (no older record exists): the backfill uses the manifest that runs it", async () => {
+    const t = tempDir();
+    try {
+      const db = schema9(t.dir);
+      fill(db);
+      const m = manifestFor(1);
+      const lvl = m.scopes?.[0]?.access.find((a) => a.id === "write");
+      assert.ok(lvl);
+      lvl.crud = [...CRUD4];
+      applySdkMigrations(db as never, undefined, { manifest: m });
+      assert.equal((db.prepare("SELECT crud_snapshot AS c FROM tb_scopes WHERE agent = 'agt_o_write'").get() as { c: string }).c, JSON.stringify(CRUD4));
+      db.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("ONCE: a second run backfills nothing; a NULL snapshot afterwards stays NULL and reads [] (fires on bad: a boot-time backfill would widen a corrupted row)", async () => {
+    const t = tempDir();
+    try {
+      const db = schema9(t.dir);
+      fill(db);
+      const m = manifestFor(1);
+      applySdkMigrations(db as never, undefined, { manifest: m });
+      const count = () => (db.prepare("SELECT count(*) AS n FROM tb_audit WHERE action = 'scope.snapshot_backfill'").get() as { n: number }).n;
+      assert.equal(count(), 3);
+      db.prepare("UPDATE tb_scopes SET crud_snapshot = NULL WHERE agent = 'agt_o_manage'").run();
+      assert.deepEqual(applySdkMigrations(db as never, undefined, { manifest: m }), [], "nothing pending");
+      assert.equal(count(), 3, "no second audit round");
+      assert.equal((db.prepare("SELECT crud_snapshot AS c FROM tb_scopes WHERE agent = 'agt_o_manage'").get() as { c: string | null }).c, null, "still NULL");
+      const st = createScopeStore(db as never, m, createAuditLog(db as never, []), () => {});
+      const row = await st.access("agt_o_manage" as never, "notebook", "a");
+      assert.deepEqual(row?.crud, []);
+      assert.deepEqual(row?.offer, { adds: CRUD4 });
+      assert.equal(st.resolve("agt_o_manage", "notebook", "a")?.crud.length, 0);
+      assert.equal(st.ownerAdmits("agt_o_manage", "notebook", ["read"]), false);
+      // every reader of ScopeAccessView
+      const view = st.view("agt_o_manage", null);
+      assert.deepEqual(await view.readable("notebook"), []);
+      assert.deepEqual(await view.writable("notebook"), []);
+      assert.equal(await view.can("notebook", "a", "read"), false);
+      assert.deepEqual((await st.best("agt_o_manage" as never, "notebook"))?.crud, []);
+      assert.deepEqual((await st.list("agt_o_manage" as never)).map((r) => r.crud), [[]]);
+      db.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("owner rows and NO manifest: the migration refuses (sdk_migration_context) and rolls back whole; without owner rows it needs no manifest", async () => {
+    const t = tempDir();
+    try {
+      const db = schema9(t.dir);
+      fill(db);
+      assert.throws(
+        () => applySdkMigrations(db as never),
+        (e: unknown) => (e as { code?: string }).code === "sdk_migration_context",
+      );
+      assert.equal(storedSchema(db as never).sdk, 9, "the migration is not recorded");
+      assert.equal((db.prepare("PRAGMA table_info(tb_scopes)").all() as { name: string }[]).some((c) => c.name === "crud_snapshot"), false, "the ALTER rolled back with it");
+      assert.equal((db.prepare("SELECT count(*) AS n FROM tb_scopes WHERE authority = 'owner'").get() as { n: number }).n, 3, "owner rows untouched");
+      db.close();
+      const t2 = tempDir();
+      try {
+        const db2 = schema9(t2.dir);
+        db2.prepare("INSERT INTO tb_scopes (agent, type, instance_id, access, source, authority) VALUES ('agt_b', 'notebook', 'a', 'read', 'default', 'bounded')").run();
+        assert.deepEqual(applySdkMigrations(db2 as never).map((x) => x.version), [10]);
+        db2.close();
+      } finally {
+        t2.cleanup();
+      }
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("startApp upgrades a schema-9 data dir: the owner row is backfilled from the booting manifest, audited, and keeps its crud", async () => {
+    const t = tempDir("tb-c283c-up-");
+    const data = join(t.dir, "data");
+    try {
+      const db = schema9(data);
+      db.prepare("INSERT INTO tb_scope_instances (type, id, label, shared, created_at) VALUES ('notebook', 'x', 'X', 0, 1)").run();
+      db.prepare("INSERT INTO tb_scopes (agent, type, instance_id, access, source, authority) VALUES ('agt_owner_row', 'notebook', 'x', 'write', 'owner', 'owner')").run();
+      db.close();
+      const port = await freePort();
+      const running = await startApp(testApp(port, migrationsDir(join(t.dir, "code"))), { TB_DATA_DIR: data, TB_STANDALONE: "1", TB_LOG_LEVEL: "error" }, { privilegeProc: { getuid: () => 4242 } }).catch((e) => {
+        throw new Error(`${e.message} ${JSON.stringify(e.details)}`);
+      });
+      try {
+        const row = await running.scopes.access("agt_owner_row" as never, "notebook", "x");
+        assert.equal(row?.authority, "owner");
+        assert.deepEqual(row?.crud, ["read", "create", "update"], "fires on bad: a boot that did not pass the manifest would leave [] (or throw)");
+        assert.equal(row?.offer, undefined);
+        const audit = (await running.audit.list({ action: "scope.snapshot_backfill" })).items;
+        assert.equal(audit.length, 1);
+        assert.deepEqual(audit[0]?.detail, { type: "notebook", instance: "x", level: "write", crud: ["read", "create", "update"] });
+        const h = (await (await fetch(`http://127.0.0.1:${port}/tb/v1/health`)).json()) as { schemaVersion?: { sdk: number } };
+        assert.equal(h.schemaVersion?.sdk, SDK_SCHEMA);
+      } finally {
+        await running.stop();
+      }
+      // a second boot backfills nothing
+      const again = await startApp(testApp(await freePort(), migrationsDir(join(t.dir, "code"))), { TB_DATA_DIR: data, TB_STANDALONE: "1", TB_LOG_LEVEL: "error" }, { privilegeProc: { getuid: () => 4242 } });
+      try {
+        assert.equal((await again.audit.list({ action: "scope.snapshot_backfill" })).items.length, 1);
+      } finally {
+        await again.stop();
+      }
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("the migration is additive and forward-only: one ADD COLUMN, no DROP / UPDATE / DELETE in its sql, versions strictly increasing", () => {
+    const m = SDK_MIGRATIONS.find((x) => x.name === "sdk_scope_crud_snapshot");
+    assert.ok(m);
+    assert.equal(m.version, 10);
+    assert.match(m.sql, /^ALTER TABLE tb_scopes ADD COLUMN crud_snapshot TEXT;$/);
+    assert.doesNotMatch(m.sql, /DROP|UPDATE|DELETE/i);
+    assert.equal(typeof m.after, "function", "the backfill is a code step inside the same transaction");
+    const versions = SDK_MIGRATIONS.map((x) => x.version);
+    assert.deepEqual(versions, [...versions].sort((a, b) => a - b));
+    assert.equal(new Set(versions).size, versions.length);
+  });
+
+  test("ownerSet at the store level: snapshot at write, kept by a plain re-set, new for another level; the public store handle and app grants write NULL", async () => {
+    const t = tempDir();
+    try {
+      const db = openDb(t.dir);
+      applySdkMigrations(db as never);
+      const m = manifestFor(1);
+      const st = createScopeStore(db as never, m, createAuditLog(db as never, []), () => {});
+      await st.instances.create("notebook", "x", "X");
+      const snap = () => (db.prepare("SELECT crud_snapshot AS c FROM tb_scopes WHERE agent = 'agt_1'").get() as { c: string | null } | undefined)?.c;
+      const ops = scopeGrantOps(st);
+      await ops.ownerSet(person, "agt_1", "notebook", "x", "write");
+      assert.equal(snap(), JSON.stringify(["read", "create", "update"]));
+      const lvl = m.scopes?.[0]?.access.find((a) => a.id === "write");
+      assert.ok(lvl);
+      lvl.crud = [...CRUD4];
+      await ops.ownerSet(person, "agt_1", "notebook", "x", "write");
+      assert.equal(snap(), JSON.stringify(["read", "create", "update"]), "a plain re-set keeps it");
+      await ops.ownerSet(person, "agt_1", "notebook", "x", "manage");
+      assert.equal(snap(), JSON.stringify(CRUD4), "another level: that level's crud now");
+      await ops.ownerSet(person, "agt_1", "notebook", "x", "write");
+      assert.equal(snap(), JSON.stringify(CRUD4), "another level again (manage -> write): write's crud now, which the update widened to 4");
+      await assert.rejects(ops.ownerSet(person, "agt_1", "notebook", "x", "manage", { adds: [] }), (e: unknown) => (e as { code?: string }).code === "input_invalid", "acceptOffer for another level is not an accept");
+      await st.set(person, "agt_1" as never, "notebook", "x", "write");
+      assert.equal(snap(), null, "the store handle writes a bounded row");
+      await assert.rejects(ops.ownerSet(person, "agt_1", "notebook", "x", "write", { adds: ["nope" as never] }), (e: unknown) => (e as { code?: string }).code === "input_invalid");
+      await assert.rejects(st.set(person, "agt_1" as never, "notebook", "x", "write").then(() => ops.ownerSet(person, "agt_1", "notebook", "x", null, { adds: [] })), (e: unknown) => (e as { code?: string }).code === "input_invalid");
       db.close();
     } finally {
       t.cleanup();

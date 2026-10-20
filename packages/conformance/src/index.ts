@@ -25,6 +25,7 @@ export { createFakePortal, FAKE_PORTAL_ROUTES, FakePortal, FakePortalControl, ty
 export { FakeUpstream, type UpstreamRequest } from "./fake-upstream.ts";
 export { checkStartModule, type ForkedStart, type ForkStartOptions, forkStart } from "./fork-start.ts";
 export { SDK_EXPORTS, type SdkExport } from "./generated/sdk-exports.ts";
+export { applyLevelCrud, LEVEL_CRUD_ENV, type LevelCrudChange, parseLevelCrud } from "./level-crud.ts";
 export { KeyAgent, McpSession, OAuthAgent, parseForms, pkcePair } from "./mcp-agent.ts";
 export { type AppDriver, DECOY_PRODUCT, type MultiAppDeps, PEER_SETTINGS_ENV, type PreparedPeer, preparePeers, runPeerChecks } from "./multi-app.ts";
 export { defaultCacheRoot, extractArchive, fetchVerifiedIndex, githubSource, INDEX_BASES, type LoadedPeer, loadPeer, PeerError, type PeerSourceOptions, peerCacheDir, RELEASE_KEYS, type ReleaseRecord, removePeerCaches, selectRecord } from "./peer-source.ts";

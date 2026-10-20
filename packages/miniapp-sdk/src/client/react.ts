@@ -1,10 +1,11 @@
 // React bindings (SDK-API §14, types/sdk.ts §C): <TbProvider product> + hooks over the client store. React is an
 // optional peer dependency; plain createElement, no JSX build step. No UI components (AppShell is @opt2-tealbrick/ui).
 import type { AgentId, Ulid } from "@opt2-tealbrick/spec/credentials";
+import type { CrudAction } from "@opt2-tealbrick/spec/manifest";
 import type { Receipt, ScopeGrantRow, SliceAgent, TbProviderProps, UseAgents, UseHolds, UseScopes, UseSession } from "@opt2-tealbrick/spec/sdk";
 import React from "react";
 import { setProduct } from "./fetch.ts";
-import { type AgentWithAccess, decideHold, getSessionSnapshot, type HoldFilter, listAgents, listHolds, loadSession, scopeRows, setScope, signOut, subscribeSession } from "./store.ts";
+import { type AgentWithAccess, acceptOffer as acceptScopeOffer, decideHold, getSessionSnapshot, type HoldFilter, listAgents, listHolds, loadSession, scopeRows, setScope, signOut, subscribeSession } from "./store.ts";
 
 const ProductContext = React.createContext<string | null>(null);
 
@@ -78,7 +79,14 @@ export function useScopes(agent?: AgentId): UseScopes {
     },
     [reload],
   );
-  return { access, loading, set };
+  const acceptOffer = React.useCallback(
+    async (a: AgentId, type: string, instanceId: string, adds: CrudAction[]) => {
+      await acceptScopeOffer(data, a, type, instanceId, adds);
+      await reload();
+    },
+    [data, reload],
+  );
+  return { access, loading, set, acceptOffer };
 }
 
 export function useAgents(): UseAgents {

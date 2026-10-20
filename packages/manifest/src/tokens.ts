@@ -120,11 +120,15 @@ export function verifyCallProof(
  * caller or another call than the one the bridge signed for is refused `invalid_token`, so a captured proof cannot be replayed for a
  * body that claims a different caller. Absent = not compared (callers older than 0.1.27 pass neither). A value that is given but
  * empty or not a string never matches (fail closed).
+ * v0.1.52 (C268 B, manifest 0.1.28): optional `bd` = sha256 of the exact hook request body bytes (the same digest format as every
+ * other `bd`, `sha256:<64 hex>`, shape-checked by the claim set: a malformed `bd` never gets here). When the proof carries `bd`
+ * it must equal `bind.bodyDigest` (the digest of the raw bytes the caller hashed BEFORE parsing); a proof with `bd` and no
+ * `bind.bodyDigest` is refused (fail closed). A proof without `bd` is not compared (a later slice flag makes it required).
  */
 export function verifyHookProof(
   token: string,
   ctx: TrustContext,
-  bind: { hook: string; phase: HookPhase; contextDigest: Sha256Digest; inputDigest?: Sha256Digest; sub?: string; call?: string },
+  bind: { hook: string; phase: HookPhase; contextDigest: Sha256Digest; inputDigest?: Sha256Digest; sub?: string; call?: string; bodyDigest?: Sha256Digest },
   replay?: ReplayGuard,
 ): VerifiedCallProof<CallProofHookClaims> | Refusal {
   const r = verifyProof<CallProofHookClaims>(token, ctx);
@@ -135,6 +139,7 @@ export function verifyHookProof(
   if (c.ctx !== bind.contextDigest || c.in !== bind.inputDigest) return kindFail("body digests");
   if (bind.sub !== undefined && (typeof bind.sub !== "string" || bind.sub === "" || c.sub !== bind.sub)) return kindFail("sub");
   if (bind.call !== undefined && (typeof bind.call !== "string" || bind.call === "" || c.call !== bind.call)) return kindFail("call");
+  if (c.bd !== undefined && c.bd !== bind.bodyDigest) return kindFail("bd");
   if (!once(replay, c, ctx.now)) return refusal(INVALID_TOKEN, "step 10: jti replay");
   return { ok: true, claims: c };
 }

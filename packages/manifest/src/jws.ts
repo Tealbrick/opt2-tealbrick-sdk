@@ -161,15 +161,16 @@ const CLAIM_SPECS: Record<ClaimTyp, ClaimSpec> = {
     sub: re(refRe("agt", "ins", "brg")),
     aud: INS,
     required: { call: re(idRe("call")) },
-    optional: { gjti: ulidC, op: str(128), in: digestC, ctx: digestC, hook: str(128), phase: oneOf(HOOK_PHASES), bop: oneOf(BRIDGE_OPS), hv: holdVerdictC },
-    // variants told apart by exactly one of gjti / hook / bop (CREDENTIALS §10)
+    optional: { gjti: ulidC, op: str(128), in: digestC, ctx: digestC, hook: str(128), phase: oneOf(HOOK_PHASES), bop: oneOf(BRIDGE_OPS), hv: holdVerdictC, bd: digestC },
+    // variants told apart by exactly one of gjti / hook / bop (CREDENTIALS §10); v0.1.52 (C268 B): `bd` (sha256 of the raw hook
+    // request body) is allowed ONLY on the hook variant; on an op or bridge-op proof it stays an unknown claim ("... proof shape")
     cross: (c) => {
       const variants = ["gjti", "hook", "bop"].filter((k) => has(c, k));
       if (variants.length !== 1) return "call proof variant";
       const only = (req: string[], allowed: string[]) =>
         req.every((k) => has(c, k)) && Object.keys(c).every((k) => BASE.includes(k) || k === "call" || req.includes(k) || allowed.includes(k));
       if (variants[0] === "gjti") return CALLER(c.sub) && only(["gjti", "op", "in", "ctx"], ["hv"]) ? null : "op proof shape";
-      if (variants[0] === "hook") return CALLER(c.sub) && only(["hook", "phase", "ctx"], ["in"]) ? null : "hook proof shape";
+      if (variants[0] === "hook") return CALLER(c.sub) && only(["hook", "phase", "ctx"], ["in", "bd"]) ? null : "hook proof shape";
       return c.sub === c.iss && only(["bop"], ["op", "in"]) ? null : "bridge-op proof shape";
     },
   },

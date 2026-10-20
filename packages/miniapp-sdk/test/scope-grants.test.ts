@@ -188,7 +188,7 @@ describe("SDK-INSTANCE-GRANT", () => {
     const r = await personOp(b, s, "draft_start", { agent: b.w.agents.b, id: "d1", access: "read_write" });
     assert.equal(r.status, 200, JSON.stringify(r.body));
     const row = r.body.output.row;
-    assert.deepEqual(row, { agent: b.w.agents.b, type: "notebook", instanceId: "d1", access: "read_write", authority: "bounded", source: "app", grantedByOp: "draft_start" });
+    assert.deepEqual(row, { agent: b.w.agents.b, type: "notebook", instanceId: "d1", access: "read_write", authority: "bounded", source: "app", grantedByOp: "draft_start", crud: ["read", "create", "update", "delete"] });
     const listed = (await rows(b.w.agents.b)).find((x) => x.instanceId === "d1");
     assert.deepEqual(listed, row);
     const a = (await audit()).find((x) => det(x).instance === "d1");
@@ -204,7 +204,7 @@ describe("SDK-INSTANCE-GRANT", () => {
   test("tb.scopes_set writes source owner and clears grantedByOp; defaults report source default", async () => {
     await personOp(b, s, "tb.scopes_set", { agent: b.w.agents.b, type: "notebook", id: "d1", access: "read" });
     const owner = (await rows(b.w.agents.b)).find((x) => x.instanceId === "d1");
-    assert.deepEqual(owner, { agent: b.w.agents.b, type: "notebook", instanceId: "d1", access: "read", authority: "owner", source: "owner" });
+    assert.deepEqual(owner, { agent: b.w.agents.b, type: "notebook", instanceId: "d1", access: "read", authority: "owner", source: "owner", crud: ["read"] });
     // agent A calls once: first sight applies the manifest defaults
     assert.equal((await agentOp(b, "scope_probe", {})).status, 200);
     const own = (await rows(b.w.agents.a)).find((x) => x.instanceId === b.w.agents.a);
@@ -424,7 +424,7 @@ describe("SDK-INSTANCE-GRANT: store level", () => {
     const { st, db, cleanup } = store([{ kind: "own", access: "read_write" }]);
     try {
       db.prepare("INSERT INTO tb_scopes (agent, type, instance_id, access) VALUES ('agt_old', 'notebook', 'x', 'read')").run();
-      assert.deepEqual(await st.access("agt_old" as never, "notebook", "x"), { agent: "agt_old", type: "notebook", instanceId: "x", access: "read", authority: "bounded" });
+      assert.deepEqual(await st.access("agt_old" as never, "notebook", "x"), { agent: "agt_old", type: "notebook", instanceId: "x", access: "read", authority: "bounded", crud: ["read"] });
       assert.ok(SDK_MIGRATIONS.some((m) => m.name === "sdk_scope_source" && /ADD COLUMN source/.test(m.sql) && !/DROP|UPDATE|DELETE/i.test(m.sql)));
     } finally {
       cleanup();

@@ -1,14 +1,14 @@
 // Grantless bridge→app routes (SDK-API §3.2): hook calls (`verifyHookProof`) and the bridge ops catalog, resolve,
 // mark, scope-summary (`verifyBridgeOpProof`, C16 B5). No receipts, no hooks, no agent action.
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { bridgeOpBinding, digest, hookCallerRef, hookResponseProblem, mcpToolName, toolNameFits, verifyBridgeOpProof, verifyHookProof } from "@opt2-tealbrick/manifest";
+import { bridgeOpBinding, digest, hookCallerRef, hookResponseProblem, mcpToolName, sha256Bytes, toolNameFits, verifyBridgeOpProof, verifyHookProof } from "@opt2-tealbrick/manifest";
 import { BRIDGE_HEADERS, type HookRequest, type ScopeSummaryResult } from "@opt2-tealbrick/spec/bridge";
 import type { BridgeOp } from "@opt2-tealbrick/spec/credentials";
 import { type DynamicCatalogEntry, EFFECTS, HOOK_PHASES, type Operation } from "@opt2-tealbrick/spec/manifest";
 import type { Json, TrustContext } from "@opt2-tealbrick/spec/sdk";
 import type { SdkHookContext } from "./context.ts";
 import { TbError } from "./errors.ts";
-import { header, readJson, requestId, sendError, sendJson } from "./http.ts";
+import { header, readJson, readRaw, requestId, sendError, sendJson } from "./http.ts";
 import { withinCeiling } from "./ops.ts";
 import type { Runtime } from "./runtime.ts";
 
@@ -41,12 +41,26 @@ async function withTimeout<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
 // The phase's answer shape is the ONE shared rule (manifest `hookResponseProblem`, L1): before {allow, reason?, hold?}
 // (v0.1.13 G1 hold verdict), context keys `<product>.` and never `tb.*`, after {output?, redactions?}. The SDK used its
 // own key list until 0.1.16 and turned every `hold` answer into hook_failed (samples v0.2.0 finding).
+/** The hook body: the raw bytes parsed once. Empty or not JSON → 400 `input_invalid` (the digest was taken from the same bytes). */
+function parseHookBody(raw: Buffer): unknown {
+  if (raw.length === 0) throw new TbError("input_invalid", "hook body is empty", 400);
+  try {
+    return JSON.parse(raw.toString("utf8"));
+  } catch {
+    throw new TbError("input_invalid", "body is not JSON", 400);
+  }
+}
+
 // ── POST /tb/v1/hooks/:hookId ────────────────────────────────────────────────
 export async function handleHook(rt: Runtime, req: IncomingMessage, res: ServerResponse, hookId: string): Promise<void> {
   const rid = requestId();
   try {
     const trust = ready(rt);
-    const body = await readJson(req);
+    // v0.1.36 (C268 B/C268c, spec 0.1.52): read the RAW bytes, hash them BEFORE parsing (a proof's `bd` = sha256 of exactly these
+    // bytes), then parse the SAME bytes: the handler gets the object the digest covers. An empty or non-JSON body is refused 400.
+    const raw = await readRaw(req);
+    const bodyDigest = sha256Bytes(raw);
+    const body = parseHookBody(raw);
     const hook = rt.manifest.hooks?.find((h) => h.id === hookId);
     const handler = rt.def.hooks?.[hookId];
     if (!hook || !handler) throw new TbError("unknown_hook", `hook not declared: ${hookId}`, 404);
@@ -64,6 +78,8 @@ export async function handleHook(rt: Runtime, req: IncomingMessage, res: ServerR
         // SAME caller and call id, else 401 call_proof_invalid. A body without a usable caller ref or call id binds "" and never matches.
         sub: hookCallerRef((r.call as { caller?: unknown }).caller),
         call: typeof r.call.id === "string" ? r.call.id : "",
+        // v0.1.36 (C268 B): when the proof carries `bd`, it must equal the digest of the raw body received; absent = not compared
+        bodyDigest,
       },
       rt.replay,
     );

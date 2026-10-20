@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { InstanceSlice, WorkspaceConfig } from "@opt2-tealbrick/spec/bridge";
 import { type CallId, type ConnectionId, LEEWAY_S, TYP } from "@opt2-tealbrick/spec/credentials";
-import { digest } from "../src/jcs.ts";
+import { digest, sha256Bytes } from "../src/jcs.ts";
 import { type Issue, memoryReplayGuard, signJws } from "../src/jws.ts";
 import { keySetFrom } from "../src/keys.ts";
 import { opaqueValue, ulid } from "../src/random.ts";
@@ -154,6 +154,51 @@ test("verifyHookProof: positive, phase / input binding, replay", async () => {
   const replay = memoryReplayGuard();
   assert.ok(verifyHookProof(h, w.trust, hb, replay).ok);
   assert.equal(code(verifyHookProof(h, w.trust, hb, replay)), "invalid_token");
+});
+
+test("verifyHookProof (manifest 0.1.28, C268 B): bd binds the whole body (fires on bad)", { timeout: 60_000 }, async () => {
+  const { w, brg, call, bind } = await proofs();
+  const claims = { iss: brg, sub: `tb:agt:${w.agt}` as const, aud: `tb:ins:${w.ins}` as const, call, hook: "audit", phase: "before" as const, ctx: bind.contextDigest, iat: NOW };
+  const hb = { hook: "audit", phase: "before" as const, contextDigest: bind.contextDigest };
+  const body = new TextEncoder().encode('{"call":{"id":"x"},"ctx":{},"in":{}}');
+  const bd = sha256Bytes(body);
+  const withBd = await signHookProof({ ...claims, bd }, w.bridgeKey);
+  // match: ok, also together with `in`, `sub` and `call`
+  assert.ok(verifyHookProof(withBd, w.trust, { ...hb, bodyDigest: bd }).ok);
+  const full = await signHookProof({ ...claims, in: bind.inputDigest, bd }, w.bridgeKey);
+  assert.ok(verifyHookProof(full, w.trust, { ...hb, inputDigest: bind.inputDigest, sub: `tb:agt:${w.agt}`, call, bodyDigest: bd }).ok);
+  // mismatch (one byte changed), a digest of nothing, and a proof with bd but no bound digest: refused (fail closed)
+  const other = sha256Bytes(new TextEncoder().encode('{"call":{"id":"y"},"ctx":{},"in":{}}'));
+  assert.equal(code(verifyHookProof(withBd, w.trust, { ...hb, bodyDigest: other })), "invalid_token");
+  assert.equal(code(verifyHookProof(withBd, w.trust, { ...hb, bodyDigest: "" as never })), "invalid_token");
+  assert.equal(code(verifyHookProof(withBd, w.trust, hb)), "invalid_token");
+  // absent bd: not compared, whatever the caller hashed (a later slice flag makes it required)
+  const plain = await signHookProof(claims, w.bridgeKey);
+  assert.ok(verifyHookProof(plain, w.trust, hb).ok);
+  assert.ok(verifyHookProof(plain, w.trust, { ...hb, bodyDigest: other }).ok);
+  // a refused bd does not use up the one-time proof
+  const replay = memoryReplayGuard();
+  assert.equal(code(verifyHookProof(withBd, w.trust, { ...hb, bodyDigest: other }, replay)), "invalid_token");
+  assert.ok(verifyHookProof(withBd, w.trust, { ...hb, bodyDigest: bd }, replay).ok);
+  assert.equal(code(verifyHookProof(withBd, w.trust, { ...hb, bodyDigest: bd }, replay)), "invalid_token");
+  // malformed bd is refused by the claim shape, at signing and when a forged token carries it
+  for (const bad of ["", "sha256:abc", `sha256:${"A".repeat(64)}`, `sha1:${"a".repeat(40)}`, 7, null, [bd]]) {
+    await assert.rejects(signHookProof({ ...claims, bd: bad } as never, w.bridgeKey), /claim bd/, JSON.stringify(bad));
+    const forged = await rawSign({ alg: "EdDSA", typ: TYP.callProof, kid: w.bridgeKey.kid }, { ...claims, bd: bad, exp: NOW + 60, jti: ulid() }, w.bridgeKey);
+    assert.equal(code(verifyHookProof(forged, w.trust, { ...hb, bodyDigest: bd })), "invalid_token", JSON.stringify(bad));
+  }
+});
+
+test("call proofs (manifest 0.1.28, C268 B): bd is refused on an op proof and on a bridge-op proof (shape)", { timeout: 60_000 }, async () => {
+  const { w, brg, call, opClaims, bind } = await proofs();
+  const bd = sha256Bytes(new TextEncoder().encode("{}"));
+  await assert.rejects(signCallProof({ ...opClaims, bd } as never, w.bridgeKey), /op proof shape/);
+  await assert.rejects(signBridgeOpProof({ iss: brg, sub: brg, aud: `tb:ins:${w.ins}`, call, bop: "scope_summary", iat: NOW, bd } as never, w.bridgeKey), /bridge-op proof shape/);
+  // a forged (rawly signed) token with bd on those variants is refused by the verifiers too
+  const op = await rawSign({ alg: "EdDSA", typ: TYP.callProof, kid: w.bridgeKey.kid }, { ...opClaims, bd, exp: NOW + 60, jti: ulid() }, w.bridgeKey);
+  assert.equal(code(verifyCallProof(op, w.trust, bind)), "invalid_token");
+  const bop = await rawSign({ alg: "EdDSA", typ: TYP.callProof, kid: w.bridgeKey.kid }, { iss: brg, sub: brg, aud: `tb:ins:${w.ins}`, call, bop: "scope_summary", bd, iat: NOW, exp: NOW + 60, jti: ulid() }, w.bridgeKey);
+  assert.equal(code(verifyBridgeOpProof(bop, w.trust, { bop: "scope_summary" })), "invalid_token");
 });
 
 test("verifyHookProof (manifest 0.1.27, C268 A): sub and call are compared when given, never replay-burning on a mismatch (fires on bad)", async () => {
