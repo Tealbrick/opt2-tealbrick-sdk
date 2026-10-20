@@ -735,14 +735,18 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   await s.run(
     "A2.hook_bd_malformed",
     "a hook proof with a malformed bd is refused (C268 B)",
-    "bd = \"\", \"sha256:abc\", upper-case hex, another algorithm, a number or null → 401 call_proof_invalid; the matching bd on the same hook is answered",
+    "bd = \"\", \"sha256:abc\", upper-case hex, another algorithm, a number or null → 401 call_proof_invalid; the matching bd on the same hook is answered, and so is a VALID bd added by the same re-signing helper (positive control)",
     async () => {
       const gate = bdGate();
       if (gate) return gate;
       const h = hooks[0] as Hook;
       const good = await c().callHook(h.id, h.phase, hookReq(h), { bd: "match" });
       if (good.status !== 200) return bad(`${h.id}: the call with a matching bd was ${show(good)} — the baseline call must be answered`);
-      const seen: string[] = [];
+      // positive control (0.1.26): the forged cases are minted by re-signing the proof with an extra `bd` claim (Mint.withExtraClaim). The
+      // SAME path with a VALID bd must be answered, so a broken minting helper (every re-signed proof refused) cannot pass the rows below.
+      const control = await c().callHook(h.id, h.phase, hookReq(h), { bd: "resigned_valid" });
+      if (control.status !== 200) return bad(`${h.id}: the positive control (a proof re-signed through withExtraClaim with a VALID bd) was ${show(control)} — it must be answered, else the refusals below prove nothing`);
+      const seen: string[] = [`control (re-signed, valid bd): ${control.status}`];
       for (const forged of ["", "sha256:abc", `sha256:${"A".repeat(64)}`, `md5:${"a".repeat(32)}`, 7, null] as const) {
         const o = refusedWith(await c().callHook(h.id, h.phase, hookReq(h), { bd: { forged } }), PROOF_CODES);
         seen.push(`${JSON.stringify(forged)}: ${o.asserted}`);
@@ -752,9 +756,31 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     },
   );
   await s.run(
+    "A2.hook_bd_raw_bytes",
+    "a hook proof's bd hashes the received bytes, not a re-serialisation of the body (C268 B)",
+    "the same JSON body sent as other bytes (pretty-printed; every object's keys reversed) under the bd of the ORIGINAL bytes → 401 call_proof_invalid; the same bytes under their own bd, and the original bytes under their bd, are answered",
+    async () => {
+      const gate = bdGate();
+      if (gate) return gate;
+      const h = hooks[0] as Hook;
+      const seen: string[] = [];
+      const good = await c().callHook(h.id, h.phase, hookReq(h), { bd: "match" });
+      if (good.status !== 200) return bad(`${h.id}: the original bytes under their own bd were ${show(good)} — the baseline call must be answered`);
+      for (const how of ["spaced", "reordered"] as const) {
+        // control: these bytes under THEIR OWN bd are answered, so the refusal below is the byte binding and not a body the app cannot read
+        const own = await c().callHook(h.id, h.phase, hookReq(h), { bd: { reserialised: how, hash: "sent" } });
+        if (own.status !== 200) return bad(`${[...seen, `${h.id}: the ${how} bytes under their own bd were ${show(own)}`].join("; ")} — the control must be answered, else the refusal proves nothing`);
+        const o = refusedWith(await c().callHook(h.id, h.phase, hookReq(h), { bd: { reserialised: how } }), PROOF_CODES);
+        seen.push(`${how}: own bd 200, original bd ${o.asserted}`);
+        if (!o.pass) return bad(`${h.id} ${seen.join("; ")} — bd must hash the bytes received, not a re-serialisation of the parsed body`);
+      }
+      return ok(`${h.id}: original bytes 200; ${seen.join("; ")}`);
+    },
+  );
+  await s.run(
     "A2.proof_bd_other_variants",
     "bd on an op proof or a bridge-op proof is refused by the shape rule (C268 B)",
-    "tb.hold_status with an op proof that carries bd → 401 call_proof_invalid; bridge op scope_summary with a bridge-op proof that carries bd → 401 call_proof_invalid; the same calls without bd are not refused",
+    "tb.hold_status with an op proof that carries bd → 401 call_proof_invalid; bridge op scope_summary with a bridge-op proof that carries bd → 401 call_proof_invalid; the same calls without bd, and re-signed by the same helper with no extra claim (and a hook proof with a VALID bd), are not refused",
     async () => {
       const gate = bdGate(false);
       if (gate) return gate;
@@ -763,9 +789,18 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
       if (AUTH_CODES.has(okOp.code ?? "") || !(okOp.status === 200 || okOp.status === 404)) return bad(`op proof without bd: ${show(okOp)} — the baseline call must not be refused`);
       const okBop = await c().callBridgeOp("scope_summary", {});
       if (okBop.status !== 200) return bad(`bridge-op proof without bd: ${show(okBop)} — the baseline call must be answered`);
+      // positive controls (0.1.26): the refusals below re-sign the proof with an extra claim (Mint.withExtraClaim). The SAME helper with no
+      // extra claim (an identity re-sign), and for a hook proof with a VALID bd, must be accepted, so a broken helper cannot pass this row.
+      const idOp = await c().callOp("tb.hold_status", hs, { extraProofClaims: {} });
+      if (AUTH_CODES.has(idOp.code ?? "") || !(idOp.status === 200 || idOp.status === 404)) return bad(`op proof re-signed with no extra claim: ${show(idOp)} — the positive control must not be refused`);
+      const idBop = await c().callBridgeOp("scope_summary", {}, { extraClaims: {} });
+      if (idBop.status !== 200) return bad(`bridge-op proof re-signed with no extra claim: ${show(idBop)} — the positive control must be answered`);
+      const h = hooks[0];
+      const idHook = h ? await c().callHook(h.id, h.phase, hookReq(h), { bd: "resigned_valid" }) : null;
+      if (idHook && idHook.status !== 200) return bad(`hook ${(h as Hook).id} proof re-signed with a VALID bd: ${show(idHook)} — the positive control must be answered`);
       const op = refusedWith(await c().callOp("tb.hold_status", hs, { extraProofClaims: { bd } }), PROOF_CODES);
       const bop = refusedWith(await c().callBridgeOp("scope_summary", {}, { extraClaims: { bd } }), PROOF_CODES);
-      return verdict(op.pass === true && bop.pass === true, `op proof: ${op.asserted}; bridge-op proof: ${bop.asserted}`);
+      return verdict(op.pass === true && bop.pass === true, `controls (re-signed, accepted): op proof ${show(idOp)}, bridge-op proof ${show(idBop)}, hook proof with a valid bd ${idHook ? idHook.status : "no hook declared"}; op proof with bd: ${op.asserted}; bridge-op proof with bd: ${bop.asserted}`);
     },
   );
   await s.run("C6.hook_proof_replay", "hook proof one-time (replay set)", "the same hook request sent twice → second refused call_proof_invalid", async () => {
@@ -1966,10 +2001,15 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   // (ScopeGrantRow.crud). An app update that widens the level does not widen the row: the row lists the new actions as `offer.adds`
   // and only `tb.scopes_set` with `acceptOffer: {adds}` (the SAME level, adds equal as a set) takes them. A black-box suite cannot ship
   // a new manifest, so the rows that need "an app update" restart the app on the same data dir with TBCONF_LEVEL_CRUD (level-crud.ts);
-  // a start module that does not apply it is detected by the manifest digest the app serves and those rows are not_applicable.
+  // a start module that does not apply it is detected by the manifest digest the app serves. From 0.1.26 that FAILS the two update rows
+  // for an app that reports SDK >= 0.1.36 or declares proofClaims ["bd"] (it must run them: a start module that ignores the variable would
+  // otherwise skip the very rows that guard the owner-row rule); below 0.1.36 and without bd they stay not_applicable.
+  // `sdkVersion` is what the app SAYS in its claim (self-reported, not verified): the proofClaims declaration is the second signal.
+  const declaresBd = (): boolean => (b.claims[0]?.request.proofClaims as readonly string[] | undefined)?.includes("bd") === true;
+  const a21Strict = (): boolean => !versionBelow(b.claims[0]?.request.sdkVersion, SNAPSHOT_SINCE) || declaresBd();
   const a21Gate = (): Outcome | null => {
     const v = b.claims[0]?.request.sdkVersion;
-    return versionBelow(v, SNAPSHOT_SINCE) ? na(`SDK ${v} predates ${SNAPSHOT_SINCE} (owner rows keep their CRUD, spec 0.1.52): not applicable by version`) : null;
+    return a21Strict() ? null : na(`SDK ${v} (self-reported) predates ${SNAPSHOT_SINCE} (owner rows keep their CRUD, spec 0.1.52) and the app declares no proofClaims ["bd"]: not applicable by version`);
   };
   const sameSet = (x: readonly string[], y: readonly string[]) => x.length === y.length && subset(x, y) && subset(y, x);
   const listCrud = (r: FullRow | undefined) => (r?.crud ? `[${r.crud.join(",")}]` : "absent");
@@ -1986,7 +2026,11 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     if (changes.length === 0) return null;
     const served = (await c().get("/tb/v1/health")).body;
     const want = manifestDigest(applyLevelCrud(m, changes));
-    return isObj(served) && served.manifestDigest === want ? null : na(`the start module did not apply ${LEVEL_CRUD_ENV} (the app serves manifest ${isObj(served) ? String(served.manifestDigest) : "?"}, the updated manifest would be ${want}): update conformance.start.ts to apply parseLevelCrud/applyLevelCrud`);
+    if (isObj(served) && served.manifestDigest === want) return null;
+    const why = `the start module did not apply ${LEVEL_CRUD_ENV} (the app serves manifest ${isObj(served) ? String(served.manifestDigest) : "?"}, the updated manifest would be ${want}): update conformance.start.ts to apply parseLevelCrud/applyLevelCrud`;
+    // a21Gate lets only an app through that reports SDK >= 0.1.36 (self-reported) or declares proofClaims ["bd"]: for it "the level change did not apply" is a failure
+    const claimed = b.claims[0]?.request.sdkVersion;
+    return bad(`${why} — the app reports SDK ${claimed ?? "?"} (self-reported)${declaresBd() ? ' and declares proofClaims ["bd"]' : ""}, so it must run this row; a row that was not exercised is not a pass`);
   };
   /** the call of the row: `op` on `inst` for `agent`, with a Portal grant crud of `grant` (the row is then the only limiter) */
   const a21Call = (op: Operation, agent: AgentId, inst: string, grant: CrudAction[]) =>
@@ -1996,7 +2040,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   await s.run(
     "A21.owner_row_widened_level",
     "an app update that widens a level does not widen an owner row; the owner accepts the offer explicitly (C283b/C283c)",
-    "owner row at level L; the app updates so L gains the actions of a scoped op: the call needing them is refused scope_denied (also with a Portal grant that covers it), the row lists crud without them and offer.adds = them; a plain re-set of L does not accept; acceptOffer with other adds → 409 offer_changed; acceptOffer with the current adds (any order, duplicates) → the call runs",
+    "owner row at level L; the app updates so L gains the actions of a scoped op: the call needing them is refused scope_denied (also with a Portal grant that covers it), the row lists crud without them and offer.adds = them; a plain re-set of L does not accept; acceptOffer with other adds → 409 offer_changed; acceptOffer with the current adds (any order, duplicates) → the call runs. An app that reports SDK >= 0.1.36 (self-reported) or declares proofClaims [\"bd\"] must apply TBCONF_LEVEL_CRUD: a start module that ignores it FAILS this row",
     async () => {
       const gate = a21Gate();
       if (gate) return gate;
@@ -2071,7 +2115,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   await s.run(
     "A21.owner_row_narrowed_level",
     "an app update that narrows a level narrows an owner row at once (C283b/C283c)",
-    "owner row at the lowest level that covers a scoped op (the call runs above the Portal grant); the app updates so that level loses the op's actions: the call is refused scope_denied, the row lists the narrower crud and no offer",
+    "owner row at the lowest level that covers a scoped op (the call runs above the Portal grant); the app updates so that level loses the op's actions: the call is refused scope_denied, the row lists the narrower crud and no offer. An app that reports SDK >= 0.1.36 (self-reported) or declares proofClaims [\"bd\"] must apply TBCONF_LEVEL_CRUD: a start module that ignores it FAILS this row",
     async () => {
       const gate = a21Gate();
       if (gate) return gate;
@@ -2170,7 +2214,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     "A21.snapshot_backfill",
     "the schema migration backfills owner rows once, audited; a NULL or unparsable snapshot reads [] (C283c)",
     "migration sdk_scope_crud_snapshot fills each owner row from the manifest that runs it, with one audit scope.snapshot_backfill per row, only once; a NULL, unparsable or non-array snapshot on an owner row then gives crud []",
-    na("needs a data directory written by an older SDK and direct access to the app's database: not observable black-box (CONFORMANCE v0.1.25); covered by the SDK's own migration tests (owner-authority.test.ts, backup.test.ts)"),
+    na("not observable from outside: it needs a data directory written by an older SDK and direct access to the app's database. It is covered ONLY by the miniapp-sdk tests (packages/miniapp-sdk/test/owner-authority.test.ts, the schema-10 tests); a conformance run says nothing about it"),
   );
 
   // ── A10 post-approval retry + P1 held release while paused + C8 no standing approval ──

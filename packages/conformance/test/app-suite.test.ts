@@ -997,7 +997,7 @@ describe("A20 owner-set access is primary + caller_unverified + hook proof bindi
 });
 
 // ── spec 0.1.52 (C283b/C283c, C268 B/C268c), conformance 0.1.25: A21 owner rows keep their CRUD, hook proof bd, proofClaims ──────────
-describe("A21 owner rows keep their CRUD + hook proof bd + proofClaims (conformance 0.1.25)", { timeout: 300_000 }, () => {
+describe("A21 owner rows keep their CRUD + hook proof bd + proofClaims (conformance 0.1.25, 0.1.26)", { timeout: 600_000 }, () => {
   const am = structuredClone(manifest) as Manifest;
   const space = am.scopes?.[0];
   if (!space) throw new Error("sample has no scope");
@@ -1005,7 +1005,7 @@ describe("A21 owner rows keep their CRUD + hook proof bd + proofClaims (conforma
   const runB = (faults: MiniAppFaults = {}) => runApp({ manifest: am, manifestPath: path, config: null, start: (env) => startMiniApp(am, env, faults), deployTemplate: template, timeoutMs: 8000 });
   const st = (r: Report, id: string) => r.checks.find((c) => c.id === id);
   const UPDATE_IDS = ["A21.owner_row_widened_level", "A21.owner_row_narrowed_level"];
-  const BD_IDS = ["A2.proof_claims_declared", "A2.hook_bd_binds_body", "A2.hook_bd_malformed", "A2.proof_bd_other_variants"];
+  const BD_IDS = ["A2.proof_claims_declared", "A2.hook_bd_binds_body", "A2.hook_bd_malformed", "A2.hook_bd_raw_bytes", "A2.proof_bd_other_variants"];
   const NEW_IDS = [...UPDATE_IDS, "A21.accept_offer_rules", ...BD_IDS];
 
   it("a correct app passes every new row; the row text names what was refused and accepted", { timeout: 120_000 }, async () => {
@@ -1018,9 +1018,15 @@ describe("A21 owner rows keep their CRUD + hook proof bd + proofClaims (conforma
     assert.match(st(r, "A21.accept_offer_rules")?.asserted ?? "", /409 offer_changed.*400 input_invalid.*400 input_invalid/);
     assert.match(st(r, "A2.proof_claims_declared")?.asserted ?? "", /claim \["bd"\]; (\d+) of \1 status pushes carry \["bd"\]/);
     assert.match(st(r, "A2.hook_bd_binds_body")?.asserted ?? "", /\(agent\): 401 call_proof_invalid.*\(app\): 401 call_proof_invalid/);
+    // 0.1.26: the positive controls (a proof re-signed by the same helper with a VALID bd is answered) and the raw-bytes row
+    assert.match(st(r, "A2.hook_bd_malformed")?.asserted ?? "", /control \(re-signed, valid bd\): 200.*: 401 call_proof_invalid/);
+    assert.match(st(r, "A2.proof_bd_other_variants")?.asserted ?? "", /controls \(re-signed, accepted\): op proof .*bridge-op proof 200.*hook proof with a valid bd 200; op proof with bd: 401/);
+    assert.match(st(r, "A2.hook_bd_raw_bytes")?.asserted ?? "", /original bytes 200; spaced: own bd 200, original bd 401 call_proof_invalid; reordered: own bd 200, original bd 401 call_proof_invalid/);
+    // A21.snapshot_backfill says plainly where it is covered
+    assert.match(st(r, "A21.snapshot_backfill")?.asserted ?? "", /not observable from outside.*ONLY by the miniapp-sdk tests.*owner-authority\.test\.ts/);
   });
 
-  it("an SDK older than 0.1.36 gets not_applicable by version for every new row, whatever it does", async () => {
+  it("an SDK older than 0.1.36 gets not_applicable by version for every new row, whatever it does", { timeout: 120_000 }, async () => {
     const r = await runB({ reportedSdkVersion: "0.1.35", ownerRowFollowsLevel: true, hookIgnoresBd: true, noProofClaims: true, acceptNullDeletes: true });
     for (const id of NEW_IDS) {
       assert.equal(st(r, id)?.status, "not_applicable", `${id}: ${st(r, id)?.asserted}`);
@@ -1030,14 +1036,29 @@ describe("A21 owner rows keep their CRUD + hook proof bd + proofClaims (conforma
     assert.equal(st(ok, "A2.proof_claims_declared")?.status, "fail");
   });
 
-  it("a start module that does not apply TBCONF_LEVEL_CRUD: the update rows are not_applicable (never a silent pass), the others still run", async () => {
+  it("a start module that does not apply TBCONF_LEVEL_CRUD: for an app that reports SDK >= 0.1.36 the update rows FAIL (a row that was not exercised is not a pass), the others still run", { timeout: 120_000 }, async () => {
     const r = await runB({ ignoresLevelCrud: true });
     for (const id of UPDATE_IDS) {
-      assert.equal(st(r, id)?.status, "not_applicable", `${id}: ${st(r, id)?.asserted}`);
-      assert.match(st(r, id)?.asserted ?? "", /did not apply TBCONF_LEVEL_CRUD/);
+      assert.equal(st(r, id)?.status, "fail", `${id}: ${st(r, id)?.asserted}`);
+      assert.match(st(r, id)?.asserted ?? "", /did not apply TBCONF_LEVEL_CRUD.*self-reported.*a row that was not exercised is not a pass/);
     }
     for (const id of ["A21.accept_offer_rules", ...BD_IDS]) assert.equal(st(r, id)?.status, "pass", `${id}: ${st(r, id)?.asserted}`);
-    assert.deepEqual(failing(r), [], renderMarkdown(r));
+    assert.deepEqual(failing(r), UPDATE_IDS, renderMarkdown(r));
+  });
+
+  it("the same start module with an SDK that reports >= 0.1.36 only through its release number, or only through proofClaims [bd], also FAILS; below 0.1.36 without bd it stays not_applicable", { timeout: 120_000 }, async () => {
+    const version = await runB({ ignoresLevelCrud: true, reportedSdkVersion: "0.1.36", noProofClaims: true });
+    for (const id of UPDATE_IDS) assert.equal(st(version, id)?.status, "fail", `${id}: ${st(version, id)?.asserted}`);
+    const bd = await runB({ ignoresLevelCrud: true, reportedSdkVersion: "0.1.35" });
+    for (const id of UPDATE_IDS) {
+      assert.equal(st(bd, id)?.status, "fail", `${id}: ${st(bd, id)?.asserted}`);
+      assert.match(st(bd, id)?.asserted ?? "", /declares proofClaims \["bd"\]/);
+    }
+    const old = await runB({ ignoresLevelCrud: true, reportedSdkVersion: "0.1.35", noProofClaims: true });
+    for (const id of UPDATE_IDS) {
+      assert.equal(st(old, id)?.status, "not_applicable", `${id}: ${st(old, id)?.asserted}`);
+      assert.match(st(old, id)?.asserted ?? "", /\(self-reported\) predates 0\.1\.36/);
+    }
   });
 
   // each fault breaks exactly one rule; the matching row MUST fail and a row of another rule MUST still pass
@@ -1053,6 +1074,9 @@ describe("A21 owner rows keep their CRUD + hook proof bd + proofClaims (conforma
     ["accepts an offer for another level than the row's", { acceptOtherLevelOk: true }, "A21.accept_offer_rules", /another level|expected 400 input_invalid/, "A21.owner_row_widened_level"],
     ["declares no proofClaims", { noProofClaims: true }, "A2.proof_claims_declared", /claim null/, "A2.hook_bd_binds_body"],
     ["does not compare a hook proof's bd with the body", { hookIgnoresBd: true }, "A2.hook_bd_binds_body", null, "A2.hook_bd_malformed"],
+    ["does not compare a hook proof's bd with the body, so the same value in other bytes is accepted", { hookIgnoresBd: true }, "A2.hook_bd_raw_bytes", /bd must hash the bytes received/, "A2.hook_bd_malformed"],
+    // conformance 0.1.26 (mutation c): the SDK hashes a re-serialisation of the parsed body instead of the bytes it received
+    ["hashes a re-serialisation of the body, not the bytes received", { hookHashesReserialised: true }, "A2.hook_bd_raw_bytes", /spaced/, "A2.hook_bd_malformed"],
     ["does not verify a proof that carries bd", { bdProofsUnverified: true }, "A2.hook_bd_malformed", null, "A2.proof_claims_declared"],
     ["does not verify an op or bridge-op proof that carries bd", { bdProofsUnverified: true }, "A2.proof_bd_other_variants", null, "A2.proof_claims_declared"],
   ];

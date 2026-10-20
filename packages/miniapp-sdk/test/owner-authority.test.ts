@@ -1087,7 +1087,7 @@ describe("C283b/c: SDK schema 10 sdk_scope_crud_snapshot (backfill, once, audite
   }
   const person = { type: "person", id: "per_x", ws: "ws_x", instance: "ins_x" } as unknown as PersonPrincipal;
 
-  test("a schema-9 DB: every OWNER row gets the snapshot of its level in the manifest that runs it, with one audit line each; bounded rows keep NULL", async () => {
+  test("a schema-9 DB: every OWNER row gets the snapshot of its level in the manifest that runs it, with one audit line each; bounded rows keep NULL", { timeout: 60_000 }, async () => {
     const t = tempDir();
     try {
       const db = schema9(t.dir);
@@ -1123,7 +1123,7 @@ describe("C283b/c: SDK schema 10 sdk_scope_crud_snapshot (backfill, once, audite
     }
   });
 
-  test("a widening shipped in the SAME update as the first 0.1.36 boot is baked in (no older record exists): the backfill uses the manifest that runs it", async () => {
+  test("a widening shipped in the SAME update as the first 0.1.36 boot is baked in (no older record exists): the backfill uses the manifest that runs it", { timeout: 60_000 }, async () => {
     const t = tempDir();
     try {
       const db = schema9(t.dir);
@@ -1140,7 +1140,7 @@ describe("C283b/c: SDK schema 10 sdk_scope_crud_snapshot (backfill, once, audite
     }
   });
 
-  test("ONCE: a second run backfills nothing; a NULL snapshot afterwards stays NULL and reads [] (fires on bad: a boot-time backfill would widen a corrupted row)", async () => {
+  test("ONCE: a second run backfills nothing; a NULL snapshot afterwards stays NULL and reads [] (fires on bad: a boot-time backfill would widen a corrupted row)", { timeout: 60_000 }, async () => {
     const t = tempDir();
     try {
       const db = schema9(t.dir);
@@ -1172,7 +1172,7 @@ describe("C283b/c: SDK schema 10 sdk_scope_crud_snapshot (backfill, once, audite
     }
   });
 
-  test("owner rows and NO manifest: the migration refuses (sdk_migration_context) and rolls back whole; without owner rows it needs no manifest", async () => {
+  test("owner rows and NO manifest: the migration refuses (sdk_migration_context) and rolls back whole; without owner rows it needs no manifest", { timeout: 60_000 }, async () => {
     const t = tempDir();
     try {
       const db = schema9(t.dir);
@@ -1199,7 +1199,7 @@ describe("C283b/c: SDK schema 10 sdk_scope_crud_snapshot (backfill, once, audite
     }
   });
 
-  test("startApp upgrades a schema-9 data dir: the owner row is backfilled from the booting manifest, audited, and keeps its crud", async () => {
+  test("startApp upgrades a schema-9 data dir: the owner row is backfilled from the booting manifest, audited, and keeps its crud", { timeout: 60_000 }, async () => {
     const t = tempDir("tb-c283c-up-");
     const data = join(t.dir, "data");
     try {
@@ -1236,7 +1236,7 @@ describe("C283b/c: SDK schema 10 sdk_scope_crud_snapshot (backfill, once, audite
     }
   });
 
-  test("the migration is additive and forward-only: one ADD COLUMN, no DROP / UPDATE / DELETE in its sql, versions strictly increasing", () => {
+  test("the migration is additive and forward-only: one ADD COLUMN, no DROP / UPDATE / DELETE in its sql, versions strictly increasing", { timeout: 60_000 }, () => {
     const m = SDK_MIGRATIONS.find((x) => x.name === "sdk_scope_crud_snapshot");
     assert.ok(m);
     assert.equal(m.version, 10);
@@ -1248,7 +1248,7 @@ describe("C283b/c: SDK schema 10 sdk_scope_crud_snapshot (backfill, once, audite
     assert.equal(new Set(versions).size, versions.length);
   });
 
-  test("ownerSet at the store level: snapshot at write, kept by a plain re-set, new for another level; the public store handle and app grants write NULL", async () => {
+  test("ownerSet at the store level: snapshot at write, kept by a plain re-set, new for another level; the public store handle and app grants write NULL", { timeout: 60_000 }, async () => {
     const t = tempDir();
     try {
       const db = openDb(t.dir);

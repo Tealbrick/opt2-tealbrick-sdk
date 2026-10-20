@@ -77,6 +77,7 @@ export const APP_CHECK_IDS = [
   "A2.proof_claims_declared",
   "A2.hook_bd_binds_body",
   "A2.hook_bd_malformed",
+  "A2.hook_bd_raw_bytes",
   "A2.proof_bd_other_variants",
   "A2.hook_call_mismatch",
   "A2.hook_unknown",

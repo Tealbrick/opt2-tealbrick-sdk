@@ -212,10 +212,12 @@ export interface MiniAppFaults {
   noOffer?: boolean;
   /** spec 0.1.52: scope rows carry no effective `crud` member (fails A21.owner_row_widened_level / A21.owner_row_narrowed_level) */
   noEffectiveCrud?: boolean;
-  /** spec 0.1.52: the start module does not apply TBCONF_LEVEL_CRUD (the A21 update rows are not_applicable) */
+  /** spec 0.1.52: the start module does not apply TBCONF_LEVEL_CRUD (the A21 update rows FAIL for an app that reports SDK >= 0.1.36 or declares proofClaims [bd], conformance 0.1.26) */
   ignoresLevelCrud?: boolean;
   /** spec 0.1.52 (C268 B): the hook route accepts any `bd` (compares nothing; fails A2.hook_bd_binds_body) */
   hookIgnoresBd?: boolean;
+  /** conformance 0.1.26 (mutation c): bd is the sha256 of a RE-SERIALISATION of the parsed body (JSON.stringify(JSON.parse(raw))), not of the bytes received (fails A2.hook_bd_raw_bytes) */
+  hookHashesReserialised?: boolean;
   /** spec 0.1.52: a proof that carries `bd` is not verified at all, on any route (fails A2.hook_bd_malformed and A2.proof_bd_other_variants) */
   bdProofsUnverified?: boolean;
   /** spec 0.1.52: the claim and the status pushes declare no proofClaims (fails A2.proof_claims_declared) */
@@ -952,7 +954,7 @@ export async function startMiniApp(released: Manifest, env: Record<string, strin
             hook: hook.id,
             phase: hook.phase,
             contextDigest: digest(b.context),
-            bodyDigest: faults.hookIgnoresBd ? (typeof bdClaim === "string" ? (bdClaim as never) : undefined) : sha256Bytes(Buffer.from(raw)),
+            bodyDigest: faults.hookIgnoresBd ? (typeof bdClaim === "string" ? (bdClaim as never) : undefined) : sha256Bytes(Buffer.from(faults.hookHashesReserialised ? JSON.stringify(b) : raw)),
             ...(b.call.input !== undefined ? { inputDigest: digest(b.call.input) } : {}),
             ...(faults.hookIgnoresSub ? {} : { sub: hookCallerRef(callBody.caller) }),
             ...(faults.hookIgnoresCall ? {} : { call: typeof callBody.id === "string" ? callBody.id : "" }),

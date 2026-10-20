@@ -2,7 +2,8 @@
 // A black-box suite cannot ship a new manifest, so a row that needs the update RESTARTS the app (same data dir) with the env name
 // below; the start module applies the change to its manifest before `defineApp` (create-tealbrick-miniapp's conformance.start.ts
 // does, from template 0.1.19; `applyLevelCrud` is the helper). A start module that ignores it is detected by the manifest digest the
-// app serves (GET /tb/v1/health) and the rows report not_applicable. Like TBCONF_PORT it is not a TB_* name and the SDK never reads it.
+// app serves (GET /tb/v1/health). From conformance 0.1.26 the rows FAIL for an app that reports SDK >= 0.1.36 or declares proofClaims ["bd"]
+// (not_applicable only below that). Like TBCONF_PORT it is not a TB_* name and the SDK never reads it.
 
 import type { CrudAction, Manifest } from "@opt2-tealbrick/spec/manifest";
 
