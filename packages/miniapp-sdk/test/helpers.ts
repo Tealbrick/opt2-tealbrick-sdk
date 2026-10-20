@@ -90,6 +90,8 @@ export async function slice(
     appCallers?: unknown;
     /** spec 0.1.43 (LA-1): bridge.viewUrl (string = tb-views origin, null = Core has none yet, absent = member omitted) */
     viewUrl?: string | null;
+    /** spec 0.1.54 (C292): bridge.caps as the bridge reported them (`unknown` so a test can push a malformed value; absent = member omitted) */
+    bridgeCaps?: unknown;
   } = {},
 ): Promise<string> {
   w.rev += 1;
@@ -106,7 +108,7 @@ export async function slice(
       ins: w.ins,
       product,
       portalKeys: [{ jwk: w.portal.publicJwk, status: "active" }],
-      bridge: { id: w.brg, keys: [w.bridgeKey.publicJwk], ...(over.viewUrl !== undefined ? { viewUrl: over.viewUrl } : {}) },
+      bridge: { id: w.brg, keys: [w.bridgeKey.publicJwk], ...(over.viewUrl !== undefined ? { viewUrl: over.viewUrl } : {}), ...(over.bridgeCaps !== undefined ? { caps: over.bridgeCaps } : {}) },
       pause: over.pause ?? { workspace: false, agents: [], instances: [] },
       revoked: over.revoked ?? { jtis: [] },
       personNbf: over.personNbf ?? 0,

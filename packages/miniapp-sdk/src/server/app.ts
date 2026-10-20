@@ -449,6 +449,8 @@ export async function startApp(
   const companionTargets = (): string[] => [...new Set(trust.companionTargets().map((t) => t.product))].sort();
   const statusChanged = (): void => pusher.request();
   const appsPolicy = (): readonly string[] | null => trust.appsPolicy();
+  // v0.1.37 (C292): read from the CURRENT slice at every call (never a snapshot); advisory, no authorization reads it
+  const bridgeCaps = (): readonly string[] => trust.bridgeCaps(Date.now());
   const agentScopeRequest = (agt: string): ScopeRequest | null => trust.agentScopeRequest(agt, manifest.id);
   // v0.1.21: the job runner exists from right after `rt` below; event contexts are only built after that
   let runner: JobRunner | null = null;
@@ -465,6 +467,7 @@ export async function startApp(
     ownerLink,
     companionTargets,
     appsPolicy,
+    bridgeCaps,
     agentScopeRequest,
     ownerLinkFor,
     ...jobsView(rt, jobRunner(), null),
@@ -595,6 +598,7 @@ export async function startApp(
     ownerLinkFor,
     companionTargets,
     appsPolicy,
+    bridgeCaps,
     agentScopeRequest,
     eventContext,
     async notifyAgents() {

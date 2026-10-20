@@ -35,15 +35,16 @@ import {
   type KeyFetchResponse,
   type OpResult,
 } from "@opt2-tealbrick/spec/bridge";
-import type {
-  AgentId,
-  BridgeId,
-  Ed25519PublicJwk,
-  InstanceId,
-  PersonId,
-  PortalKeyEntry,
-  Sha256Digest,
-  WorkspaceId,
+import {
+  type AgentId,
+  type BridgeId,
+  type Ed25519PublicJwk,
+  type InstanceId,
+  LIFETIME_S,
+  type PersonId,
+  type PortalKeyEntry,
+  type Sha256Digest,
+  type WorkspaceId,
 } from "@opt2-tealbrick/spec/credentials";
 import type { AgentMode, CrudAction, HoldFamily, Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { OperationView } from "@opt2-tealbrick/spec/sdk";
@@ -187,7 +188,12 @@ export class FakeBridge {
   /** key-set statement state: slices carry `portalKeySet` once `on` (runApp turns it on before the first slice unless --no-test-roots) */
   keySet = { on: false, seq: 0, kss: null as string | null };
   /** one-shot override of the next slice (A13 negatives): `portalKeySet` (null = omitted), signer, extra portalKeys */
-  sliceOverride: { portalKeySet?: string | null; signer?: Ed25519KeyPair; extraPortalKeys?: PortalKeyEntry[] } | null = null;
+  sliceOverride: { portalKeySet?: string | null; signer?: Ed25519KeyPair; extraPortalKeys?: PortalKeyEntry[]; iat?: number } | null = null;
+  /**
+   * spec 0.1.54 (C292): `bridge.caps` of the slices this fake signs. undefined = the member is omitted (a bridge that declares nothing);
+   * any array is carried as given (the A22 rows publish known and unknown entries; `unknown[]` so a test can publish a malformed list).
+   */
+  bridgeCaps: unknown[] | undefined = undefined;
   bridgeKeys: Ed25519KeyPair[];
   stranger: Ed25519KeyPair;
   readonly sdkMajors: number[];
@@ -381,14 +387,14 @@ export class FakeBridge {
       iss: "tb:portal" as const,
       sub: `tb:ins:${this.ids.ins}` as const,
       aud: `tb:ins:${this.ids.ins}` as const,
-      iat: now,
+      iat: over?.iat ?? now,
       ws: this.ids.ws,
       rev,
       ins: this.ids.ins,
       product: this.manifest.id,
       portalKeys: [...this.portalKeys.map((k) => ({ jwk: k.key.publicJwk, status: k.status })), ...(over?.extraPortalKeys ?? [])],
       ...(portalKeySet ? { portalKeySet } : {}),
-      bridge: { id: this.ids.bridge, keys: this.bridgeKeys.slice(0, 4).map((k) => k.publicJwk) },
+      bridge: { id: this.ids.bridge, keys: this.bridgeKeys.slice(0, 4).map((k) => k.publicJwk), ...(this.bridgeCaps !== undefined ? { caps: [...this.bridgeCaps] as string[] } : {}) },
       pause: { workspace: this.pause.workspace, agents: [...this.pause.agents], instances: [...this.pause.instances] },
       revoked: { jtis: this.revoked.map((r) => ({ jti: r.jti, exp: r.exp })) },
       personNbf: this.personNbf,
@@ -819,6 +825,21 @@ export class FakeBridgeControl {
   unlistCompanionCaller(ins: InstanceId): Promise<number> {
     this.#b.companionCallers = this.#b.companionCallers.filter((x) => x.ins !== ins);
     return this.#b.rebuildSlice();
+  }
+  /** spec 0.1.54 (C292): sets `bridge.caps` of the slice (`undefined` = the member is omitted) and publishes the slice. */
+  setBridgeCaps(caps: readonly unknown[] | undefined): Promise<number> {
+    this.#b.bridgeCaps = caps === undefined ? undefined : [...caps];
+    return this.#b.rebuildSlice();
+  }
+  /**
+   * spec 0.1.54 (C292, A22.bridge_caps_expired): publishes ONE slice that stays valid for only `secondsLeft` more seconds (its `iat` is
+   * 12 h minus `secondsLeft` in the past, its `exp` is `iat` + 12 h, the slice lifetime), so a black-box suite can watch what an app
+   * does once the slice it holds has expired. The next slice is normal again. Returns the revision and the `exp` (epoch seconds).
+   */
+  async publishShortLivedSlice(secondsLeft: number): Promise<{ rev: number; exp: number }> {
+    const iat = nowS() - LIFETIME_S.configOrSlice + secondsLeft;
+    this.#b.sliceOverride = { ...(this.#b.sliceOverride ?? {}), iat };
+    return { rev: await this.#b.rebuildSlice(), exp: iat + LIFETIME_S.configOrSlice };
   }
   /** spec 0.1.49 (C261): sets (or clears, `null`) the slice flag `appCallers: "verified"` and publishes the slice. */
   setAppCallers(mode: "verified" | null): Promise<number> {

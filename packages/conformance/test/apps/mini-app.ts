@@ -146,6 +146,14 @@ export interface MiniAppFaults {
   companionCallersSnapshot?: boolean;
   /** spec 0.1.48: the person op leaks the companion grant material next to each entry (fails A19.companion_callers_person) */
   companionCallersLeaksGrant?: boolean;
+  /** spec 0.1.54 (C292, conformance 0.1.27): the person op `bridge_caps` answers the caps of the FIRST slice (a snapshot, not the current slice; fails A22.bridge_caps_equal) */
+  bridgeCapsSnapshot?: boolean;
+  /** spec 0.1.54: the person op drops entries it does not know (only owner_rows passes; fails A22.bridge_caps_equal) */
+  bridgeCapsDropsUnknown?: boolean;
+  /** spec 0.1.54: the person op keeps the last non-empty caps it saw when a later slice has none (fails A22.bridge_caps_absent) */
+  bridgeCapsSticky?: boolean;
+  /** spec 0.1.54: the person op ignores the slice lifetime and still answers the caps of an expired slice (fails A22.bridge_caps_expired) */
+  bridgeCapsIgnoresExpiry?: boolean;
   /** Caller.listed (SPEC-GAP spec 0.1.49): the probe op `caller_listed` answers listed true whatever the slice says (fails A19.caller_listed) */
   callerListedAlwaysTrue?: boolean;
   /**
@@ -362,6 +370,8 @@ export async function startMiniApp(released: Manifest, env: Record<string, strin
   let slice: InstanceSlice | null = st.slice ? (peek(st.slice) as unknown as InstanceSlice) : null;
   /** the first slice this process installed (companionCallersSnapshot fault) */
   let firstSlice: InstanceSlice | null = null;
+  /** the last non-empty `bridge.caps` this process saw (bridgeCapsSticky fault) */
+  let lastCaps: string[] = [];
   let keysRev = 0;
   const keyCache = new Map<string, string>();
   const declaredKeys = (manifest.settings?.keys ?? []).filter((k) => k.source === "account_default" && k.usedBy.includes("app"));
@@ -414,6 +424,7 @@ export async function startMiniApp(released: Manifest, env: Record<string, strin
     if (t) st.kss = { seq: t.seq, kss: t.kss, keys: t.keys.keys.map((k) => ({ jwk: k.jwk, status: k.status })) };
     slice = r.slice;
     firstSlice ??= r.slice;
+    if (Array.isArray(r.slice.bridge.caps) && r.slice.bridge.caps.length > 0) lastCaps = [...r.slice.bridge.caps];
     st.slice = token;
     for (const a of slice.agents) ensureAgent(a.id);
     if (slice.pause.workspace || slice.pause.instances.includes(ins)) keyCache.clear();
@@ -889,6 +900,17 @@ export async function startMiniApp(released: Manifest, env: Record<string, strin
         // spec 0.1.50: an app row is bounded, also over an owner row (the fault keeps the old authority)
         st.scopes.push({ agent: String(input.agent), type: "space", instanceId: String(input.id), access: lvl, authority: faults.scopeGrantKeepsOwner ? (prior?.authority ?? "bounded") : "bounded", ...(faults.scopeGrantNoSource ? {} : { source: "app", grantedByOp: "scope_grant" }) });
         out = { ok: true };
+        break;
+      }
+      case "bridge_caps": {
+        // spec 0.1.54 (C292): what ctx.bridgeCaps() gave the handler = the CURRENT slice's bridge.caps (strings; unknown entries pass
+        // through); [] when the slice has none or has expired (12 h after its iat). A person op still runs on an expired slice.
+        const cur = faults.bridgeCapsSnapshot ? firstSlice : slice;
+        const expired = !faults.bridgeCapsIgnoresExpiry && (!cur || nowS() > cur.iat + 12 * 3600);
+        let caps: string[] = expired ? [] : Array.isArray(cur?.bridge.caps) ? cur.bridge.caps.filter((x): x is string => typeof x === "string") : [];
+        if (faults.bridgeCapsSticky && !expired && caps.length === 0) caps = [...lastCaps];
+        if (faults.bridgeCapsDropsUnknown) caps = caps.filter((x) => x === "owner_rows");
+        out = { bridgeCaps: caps };
         break;
       }
       case "companion_callers": {

@@ -87,6 +87,8 @@ export interface Runtime {
   companionTargets(): string[];
   /** v0.1.15 (C105a) */
   appsPolicy(): readonly string[] | null;
+  /** v0.1.37 (C292): `ctx.bridgeCaps()` — a frozen copy of the CURRENT verified slice's `bridge.caps`; [] when absent, expired or none. Advisory only. */
+  bridgeCaps(): readonly string[];
   /** v0.1.18 (C106a) */
   agentScopeRequest(agt: string): ScopeRequest | null;
   /** v0.1.13: the ctx every event handler gets */

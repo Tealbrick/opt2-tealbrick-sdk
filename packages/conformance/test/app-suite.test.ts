@@ -1090,3 +1090,74 @@ describe("A21 owner rows keep their CRUD + hook proof bd + proofClaims (conforma
     });
   }
 });
+
+// ── spec 0.1.54 (C292, conformance 0.1.27): A22 ctx.bridgeCaps ───────────────────────────────────────────────────────────
+describe("A22 ctx.bridgeCaps (conformance 0.1.27)", { timeout: 300_000 }, () => {
+  const bm = structuredClone(manifest) as Manifest;
+  bm.operations.push({ id: "bridge_caps", title: "Bridge caps", description: "Probe bridge_caps.", input: { type: "object" }, output: { type: "object" }, crud: ["update"], effect: "write", idempotency: "supported", receipt: false, audience: "person" } as Manifest["operations"][number]);
+  const cfg = (over: Record<string, unknown> = {}) => parseConformanceConfig({ bridgeCapsOp: { op: "bridge_caps", ...over } }, "test config");
+  const runB = (faults: MiniAppFaults = {}, config: ConformanceConfig | null = cfg()) => runApp({ manifest: bm, manifestPath: path, config, start: (env) => startMiniApp(bm, env, faults), deployTemplate: template, timeoutMs: 8000 });
+  const ids = ["A22.bridge_caps_equal", "A22.bridge_caps_absent", "A22.bridge_caps_expired"];
+  const st = (r: Report, id: string) => r.checks.find((c) => c.id === id);
+
+  it("a correct app passes all three rows (and every other check); the caps the rows published are gone again", { timeout: 120_000 }, async () => {
+    const r = await runB();
+    assert.deepEqual(failing(r), [], renderMarkdown(r));
+    for (const id of ids) assert.equal(st(r, id)?.status, "pass", `${id}: ${st(r, id)?.asserted}`);
+    assert.match(st(r, "A22.bridge_caps_equal")?.asserted ?? "", /\["owner_rows","tbconf_future_cap"\]/);
+    assert.match(st(r, "A22.bridge_caps_expired")?.asserted ?? "", /after the slice expired/);
+  });
+
+  it("without a bridgeCapsOp fixture all rows are not_applicable, with the reason", { timeout: 120_000 }, async () => {
+    const r = await run();
+    for (const id of ids) {
+      assert.equal(st(r, id)?.status, "not_applicable", id);
+      assert.match(st(r, id)?.asserted ?? "", /no bridgeCapsOp in tealbrick-conformance\.json/);
+    }
+  });
+
+  it("an SDK older than 0.1.37 gets not_applicable by version, whatever it does; 0.1.37 runs the rows", { timeout: 180_000 }, async () => {
+    const r = await runB({ reportedSdkVersion: "0.1.36", bridgeCapsDropsUnknown: true, bridgeCapsSticky: true, bridgeCapsIgnoresExpiry: true });
+    for (const id of ids) {
+      assert.equal(st(r, id)?.status, "not_applicable", `${id}: ${st(r, id)?.asserted}`);
+      assert.match(st(r, id)?.asserted ?? "", /predates 0\.1\.37.*not applicable by version/);
+    }
+    const ok = await runB({ reportedSdkVersion: "0.1.37", bridgeCapsDropsUnknown: true });
+    assert.equal(st(ok, "A22.bridge_caps_equal")?.status, "fail");
+  });
+
+  // fire-on-bad: each row fails on the double fault written for it. `also` = the other rows that fault legitimately breaks too
+  // (a snapshot of the first slice answers [] to every row that publishes caps); no other row may fail on it
+  const bad: [string, MiniAppFaults, string, RegExp, string[]][] = [
+    ["an answer taken from the FIRST slice (a snapshot, not the current slice)", { bridgeCapsSnapshot: true }, "A22.bridge_caps_equal", /slice with two caps: ctx\.bridgeCaps\(\) = \[\], the slice says \["owner_rows","tbconf_future_cap"\]/, ["A22.bridge_caps_absent", "A22.bridge_caps_expired"]],
+    ["unknown entries dropped", { bridgeCapsDropsUnknown: true }, "A22.bridge_caps_equal", /ctx\.bridgeCaps\(\) = \["owner_rows"\], the slice says \["owner_rows","tbconf_future_cap"\]/, []],
+    ["caps kept after a slice without them", { bridgeCapsSticky: true }, "A22.bridge_caps_absent", /slice without bridge\.caps: ctx\.bridgeCaps\(\) = \["owner_rows"\], the slice says \[\]/, []],
+    ["caps still answered after the slice expired", { bridgeCapsIgnoresExpiry: true }, "A22.bridge_caps_expired", /although the slice expired \(it must be \[\]\)/, []],
+  ];
+  for (const [what, faults, id, re, also] of bad) {
+    it(`fire-on-bad: ${what} fails ${id}`, { timeout: 120_000 }, async () => {
+      const r = await runB(faults);
+      const c = st(r, id);
+      assert.equal(c?.status, "fail", c?.asserted);
+      assert.match(c?.asserted ?? "", re);
+      for (const other of ids.filter((x) => x !== id)) assert.equal(st(r, other)?.status, also.includes(other) ? "fail" : "pass", `${other}: ${st(r, other)?.asserted}`);
+    });
+  }
+
+  it("a wrong path fails with the value named; an op that is no person op fails with the config key named", { timeout: 120_000 }, async () => {
+    const r = await runB({}, cfg({ path: "/nope" }));
+    assert.equal(st(r, "A22.bridge_caps_equal")?.status, "fail");
+    assert.match(st(r, "A22.bridge_caps_equal")?.asserted ?? "", /output\/nope is undefined, expected an array of strings/);
+    const r2 = await runB({}, cfg({ op: "item_get" }));
+    assert.equal(st(r2, "A22.bridge_caps_absent")?.status, "fail");
+    assert.match(st(r2, "A22.bridge_caps_absent")?.asserted ?? "", /bridgeCapsOp\.op "item_get": not a person op/);
+  });
+
+  it("bridgeCapsOp config keys are checked (usage error)", { timeout: 60_000 }, () => {
+    for (const badCfg of [[], {}, { op: "" }, { op: "x", extra: 1 }, { op: "x", path: "bridgeCaps" }, { op: "x", input: { a: "${nope}" } }]) {
+      assert.throws(() => parseConformanceConfig({ bridgeCapsOp: badCfg }, "test config"), /bridgeCapsOp/, JSON.stringify(badCfg));
+    }
+    const good = { op: "x", path: "/a", input: { k: 1 } };
+    assert.deepEqual(parseConformanceConfig({ bridgeCapsOp: good }, "t").bridgeCapsOp, good);
+  });
+});

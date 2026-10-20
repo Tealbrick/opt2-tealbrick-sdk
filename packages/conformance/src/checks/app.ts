@@ -24,7 +24,7 @@ import { jsonPointer, resolvePlaceholders, runSetup } from "../setup.ts";
 import { bad, na, notRun, type Outcome, ok, refusedWith, type Suite, verdict } from "../suite.ts";
 import { Mint, newId, nowS, peek } from "../tokens.ts";
 import { versionBelow } from "../version.ts";
-import { CAPS_AGENT_PLACEHOLDER, type CallerListedFixture, type CompanionCallersFixture, type ConformanceConfig, type HookCallerProductFixture, type InputCaller, type NarrowingFixture, type ScopeGrantFixture, type SetupStep } from "../waivers.ts";
+import { type BridgeCapsFixture, CAPS_AGENT_PLACEHOLDER, type CallerListedFixture, type CompanionCallersFixture, type ConformanceConfig, type HookCallerProductFixture, type InputCaller, type NarrowingFixture, type ScopeGrantFixture, type SetupStep } from "../waivers.ts";
 import { CHECK_IDS } from "./catalog.ts";
 
 export interface AppTargetContext {
@@ -60,6 +60,8 @@ export interface AppTargetContext {
   hookCallerProduct?: HookCallerProductFixture;
   /** package 0.1.23 (Caller.listed, SPEC-GAP spec 0.1.49): an agent op exposing `ctx.caller.listed` (`callerListedOp` in tealbrick-conformance.json) */
   callerListedOp?: CallerListedFixture;
+  /** conformance 0.1.27 (C292, spec 0.1.54): the person op whose output is `ctx.bridgeCaps()` (`bridgeCapsOp` in tealbrick-conformance.json) */
+  bridgeCapsOp?: BridgeCapsFixture;
   /** report notes (setup step results are appended) */
   notes?: string[];
   /**
@@ -116,6 +118,8 @@ const SCOPE_GRANT_SINCE = "0.1.31";
 
 /** First miniapp-sdk release with `ctx.companionCallers` (spec 0.1.48, SDK-COMPANION-CALLERS). */
 const COMPANION_CALLERS_SINCE = "0.1.32";
+/** conformance 0.1.27 (C292, spec 0.1.54): ctx.bridgeCaps() */
+const BRIDGE_CAPS_SINCE = "0.1.37";
 
 /**
  * First miniapp-sdk release with the owner-set primary scope row (C283 A1, spec 0.1.50), `caller_unverified` (C261, spec 0.1.49
@@ -2215,6 +2219,116 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     "the schema migration backfills owner rows once, audited; a NULL or unparsable snapshot reads [] (C283c)",
     "migration sdk_scope_crud_snapshot fills each owner row from the manifest that runs it, with one audit scope.snapshot_backfill per row, only once; a NULL, unparsable or non-array snapshot on an owner row then gives crud []",
     na("not observable from outside: it needs a data directory written by an older SDK and direct access to the app's database. It is covered ONLY by the miniapp-sdk tests (packages/miniapp-sdk/test/owner-authority.test.ts, the schema-10 tests); a conformance run says nothing about it"),
+  );
+
+  // ── A22 ctx.bridgeCaps (C292, spec 0.1.54, SDK >= 0.1.37): the bridge's declared capabilities, from the CURRENT slice ──────────────
+  // The workspace bridge declares what it implements (StatusReport.bridge.caps); Core copies it into every slice (`slice.bridge.caps`);
+  // the SDK gives the handler `ctx.bridgeCaps()`: the slice's list (strings; unknown entries pass through), [] when the slice has none
+  // or has expired, read again on every call. Advisory: it never widens access. `bridgeCapsOp {op, path?, input?}`
+  // (tealbrick-conformance.json) names a PERSON op whose output carries what `ctx.bridgeCaps()` gave it. Without it, and for an SDK that
+  // reports a release older than 0.1.37, the rows are not_applicable (a start module / app without the fixture cannot be observed black-box).
+  const bcCfg = ctx.bridgeCapsOp;
+  const bcGate = (): Outcome | null => {
+    const v = b.claims[0]?.request.sdkVersion;
+    if (versionBelow(v, BRIDGE_CAPS_SINCE)) return na(`SDK ${v} (self-reported) predates ${BRIDGE_CAPS_SINCE} (ctx.bridgeCaps, spec 0.1.54): not applicable by version`);
+    if (!bcCfg) return na("no bridgeCapsOp in tealbrick-conformance.json (the app does not expose ctx.bridgeCaps(), so it is not observable black-box)");
+    return null;
+  };
+  const bcShow = (v: readonly string[]) => JSON.stringify(v);
+  /** what the configured person op says ctx.bridgeCaps() is right now, or why that cannot be read */
+  const bcRead = async (): Promise<{ caps: string[] } | { problem: string }> => {
+    if (!bcCfg) return { problem: "no bridgeCapsOp" };
+    if (!sess) return { problem: "no person session" };
+    const op = personOps.find((o) => o.id === bcCfg.op);
+    if (!op) return { problem: `tealbrick-conformance.json bridgeCapsOp.op ${JSON.stringify(bcCfg.op)}: not a person op of this manifest` };
+    const r = await c().personOp(sess, bcCfg.op, bcCfg.input !== undefined ? grantInput(bcCfg.input) : {});
+    if (r.status !== 200) return { problem: `${bcCfg.op}: ${show(r)} (expected 200 ok)` };
+    const path = bcCfg.path ?? "/bridgeCaps";
+    const v = jsonPointer(r.output, path);
+    if (!Array.isArray(v) || !v.every((x) => typeof x === "string")) return { problem: `${bcCfg.op}: output${path} is ${JSON.stringify(v) ?? "undefined"}, expected an array of strings (ctx.bridgeCaps())` };
+    return { caps: v as string[] };
+  };
+  /** publishes `bridge.caps` (undefined = member omitted) and waits until the app has installed that slice */
+  const bcPublish = async (caps: readonly unknown[] | undefined): Promise<void> => {
+    await b.control.waitForSliceRevision(await b.control.setBridgeCaps(caps), T);
+  };
+  /** reads after a publish: the app has installed the slice when its status says so, so the value must already follow it */
+  const bcExpect = async (label: string, want: readonly string[]): Promise<string | null> => {
+    const got = await bcRead();
+    if ("problem" in got) return got.problem;
+    return got.caps.length === want.length && got.caps.every((x, i) => x === want[i]) ? null : `${label}: ctx.bridgeCaps() = ${bcShow(got.caps)}, the slice says ${bcShow(want)}`;
+  };
+  const BC_CAPS = ["owner_rows", "tbconf_future_cap"];
+  await s.run(
+    "A22.bridge_caps_equal",
+    "ctx.bridgeCaps() equals the slice's bridge.caps, unknown entries included, and follows a slice update (C292)",
+    `the slice carries bridge.caps ${bcShow(BC_CAPS)} (one cap the suite knows, one it does not) and is published; the configured bridgeCapsOp as the owner → 200 and its output at path (default /bridgeCaps) equals that list; a new slice with ["owner_rows"] → the next call shows exactly that`,
+    async () => {
+      const gate = bcGate();
+      if (gate) return gate;
+      try {
+        await bcPublish(BC_CAPS);
+        const one = await bcExpect("slice with two caps", BC_CAPS);
+        if (one) return bad(one);
+        await bcPublish(["owner_rows"]);
+        const two = await bcExpect("after a slice update", ["owner_rows"]);
+        if (two) return bad(two);
+        return ok(`${bcCfg?.op}: ${bcShow(BC_CAPS)} -> ${bcShow(BC_CAPS)}; after a slice update to ["owner_rows"] -> ["owner_rows"]`);
+      } finally {
+        await bcPublish(undefined);
+      }
+    },
+  );
+  await s.run(
+    "A22.bridge_caps_absent",
+    "a slice without bridge.caps (or with an empty list) gives [] — also after the slice had caps (C292)",
+    'the slice carries ["owner_rows"] and is published, then a slice WITHOUT bridge.caps → ctx.bridgeCaps() = []; then ["owner_rows"] again and a slice with bridge.caps [] → []. An app that keeps caps it saw earlier fails',
+    async () => {
+      const gate = bcGate();
+      if (gate) return gate;
+      try {
+        await bcPublish(["owner_rows"]);
+        const had = await bcExpect("slice with owner_rows", ["owner_rows"]);
+        if (had) return bad(had);
+        await bcPublish(undefined);
+        const gone = await bcExpect("slice without bridge.caps", []);
+        if (gone) return bad(gone);
+        await bcPublish(["owner_rows"]);
+        await bcPublish([]);
+        const empty = await bcExpect("slice with bridge.caps []", []);
+        if (empty) return bad(empty);
+        return ok(`${bcCfg?.op}: ["owner_rows"] -> []  (member omitted), ["owner_rows"] -> [] (empty list)`);
+      } finally {
+        await bcPublish(undefined);
+      }
+    },
+  );
+  await s.run(
+    "A22.bridge_caps_expired",
+    "once the slice has expired, ctx.bridgeCaps() is [] (C292)",
+    'a slice with bridge.caps ["owner_rows"] that is valid for only a few more seconds is published and installed; after it has expired the configured bridgeCapsOp (a person op, which still runs on an expired slice) → [] ; the next normal slice restores the caps',
+    async () => {
+      const gate = bcGate();
+      if (gate) return gate;
+      const LEFT_S = 4;
+      try {
+        await b.control.setBridgeCaps(["owner_rows"]);
+        const short = await b.control.publishShortLivedSlice(LEFT_S);
+        try {
+          await b.control.waitForSliceRevision(short.rev, T);
+        } catch {
+          return notRun(`the app did not install a slice that was valid for only ${LEFT_S} more seconds in time: not observable here`);
+        }
+        const live = Date.now() < short.exp * 1000 - 500 ? await bcExpect("slice not yet expired", ["owner_rows"]) : null;
+        if (live) return bad(live);
+        await new Promise((r) => setTimeout(r, Math.max(0, short.exp * 1000 - Date.now()) + 1500));
+        const got = await bcRead();
+        if ("problem" in got) return bad(got.problem);
+        return verdict(got.caps.length === 0, got.caps.length === 0 ? `${bcCfg?.op}: ["owner_rows"] while valid -> [] after the slice expired` : `${bcCfg?.op}: ctx.bridgeCaps() = ${bcShow(got.caps)} although the slice expired (it must be [])`);
+      } finally {
+        await bcPublish(undefined);
+      }
+    },
   );
 
   // ── A10 post-approval retry + P1 held release while paused + C8 no standing approval ──

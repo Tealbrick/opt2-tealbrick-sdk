@@ -43,6 +43,13 @@ export interface CompanionTargetsView {
   /** v0.1.15 (C105a): the workspace apps policy's held families from the slice (display only; enforcement is the
    *  companion grant `held` claim at the target app), or null when the slice has none */
   appsPolicy(): readonly string[] | null;
+  /**
+   * v0.1.37 (C292, spec 0.1.54): the capabilities the workspace bridge declared (`slice.bridge.caps`, e.g. "owner_rows"), from the
+   * CURRENT verified slice on every call: a frozen array of strings; [] when the slice is absent, expired (older than 12 h) or
+   * carries none. Unknown entries pass through. Decide by capability, never by bridge version. ADVISORY: it never widens access
+   * (the SDK authorizes every call; nothing in the SDK reads it for authorization). Also on start, event and job-handler contexts.
+   */
+  bridgeCaps(): readonly string[];
   /** v0.1.18 (C106a, Connect F21): the slice's `agents[].scopeRequest` for `agt` when it targets THIS product, else null */
   agentScopeRequest(agt: string): ScopeRequest | null;
   /** v0.1.20: `<portalUrl>/w/<ws>/open?product=<product>&path=<path>` for ANOTHER app (shared launch-path rule; null until portalUrl) */

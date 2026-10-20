@@ -1,4 +1,4 @@
-// The new 0.1.24 and 0.1.25 app rows (A20, A12.caller_unverified_refused, A2 hook sub / call / bd, A21) against the REAL miniapp-sdk of this workspace,
+// The new 0.1.24, 0.1.25, 0.1.26 and 0.1.27 app rows (A20, A12.caller_unverified_refused, A2 hook sub / call / bd, A21) against the REAL miniapp-sdk of this workspace,
 // not against the mini app test double: a correct SDK passes every row. (The double is where the rows are proven to FAIL on bad.)
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -19,6 +19,7 @@ const am = JSON.parse(readFileSync(path, "utf8")) as Manifest;
 am.scopes?.[0]?.access.push({ id: "manage", label: "Manage", crud: ["read", "create", "update", "delete"] });
 am.operations.push(
   { id: "scope_grant", title: "Start draft", description: "Person op that gives one agent access to one space.", input: { type: "object" }, output: { type: "object" }, crud: ["update"], effect: "write", idempotency: "supported", receipt: false, audience: "person" } as Manifest["operations"][number],
+  { id: "bridge_caps", title: "Bridge caps", description: "Person op that returns ctx.bridgeCaps().", input: { type: "object" }, output: { type: "object" }, crud: ["update"], effect: "write", idempotency: "supported", receipt: false, audience: "person" } as Manifest["operations"][number],
   { id: "purge_all", title: "Purge", description: "Delete everything (no scope type).", input: { type: "object" }, output: { type: "object" }, crud: ["delete"], effect: "destructive", holdFamily: "destructive", idempotency: "supported", receipt: true, audience: "agent" } as Manifest["operations"][number],
   { id: "item_lookup", title: "Look up items", description: "Search-mode dynamic operation.", crud: ["read"], effect: "read", scopeType: "space", idempotency: "supported", receipt: false, audience: "agent", dynamic: { mode: "search", crudCeiling: ["read", "create"], effectCeiling: "money" } } as Manifest["operations"][number],
 );
@@ -27,11 +28,12 @@ const DYN = [
   { name: "dyn_send", title: "Send entry", description: "Generated outward entry.", inputSchema: { type: "object", properties: {} }, crud: ["create"], effect: "outward", holdFamily: "first_contact" },
 ] as const;
 
-type Ctx = { scopes: { instances: { create(t: string, id: string, label: string): Promise<unknown> } }; scopeGrants: { grant(a: string, t: string, id: string, access: string): Promise<unknown> } };
+type Ctx = { bridgeCaps(): readonly string[]; scopes: { instances: { create(t: string, id: string, label: string): Promise<unknown> } }; scopeGrants: { grant(a: string, t: string, id: string, access: string): Promise<unknown> } };
 const handlers: Record<string, unknown> = {};
 for (const o of am.operations) {
   if (o.dynamic) continue;
-  if (o.id === "scope_grant") {
+  if (o.id === "bridge_caps") handlers[o.id] = async (_input: unknown, ctx: Ctx) => ({ bridgeCaps: ctx.bridgeCaps() });
+  else if (o.id === "scope_grant") {
     handlers[o.id] = async (input: { agent: string; id: string; access: string }, ctx: Ctx) => {
       await ctx.scopes.instances.create("space", input.id, `Draft ${input.id}`);
       return { row: await ctx.scopeGrants.grant(input.agent, "space", input.id, input.access) };
@@ -65,9 +67,9 @@ async function startReal(env: Record<string, string>) {
   return { url: `http://127.0.0.1:${port}`, stop: () => running.stop(), backupNow: async () => void (await running.backups.runNow()) };
 }
 
-describe("conformance 0.1.24, 0.1.25 and 0.1.26 rows against the real miniapp-sdk", { timeout: 300_000 }, () => {
+describe("conformance 0.1.24 to 0.1.27 rows against the real miniapp-sdk", { timeout: 300_000 }, () => {
   it("a correct SDK passes every new row", { timeout: 240_000 }, async () => {
-    const config = parseConformanceConfig({ scopeGrantOp: { op: "scope_grant", input: { agent: "${tb.agentA}", id: "space-draft", access: "read_write" }, aboveCeiling: { agent: "${tb.agentA}", id: "space-draft", access: "manage" } } }, "test config");
+    const config = parseConformanceConfig({ scopeGrantOp: { op: "scope_grant", input: { agent: "${tb.agentA}", id: "space-draft", access: "read_write" }, aboveCeiling: { agent: "${tb.agentA}", id: "space-draft", access: "manage" } }, bridgeCapsOp: { op: "bridge_caps" } }, "test config");
     const r = await runApp({ manifest: am, manifestPath: path, config, start: startReal as never, deployTemplate: template, timeoutMs: 8000 });
     const st = (id: string) => r.checks.find((c) => c.id === id);
     for (const id of [
@@ -92,6 +94,10 @@ describe("conformance 0.1.24, 0.1.25 and 0.1.26 rows against the real miniapp-sd
       "A2.hook_bd_malformed",
       "A2.hook_bd_raw_bytes", // 0.1.26
       "A2.proof_bd_other_variants",
+      // 0.1.27 (spec 0.1.54): ctx.bridgeCaps of the REAL SDK follows the slice: equal, absent, expired (a person op still runs on an expired slice)
+      "A22.bridge_caps_equal",
+      "A22.bridge_caps_absent",
+      "A22.bridge_caps_expired",
     ]) {
       assert.equal(st(id)?.status, "pass", `${id}: ${st(id)?.asserted}`);
     }

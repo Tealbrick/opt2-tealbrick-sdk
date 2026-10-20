@@ -212,6 +212,20 @@ export class TrustState {
     return this.slice?.appCallers === "verified";
   }
 
+  /**
+   * v0.1.37 (C292, spec 0.1.54): what the workspace bridge declared it implements, from the CURRENT verified slice
+   * (`slice.bridge.caps`). A frozen copy, array of strings only (any other member is dropped); unknown entries pass through.
+   * [] when the slice is missing, older than 12 h (checked at `nowMs`, the same stale check the op route uses) or has no caps.
+   * ADVISORY: nothing in the SDK reads this for authorization; it is exposed only as `ctx.bridgeCaps()`.
+   */
+  bridgeCaps(nowMs: number): readonly string[] {
+    const s = this.slice;
+    if (!s || this.stale(nowMs)) return Object.freeze([]);
+    const raw: unknown = (s.bridge as { caps?: unknown } | undefined)?.caps;
+    if (!Array.isArray(raw)) return Object.freeze([]);
+    return Object.freeze(raw.filter((c): c is string => typeof c === "string"));
+  }
+
   /** v0.1.18 (C106a): the slice's scopeRequest of `agt`, only when it targets `product` */
   agentScopeRequest(agt: string, product: string): ScopeRequest | null {
     const r = this.slice?.agents.find((a) => a.id === agt)?.scopeRequest;
