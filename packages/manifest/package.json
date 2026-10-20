@@ -1,6 +1,6 @@
 {
   "name": "@opt2-tealbrick/manifest",
-  "version": "0.1.28",
+  "version": "0.1.29",
   "private": true,
   "description": "Teal Brick opt2 contract primitives: manifest validator, JCS, digests, Ed25519 JWS, key sets, token verifiers, sealing, gate()/authorize().",
   "license": "SEE LICENSE IN LICENSE",
