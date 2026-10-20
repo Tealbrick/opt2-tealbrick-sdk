@@ -64,7 +64,7 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
     "B8.hold_status": "<product>__tb_hold_status routed to tb.hold_status",
     "B5.no_grant": "no grant → refused before any app call",
     "B5.crud_exceeds_grant": "crud beyond the grant refused",
-    "B5.gate_scoped_above_grant": "a scoped op above the grant's crud that the app admits (scope_summary admittedOps) reaches the app; bridges older than 0.2.4 are not_applicable by version",
+    "B5.gate_scoped_above_grant": "a scoped op above the grant's crud that the app admits (scope_summary admittedOps) reaches the app; a bridge whose StatusReport does not declare the owner_rows cap (bridge.caps) is not_applicable, one that declares it must pass (by capability, never by version, C292)",
     "B5.audience_not_agent": "person op refused on the agent path",
     "B5.bound_in_wf": "Bound agent may call its workflow op",
     "B5.bound_outside_wf": "Bound agent outside its workflow refused",

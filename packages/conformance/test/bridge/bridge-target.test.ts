@@ -113,24 +113,31 @@ describe("bridge target", () => {
     }
   });
 
-  it("spec 0.1.50 (C283 A1, B5.gate_scoped_above_grant): a bridge reporting 0.2.4 forwards a scoped op above the grant that the app admits; older bridges are not_applicable by version", async () => {
-    const good = await run({ version: "0.2.4" }, ["call"]);
-    const c = good.checks.find((x) => x.id === "B5.gate_scoped_above_grant");
-    assert.equal(c?.status, "pass", c?.asserted);
-    assert.match(c?.asserted ?? "", /note_delete \(crud delete, beyond the free grant's .*\) reached the app/);
-    // the example manifest has no UNSCOPED op beyond the Free grant's crud: the 0.2.4 gate passes the scoped ones, so this row is n/a there
-    assert.equal(status(good, "B5.crud_exceeds_grant"), "not_applicable", good.checks.find((x) => x.id === "B5.crud_exceeds_grant")?.asserted);
-    for (const version of ["0.0.0", "0.2.3"]) {
-      const r = await run({ version }, ["call"]);
-      const old = r.checks.find((x) => x.id === "B5.gate_scoped_above_grant");
-      assert.equal(old?.status, "not_applicable", `${version}: ${old?.asserted}`);
-      assert.match(old?.asserted ?? "", /predates 0\.2\.4.*not applicable by version/);
-      assert.equal(status(r, "B5.crud_exceeds_grant"), "pass", `${version}: the CRUD ceiling check of older bridges is unchanged`);
+  it("spec 0.1.54 (C292, B5.gate_scoped_above_grant): a bridge that DECLARES owner_rows and implements A1 passes, whatever version it reports", { timeout: 60_000 }, async () => {
+    for (const version of ["0.0.0", "0.2.4", "0.2.5"]) {
+      const good = await run({ version, ownerRows: true }, ["call"]);
+      const c = good.checks.find((x) => x.id === "B5.gate_scoped_above_grant");
+      assert.equal(c?.status, "pass", `${version}: ${c?.asserted}`);
+      assert.match(c?.asserted ?? "", /note_delete \(crud delete, beyond the free grant's .*\) reached the app/);
+      // the example manifest has no UNSCOPED op beyond the Free grant's crud: a bridge with the A1 filter passes the scoped ones, so this row is n/a there
+      assert.equal(status(good, "B5.crud_exceeds_grant"), "not_applicable", good.checks.find((x) => x.id === "B5.crud_exceeds_grant")?.asserted);
     }
   });
 
-  it("fire-on-bad (B5.gate_scoped_above_grant): a bridge that reports 0.2.4 but never lists the app's admittedOps, or still refuses a scoped op above the grant, fails", async () => {
-    for (const flags of [{ version: "0.2.4", ignoresAdmittedOps: true }, { version: "0.2.4", oldGateCrud: true }] as const) {
+  it("spec 0.1.54 (C292a, B5.gate_scoped_above_grant): a bridge that declares no owner_rows is not_applicable, with the reason, also at version 0.2.4 or 0.2.5", { timeout: 60_000 }, async () => {
+    // 0.2.4 = the real G2b-only bridge (no A1, no cap); a version >= 0.2.4 gate would have FAILED it
+    for (const flags of [{}, { version: "0.2.3" }, { version: "0.2.4" }, { version: "0.2.5" }, { version: "0.2.5", declaredCaps: ["future_cap"] }]) {
+      const r = await run(flags, ["call"]);
+      const old = r.checks.find((x) => x.id === "B5.gate_scoped_above_grant");
+      assert.equal(old?.status, "not_applicable", `${JSON.stringify(flags)}: ${old?.asserted}`);
+      assert.match(old?.asserted ?? "", /does not declare the owner_rows capability in its StatusReport.*decides by capability, never by version/);
+      assert.equal(status(r, "B5.crud_exceeds_grant"), "pass", `${JSON.stringify(flags)}: the CRUD ceiling check of a bridge without the A1 filter is unchanged`);
+    }
+  });
+
+  it("fire-on-bad (B5.gate_scoped_above_grant): a bridge that declares owner_rows but never lists the app's admittedOps, or still refuses a scoped op above the grant, fails", { timeout: 60_000 }, async () => {
+    const bad: MiniFlags[] = [{ ownerRows: true, ignoresAdmittedOps: true }, { ownerRows: true, oldGateCrud: true }, { version: "0.2.5", declaredCaps: ["owner_rows"] }];
+    for (const flags of bad) {
       const r = await run(flags, ["call"]);
       const c = r.checks.find((x) => x.id === "B5.gate_scoped_above_grant");
       assert.equal(c?.status, "fail", `${JSON.stringify(flags)}: ${c?.asserted}`);

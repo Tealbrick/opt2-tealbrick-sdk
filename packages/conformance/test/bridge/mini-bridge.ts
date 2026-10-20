@@ -50,7 +50,6 @@ import type { ClaimRecord, EnrolResponse, HookEntry, WorkspaceConfig } from "@op
 import { BRIDGE_OP_PATH, type BridgeOp, type Ed25519PublicJwk, type HoldVerdictClaim, type PortalKeyEntry } from "@opt2-tealbrick/spec/credentials";
 import type { DynamicCatalogEntry, Manifest, Operation } from "@opt2-tealbrick/spec/manifest";
 import type { Json, OperationView } from "@opt2-tealbrick/spec/sdk";
-import { versionBelow } from "../../src/version.ts";
 
 export interface MiniFlags {
   /** pre-C98: a required op without a _meta key is refused input_invalid, a supported one is forwarded keyless (no derived key) */
@@ -102,7 +101,14 @@ export interface MiniFlags {
   catalogWithIn?: boolean;
   /** the bridge version reported at enrolment and in acks (default "0.0.0": predates 0.2.2, so B28 is not_applicable) */
   version?: string;
-  /** spec 0.1.50 (C283 A1, bridge 0.2.4): reports the version but never lists the ops an app's scope_summary names in admittedOps (fails B5.gate_scoped_above_grant) */
+  /**
+   * spec 0.1.54 (C292, conformance 0.1.27): implements the C283 A1 owner-row filter (lists the ops an app's scope_summary names in admittedOps)
+   * and DECLARES it: every ack carries bridge.caps ["owner_rows"]. Independent of `version` (the suite decides by the cap, never by version)
+   */
+  ownerRows?: boolean;
+  /** spec 0.1.54: the caps the acks declare INSTEAD of the ones `ownerRows` implies (e.g. ["future_cap"], or ["owner_rows"] without implementing it) */
+  declaredCaps?: string[];
+  /** spec 0.1.50 (C283 A1): declares owner_rows but never lists the ops an app's scope_summary names in admittedOps (fails B5.gate_scoped_above_grant) */
   ignoresAdmittedOps?: boolean;
   /** pre-C283 gate: refuses a scoped op above the grant's crud with crud_exceeds_grant although it lists it (fails B5.gate_scoped_above_grant) */
   oldGateCrud?: boolean;
@@ -237,12 +243,14 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     const assertion = await signAssertion("tb-bridge-assert+jwt", { iss: brg, sub: brg, aud: "tb:portal", iat: nowS() }, key, { method, pathAndQuery: path, body: raw });
     return fetch(`${portal}${path}`, { method, headers: { "content-type": "application/json", "TB-Assert": assertion }, body: raw, signal: AbortSignal.timeout(5000) });
   };
+  /** spec 0.1.54 (C292): StatusReport.bridge.caps of every ack */
+  const declaredCaps: string[] = flags.declaredCaps ?? (flags.ownerRows ? ["owner_rows"] : []);
   const ack = (extra: Record<string, unknown> = {}) =>
     cfg &&
     portalCall("POST", enrol.ackPath, {
       rev: cfg.rev,
       appliedAt: new Date().toISOString(),
-      bridge: { id: enrol.bridgeId, version: flags.version ?? "0.0.0", form: "deployed", boot, sdkMajors: [1, 0], mcpVersions: ["2025-06-18"] },
+      bridge: { id: enrol.bridgeId, version: flags.version ?? "0.0.0", form: "deployed", boot, sdkMajors: [1, 0], mcpVersions: ["2025-06-18"], ...(declaredCaps.length > 0 ? { caps: declaredCaps } : {}) },
       portalReachable: true,
       apps: cfg.apps.map((a) => ({ ins: a.ins, state: "ok", version: a.version, sdkVersion: null, manifestDigest: a.manifestDigest, lastSeen: null, pendingHolds: 0 })),
       keys: [],
@@ -301,8 +309,8 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
       // not reachable yet
     }
   }
-  /** spec 0.1.50 (C283 A1, bridge 0.2.4): lists the static scoped ops an app's scope_summary names in `admittedOps` for an agent */
-  const adoptsAdmitted = !versionBelow(flags.version ?? "0.0.0", "0.2.4") && !flags.ignoresAdmittedOps;
+  /** spec 0.1.50 (C283 A1): lists the static scoped ops an app's scope_summary names in `admittedOps` for an agent (only a bridge that implements the filter: `ownerRows`) */
+  const adoptsAdmitted = flags.ownerRows === true && !flags.ignoresAdmittedOps;
   /** `<ins>|<agent>` → op ids the app admits (read at every tools/list and tools/call) */
   const admittedOps = new Map<string, Set<string>>();
   const refreshAdmitted = async () => {

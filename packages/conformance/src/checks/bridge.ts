@@ -14,11 +14,21 @@ import { errorCode, type HttpAnswer, request } from "../http.ts";
 import { rpcMessages, type ToolCallResult } from "../mcp-agent.ts";
 import { bad, na, type Outcome, ok, verdict } from "../suite.ts";
 import { Mint, newId, nowS, peek, rawSign } from "../tokens.ts";
-import { versionBelow } from "../version.ts";
 import { type BridgeCtx, describeCall, httpRefused, isObj, sleep, toolRefused } from "./bridge-ctx.ts";
 
-/** First bridge release whose gate() skips the CRUD ceiling for ops with a scopeType and lists `admittedOps` (spec 0.1.50, C283 A1). */
-const GATE_SCOPED_SINCE = "0.2.4";
+/**
+ * The capability a bridge declares when it implements the C283 A1 owner-row filter: catalog `admitted`, scope_summary `admittedOps`,
+ * and a gate() that skips `op.crud ⊆ grant.crud` for ops with a scopeType (spec 0.1.50). Conformance 0.1.27 (C292, C292a, spec 0.1.54)
+ * decides the A1 rows by THIS cap in the bridge's StatusReport (`bridge.caps`), never by version: bridge 0.2.4 has no A1 (it ships in 0.2.5),
+ * so the earlier "version >= 0.2.4" gate would have failed a real 0.2.4 bridge.
+ */
+const OWNER_ROWS_CAP = "owner_rows";
+
+/** `StatusReport.bridge.caps` of the latest report the fake Portal received ([] = none declared, or no report yet). Strings only. */
+export function reportedBridgeCaps(c: BridgeCtx): string[] {
+  const caps: unknown = c.w.portal.acks.at(-1)?.bridge?.caps;
+  return Array.isArray(caps) ? caps.filter((x): x is string => typeof x === "string") : [];
+}
 
 const NOT_PUBLIC_INTERNAL: [string, string][] = [
   ["POST", "/tb/v1/claim"],
@@ -564,13 +574,14 @@ export async function callChecks(c: BridgeCtx): Promise<void> {
     return verdict(o.pass === true && calls === 0, `${o.asserted}; app requests ${calls}`);
   };
   await c.run("B5.no_grant", "agent without a grant is refused before any app call", "isError no_grant (or unknown_tool: not in its table); no app request", () => refusedNoCall("none", p, read.id, ["no_grant", "unknown_tool"]));
-  // spec 0.1.50 (C283 A1, bridge 0.2.4): gate() skips the CRUD ceiling for an op WITH a scopeType (the app's own owner-set access may be
-  // primary above the Portal grant, the SDK decides); an op without one keeps it. Older bridges refuse both.
-  const gateSkipsScoped = !versionBelow(enrolRequests(c)[0]?.version, GATE_SCOPED_SINCE);
+  // spec 0.1.50 (C283 A1): gate() skips the CRUD ceiling for an op WITH a scopeType (the app's own owner-set access may be
+  // primary above the Portal grant, the SDK decides); an op without one keeps it. A bridge without the A1 filter refuses both.
+  // Conformance 0.1.27 (C292): a bridge that implements it DECLARES `owner_rows` in its StatusReport; the suite decides by that cap, not by version.
+  const gateSkipsScoped = reportedBridgeCaps(c).includes(OWNER_ROWS_CAP);
   const aboveFree = (o: Operation) => o.crud.some((x) => !["read", "create", "update"].includes(x));
   const del = c.pick(p, (o) => aboveFree(o) && (!gateSkipsScoped || o.scopeType === undefined));
-  await c.run("B5.crud_exceeds_grant", "op crud beyond the grant refused", "isError crud_exceeds_grant (or unknown_tool); no app request; for a bridge 0.2.4 or newer only an op WITHOUT a scopeType is refused here (B5.gate_scoped_above_grant covers the scoped ones)", () =>
-    del ? refusedNoCall("free", p, del.id, ["crud_exceeds_grant", "unknown_tool"]) : gateSkipsScoped ? Promise.resolve(na("every op beyond the free grant's crud has a scopeType: bridges 0.2.4+ pass those to the app (B5.gate_scoped_above_grant)")) : Promise.resolve(bad("no op outside the free grant's crud")),
+  await c.run("B5.crud_exceeds_grant", "op crud beyond the grant refused", "isError crud_exceeds_grant (or unknown_tool); no app request; for a bridge that declares the owner_rows cap only an op WITHOUT a scopeType is refused here (B5.gate_scoped_above_grant covers the scoped ones)", () =>
+    del ? refusedNoCall("free", p, del.id, ["crud_exceeds_grant", "unknown_tool"]) : gateSkipsScoped ? Promise.resolve(na("every op beyond the free grant's crud has a scopeType: a bridge that declares owner_rows passes those to the app (B5.gate_scoped_above_grant)")) : Promise.resolve(bad("no op outside the free grant's crud")),
   );
   const person = p.manifest.operations.find((o) => o.audience === "person");
   await c.run("B5.audience_not_agent", "person-audience op refused on the agent path", "isError audience_not_agent (or unknown_tool); no app request", () =>
@@ -667,16 +678,16 @@ export async function callChecks(c: BridgeCtx): Promise<void> {
       await c.apply();
     }
   });
-  // spec 0.1.50 (C283 A1, bridge 0.2.4+): the app names a scoped op beyond the grant's crud in scope_summary `admittedOps` for the Free
+  // spec 0.1.50 (C283 A1, a bridge that declares owner_rows, C292): the app names a scoped op beyond the grant's crud in scope_summary `admittedOps` for the Free
   // agent (its OWNER rows admit it); the bridge lists the tool and its gate() passes the call to the app, which decides (SDK authorize()).
   const scopedAbove = c.pick(p, (o) => o.scopeType !== undefined && !o.dynamic && !inFreeCrud(o));
   await c.run(
     "B5.gate_scoped_above_grant",
     "a scoped op above the grant's crud that the app admits reaches the app: gate() skips the CRUD ceiling for ops with a scopeType (C283 A1)",
-    "the app's scope_summary names a scoped agent op beyond the Free grant's crud in admittedOps for the Free agent → the tool is listed and a tools/call is forwarded to the app (the app answers; the bridge does not refuse crud_exceeds_grant); bridges older than 0.2.4 are not_applicable by version",
+    "the app's scope_summary names a scoped agent op beyond the Free grant's crud in admittedOps for the Free agent → the tool is listed and a tools/call is forwarded to the app (the app answers; the bridge does not refuse crud_exceeds_grant); a bridge whose StatusReport does not declare the owner_rows cap (bridge.caps) is not_applicable, and one that declares it MUST pass (decided by capability, never by version, C292)",
     async () => {
-      const version = enrolRequests(c)[0]?.version;
-      if (versionBelow(version, GATE_SCOPED_SINCE)) return na(`bridge ${version} predates ${GATE_SCOPED_SINCE} (gate() skips the CRUD ceiling for scoped ops, spec 0.1.50): not applicable by version`);
+      const caps = reportedBridgeCaps(c);
+      if (!caps.includes(OWNER_ROWS_CAP)) return na(`bridge ${enrolRequests(c)[0]?.version ?? "?"} does not declare the ${OWNER_ROWS_CAP} capability in its StatusReport (bridge.caps = ${JSON.stringify(caps)}): the C283 A1 owner-row filter is not announced, so this row does not apply (the suite decides by capability, never by version, C292)`);
       if (!scopedAbove) return na("no scoped agent op beyond the free grant's crud in the primary manifest");
       const agent = c.w.agents.free.agt;
       const was = p.scopeSummary;

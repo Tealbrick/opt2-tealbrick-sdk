@@ -121,6 +121,8 @@ export interface ConformanceConfig {
   hookCallerProduct?: HookCallerProductFixture;
   /** package 0.1.23 (Caller.listed, SPEC-GAP spec 0.1.49): a static agent op whose output exposes `ctx.caller.listed` (absent → A19.caller_listed is not_applicable) */
   callerListedOp?: CallerListedFixture;
+  /** conformance 0.1.27 (C292, spec 0.1.54): a person op whose output is `ctx.bridgeCaps()` (absent → the A22 rows are not_applicable) */
+  bridgeCapsOp?: BridgeCapsFixture;
 }
 
 /**
@@ -188,13 +190,24 @@ export interface CallerListedFixture {
   input?: Json;
 }
 
+/**
+ * `bridgeCapsOp` (conformance 0.1.27, C292, spec 0.1.54, SDK >= 0.1.37): `op` = a PERSON op of the app that returns what
+ * `ctx.bridgeCaps()` gave it, at `path` (JSON pointer into the op output, default `/bridgeCaps`); `input` (optional) = its input
+ * (placeholders allowed). The A22 rows publish slices with other `bridge.caps` and require the value to follow them.
+ */
+export interface BridgeCapsFixture {
+  op: string;
+  path?: string;
+  input?: Json;
+}
+
 export const EMPTY_CONFIG: ConformanceConfig = Object.freeze({ waivers: [], peers: [], contractOps: {}, setup: [], inputs: {}, inputsAs: {}, dynamic: {} });
 
 /** A whole-string placeholder `${name}`; any other string (also one that merely contains `${`) is a literal. */
 export const PLACEHOLDER_RE = /^\$\{([A-Za-z_][A-Za-z0-9_.]*)\}$/;
 const CAPTURE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const STEP_ID_RE = /^[A-Za-z0-9_.-]{1,64}$/;
-const TOP_KEYS = new Set(["waivers", "peers", "contractOps", "setup", "inputs", "inputsAs", "dynamic", "narrowing", "scopeGrantOp", "companionCallersOp", "hookCallerProduct", "callerListedOp", "$schema", "$comment"]);
+const TOP_KEYS = new Set(["waivers", "peers", "contractOps", "setup", "inputs", "inputsAs", "dynamic", "narrowing", "scopeGrantOp", "companionCallersOp", "hookCallerProduct", "callerListedOp", "bridgeCapsOp", "$schema", "$comment"]);
 const PEER_KEYS = new Set(["product", "version", "channel", "settings"]);
 const PRODUCT_RE = /^[a-z][a-z0-9-]{1,31}$/;
 const SEMVER_RE = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/;
@@ -203,6 +216,7 @@ const NARROWING_KEYS = new Set(["op", "input", "tag", "itemsPath"]);
 const COMPANION_CALLERS_KEYS = new Set(["op", "path", "input", "agentProbe"]);
 const COMPANION_PROBE_KEYS = new Set(["op", "path", "input"]);
 const CALLER_LISTED_KEYS = new Set(["op", "path", "input"]);
+const BRIDGE_CAPS_KEYS = new Set(["op", "path", "input"]);
 const HOOK_CALLER_PRODUCT_KEYS = new Set(["hook", "product", "op", "input"]);
 const SCOPE_GRANT_KEYS = new Set(["op", "input", "aboveCeiling", "agentProbe"]);
 const SCOPE_PROBE_KEYS = new Set(["op", "input", "path"]);
@@ -223,7 +237,7 @@ export function placeholderNames(v: unknown, out: string[] = []): string[] {
 /** Validates a parsed `tealbrick-conformance.json` (`where` names the file in errors). */
 export function parseConformanceConfig(doc: unknown, where: string): ConformanceConfig {
   if (!isRecord(doc)) throw new WaiverError(`${where}: must be a JSON object`);
-  for (const k of Object.keys(doc)) if (!TOP_KEYS.has(k)) throw new WaiverError(`${where}: unknown key ${JSON.stringify(k)} (allowed: waivers, peers, contractOps, setup, inputs, inputsAs, dynamic, narrowing, scopeGrantOp, companionCallersOp, hookCallerProduct, callerListedOp)`);
+  for (const k of Object.keys(doc)) if (!TOP_KEYS.has(k)) throw new WaiverError(`${where}: unknown key ${JSON.stringify(k)} (allowed: waivers, peers, contractOps, setup, inputs, inputsAs, dynamic, narrowing, scopeGrantOp, companionCallersOp, hookCallerProduct, callerListedOp, bridgeCapsOp)`);
   const waivers = parseWaivers(doc.waivers, where);
   const peers = parsePeers(doc.peers, where);
   const contractOps = parseContractOps(doc.contractOps, peers, where);
@@ -367,7 +381,18 @@ export function parseConformanceConfig(doc: unknown, where: string): Conformance
     if (g.input !== undefined) known(placeholderNames(g.input), "callerListedOp.input", "any setup step");
     callerListedOp = { op: g.op, ...(typeof g.path === "string" ? { path: g.path } : {}), ...(g.input !== undefined ? { input: g.input as Json } : {}) };
   }
-  return { waivers, peers, contractOps, setup, inputs, inputsAs, dynamic, ...(narrowing ? { narrowing } : {}), ...(scopeGrantOp ? { scopeGrantOp } : {}), ...(companionCallersOp ? { companionCallersOp } : {}), ...(hookCallerProduct ? { hookCallerProduct } : {}), ...(callerListedOp ? { callerListedOp } : {}) };
+  let bridgeCapsOp: BridgeCapsFixture | undefined;
+  if (doc.bridgeCapsOp !== undefined) {
+    const g = doc.bridgeCapsOp;
+    const shape = `${where}: bridgeCapsOp must be {op: "<person op id>", path?: "<JSON pointer, default /bridgeCaps>", input?}`;
+    if (!isRecord(g)) throw new WaiverError(shape);
+    for (const k of Object.keys(g)) if (!BRIDGE_CAPS_KEYS.has(k)) throw new WaiverError(`${where}: bridgeCapsOp: unknown key ${JSON.stringify(k)} (allowed: op, path, input)`);
+    if (typeof g.op !== "string" || g.op.length === 0) throw new WaiverError(`${shape}; op missing`);
+    if (g.path !== undefined && (typeof g.path !== "string" || !(g.path === "" || g.path.startsWith("/")))) throw new WaiverError(`${where}: bridgeCapsOp.path must be a JSON pointer ("" or "/…")`);
+    if (g.input !== undefined) known(placeholderNames(g.input), "bridgeCapsOp.input", "any setup step");
+    bridgeCapsOp = { op: g.op, ...(typeof g.path === "string" ? { path: g.path } : {}), ...(g.input !== undefined ? { input: g.input as Json } : {}) };
+  }
+  return { waivers, peers, contractOps, setup, inputs, inputsAs, dynamic, ...(narrowing ? { narrowing } : {}), ...(scopeGrantOp ? { scopeGrantOp } : {}), ...(companionCallersOp ? { companionCallersOp } : {}), ...(hookCallerProduct ? { hookCallerProduct } : {}), ...(callerListedOp ? { callerListedOp } : {}), ...(bridgeCapsOp ? { bridgeCapsOp } : {}) };
 }
 
 /** `peers` (CONF-MULTIAPP): 0..MAX_PEERS entries `{product, version, channel?, settings?}`; an unknown key, a duplicate product or a malformed value is a usage error. */
