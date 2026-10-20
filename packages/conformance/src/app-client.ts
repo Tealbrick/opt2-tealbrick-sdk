@@ -83,7 +83,17 @@ export type HookTamper = "no_proof" | "proof_key" | "phase" | "context" | "input
  * covers the body as built, but the bytes SENT differ in a field outside `ctx` and `in` (`call.ws`; not bound by any other claim).
  * `{ forged }`: the proof carries this value as `bd` (a forged token, for malformed digests).
  */
-export type HookBd = "match" | "body_changed" | { forged: unknown };
+export type HookBd =
+  | "match"
+  | "body_changed"
+  | { forged: unknown }
+  // 0.1.26: the positive control of the forged cases: the proof WITHOUT bd is re-signed through the SAME `Mint.withExtraClaim` path
+  // with a VALID bd (sha256 of the bytes sent). A correct app answers it, so a broken minting helper cannot make a refusal row pass.
+  | "resigned_valid"
+  // 0.1.26: the body is sent as DIFFERENT BYTES with the same JSON value (`spaced`: pretty-printed; `reordered`: every object's keys in
+  // reverse order). `hash: "original"` (default): bd is the sha256 of the bytes as built (so it does not match what is sent);
+  // `hash: "sent"`: bd is the sha256 of the bytes sent (the control: the same bytes are answered).
+  | { reserialised: "spaced" | "reordered"; hash?: "original" | "sent" };
 
 export interface HookAnswer extends HttpAnswer {
   code: string | null;
@@ -96,6 +106,13 @@ export interface PersonSession {
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
+/** `v` with the keys of every object in reverse order (the same JSON value, other bytes) */
+function reverseKeys(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(reverseKeys);
+  if (isObj(v)) return Object.fromEntries(Object.entries(v).reverse().map(([k, x]) => [k, reverseKeys(x)]));
+  return v;
+}
 
 /** SDK-API §5: browser pages (the launch form POST) may answer HTML that shows the same error codes. */
 const PERSON_CODES = /\b(ticket_invalid|ticket_used|session_required|csrf_invalid)\b/;
@@ -267,8 +284,18 @@ export class AppClient {
     const raw = JSON.stringify(body);
     // C268 B: `bd` covers the bytes of `raw`; `body_changed` sends other bytes (one field outside ctx and in changed)
     const bdOpt = opts.bd;
-    const bd = bdOpt === "match" || bdOpt === "body_changed" ? sha256Bytes(new TextEncoder().encode(raw)) : undefined;
-    const sent = bdOpt === "body_changed" ? JSON.stringify({ ...body, call: { ...call, ws: `${String(call.ws ?? "ws")}-changed` } }) : raw;
+    const reser = isObj(bdOpt) && "reserialised" in bdOpt ? bdOpt : null;
+    const sent =
+      bdOpt === "body_changed"
+        ? JSON.stringify({ ...body, call: { ...call, ws: `${String(call.ws ?? "ws")}-changed` } })
+        : reser
+          ? reser.reserialised === "spaced"
+            ? JSON.stringify(body, null, 2)
+            : JSON.stringify(reverseKeys(body))
+          : raw;
+    const enc = (text: string) => sha256Bytes(new TextEncoder().encode(text));
+    // `resigned_valid` mints WITHOUT bd; the claim is added below through withExtraClaim
+    const bd = bdOpt === "match" || bdOpt === "body_changed" ? enc(raw) : reser ? enc(reser.hash === "sent" ? sent : raw) : undefined;
     if (t !== "no_proof") {
       headers[BRIDGE_HEADERS.callProof.toLowerCase()] =
         t === "op_proof"
@@ -284,7 +311,9 @@ export class AppClient {
               ...(t === "proof_key" ? { key: b.stranger } : {}),
               ...(bd !== undefined ? { bd } : {}),
             });
-      if (isObj(bdOpt) && "forged" in bdOpt) headers[BRIDGE_HEADERS.callProof.toLowerCase()] = await b.mint.withExtraClaim(headers[BRIDGE_HEADERS.callProof.toLowerCase()] as string, { bd: bdOpt.forged });
+      const proofKey = BRIDGE_HEADERS.callProof.toLowerCase();
+      if (isObj(bdOpt) && "forged" in bdOpt) headers[proofKey] = await b.mint.withExtraClaim(headers[proofKey] as string, { bd: bdOpt.forged });
+      if (bdOpt === "resigned_valid") headers[proofKey] = await b.mint.withExtraClaim(headers[proofKey] as string, { bd: enc(sent) });
     }
     const path = `/tb/v1/hooks/${encodeURIComponent(hookId)}`;
     const a = await this.#send("POST", path, headers, sent);

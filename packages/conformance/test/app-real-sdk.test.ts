@@ -65,7 +65,7 @@ async function startReal(env: Record<string, string>) {
   return { url: `http://127.0.0.1:${port}`, stop: () => running.stop(), backupNow: async () => void (await running.backups.runNow()) };
 }
 
-describe("conformance 0.1.24 and 0.1.25 rows against the real miniapp-sdk", { timeout: 300_000 }, () => {
+describe("conformance 0.1.24, 0.1.25 and 0.1.26 rows against the real miniapp-sdk", { timeout: 300_000 }, () => {
   it("a correct SDK passes every new row", { timeout: 240_000 }, async () => {
     const config = parseConformanceConfig({ scopeGrantOp: { op: "scope_grant", input: { agent: "${tb.agentA}", id: "space-draft", access: "read_write" }, aboveCeiling: { agent: "${tb.agentA}", id: "space-draft", access: "manage" } } }, "test config");
     const r = await runApp({ manifest: am, manifestPath: path, config, start: startReal as never, deployTemplate: template, timeoutMs: 8000 });
@@ -90,6 +90,7 @@ describe("conformance 0.1.24 and 0.1.25 rows against the real miniapp-sdk", { ti
       "A2.proof_claims_declared",
       "A2.hook_bd_binds_body",
       "A2.hook_bd_malformed",
+      "A2.hook_bd_raw_bytes", // 0.1.26
       "A2.proof_bd_other_variants",
     ]) {
       assert.equal(st(id)?.status, "pass", `${id}: ${st(id)?.asserted}`);
