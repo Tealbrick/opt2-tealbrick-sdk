@@ -185,6 +185,8 @@ export function buildContext(
     // v0.1.14 addition (SPEC-GAP: InstanceSlice.companionTargets)
     companionTargets: () => rt.companionTargets(),
     appsPolicy: () => rt.appsPolicy(),
+    // v0.1.37 (C292, spec 0.1.54): every op context (person, agent, app, scheduled and resumed calls) reads the CURRENT slice; advisory
+    bridgeCaps: () => rt.bridgeCaps(),
     agentScopeRequest: (agt: string) => rt.agentScopeRequest(agt),
     // v0.1.21 (R1, SDK-1/SDK-2): ctx.jobs, ctx.schedule (fire-time authorize with THIS caller), ctx.paused
     ...jobsView(rt, rt.jobs, { caller, grant: grant ? { token: grant.token, iat: grant.claims.iat } : null }),
