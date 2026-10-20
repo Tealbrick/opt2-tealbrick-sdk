@@ -93,6 +93,15 @@ describe("createMiniapp", () => {
     );
     assert.equal(v.manifest.scopes?.length, 1);
     assert.ok((v.manifest.scopes?.[0]?.defaultGrants.length ?? 0) > 0);
+    // A21.owner_row_narrowed_level narrows the lowest level that covers a scoped op: a higher level must still cover it, or the narrowed manifest is invalid (M-OP-7)
+    assert.deepEqual(
+      v.manifest.scopes?.[0]?.access.map((a) => [a.id, a.crud.join(",")]),
+      [
+        ["read", "read"],
+        ["read_write", "read,create"],
+        ["manage", "read,create,update,delete"],
+      ],
+    );
     assert.ok(v.manifest.backups.schedule && v.manifest.backups.retain > 0);
     assert.equal(v.manifest.ui?.launchPath, "/");
   });
@@ -148,15 +157,18 @@ describe("createMiniapp", () => {
     // the conformance harness the script names: default-exports start(env) with backupNow (A7 round-trip)
     const harness = read(dir, "conformance.start.ts");
     assert.match(harness, /export default async function start\(env/);
-    assert.match(harness, /startApp\(app, env, harness\)/);
     assert.match(harness, /backupNow/);
+    // conformance >= 0.1.25 / 0.1.26 (spec 0.1.52, C283c): the A21 update rows restart the app with TBCONF_LEVEL_CRUD; the harness applies it
+    assert.match(harness, /import \{ applyLevelCrud, LEVEL_CRUD_ENV, parseLevelCrud \} from "@opt2-tealbrick\/conformance";/);
+    assert.match(harness, /^ {2}const leveled = applyLevelCrud\(manifest, parseLevelCrud\(env\[LEVEL_CRUD_ENV\]\)\);$/m);
+    assert.match(harness, /startApp\(defineApp\(\{ \.\.\.definition, manifest: leveled \}\), env, harness\)/);
     const tb = Object.entries<string>({ ...pkg.dependencies, ...pkg.devDependencies }).filter(([n]) => n.startsWith("@opt2-tealbrick/"));
     assert.deepEqual(tb.map(([n]) => n).sort(), ["@opt2-tealbrick/conformance", "@opt2-tealbrick/manifest", "@opt2-tealbrick/miniapp-sdk", "@opt2-tealbrick/ui"]);
     for (const [n, url] of tb) assert.match(url, RELEASE_URL_RE, n);
     assert.match(pkg.devDependencies["@opt2-tealbrick/ui"], /[/-]ui-v0\.3\.0\//);
-    assert.match(pkg.dependencies["@opt2-tealbrick/manifest"], /[/-]manifest-v0\.1\.26\//);
-    assert.match(pkg.dependencies["@opt2-tealbrick/miniapp-sdk"], /[/-]miniapp-sdk-v0\.1\.34\//);
-    assert.match(pkg.devDependencies["@opt2-tealbrick/conformance"], /[/-]conformance-v0\.1\.23\//);
+    assert.match(pkg.dependencies["@opt2-tealbrick/manifest"], /[/-]manifest-v0\.1\.28\//);
+    assert.match(pkg.dependencies["@opt2-tealbrick/miniapp-sdk"], /[/-]miniapp-sdk-v0\.1\.36\//);
+    assert.match(pkg.devDependencies["@opt2-tealbrick/conformance"], /[/-]conformance-v0\.1\.26\//);
     // BSA-07: the ONE app shell from ui, no local frame
     const ui = read(dir, "src/ui/App.tsx");
     assert.match(ui, /import \{[^}]*\bAppShell\b[^}]*\} from "@opt2-tealbrick\/ui";/);

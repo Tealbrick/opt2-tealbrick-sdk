@@ -102,7 +102,8 @@
       "labelPlural": "Collections",
       "access": [
         { "id": "read", "label": "Read", "crud": ["read"] },
-        { "id": "read_write", "label": "Read and add", "crud": ["read", "create"] }
+        { "id": "read_write", "label": "Read and add", "crud": ["read", "create"] },
+        { "id": "manage", "label": "Read, add, change and remove", "crud": ["read", "create", "update", "delete"] }
       ],
       "defaultGrants": [{ "kind": "own", "access": "read_write" }],
       "summaryTemplate": "{count} {labelPlural} ({access.read_write} writable)"
