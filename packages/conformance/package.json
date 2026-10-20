@@ -1,6 +1,6 @@
 {
   "name": "@opt2-tealbrick/conformance",
-  "version": "0.1.25",
+  "version": "0.1.26",
   "private": true,
   "description": "Teal Brick opt2 conformance suite: checks + fake Portal + fake bridge generated from @opt2-tealbrick/spec.",
   "license": "SEE LICENSE IN LICENSE",
