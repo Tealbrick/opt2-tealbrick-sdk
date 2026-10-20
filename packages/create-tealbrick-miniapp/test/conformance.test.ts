@@ -2,7 +2,7 @@
 // (owner rows keep their CRUD when a level changes, spec 0.1.52) FAIL for an app on SDK >= 0.1.36 whose start module ignores
 // TBCONF_LEVEL_CRUD. This test generates an app, installs it exactly as CI does (pnpm install --frozen-lockfile --ignore-scripts
 // from the dist tarballs), runs `tb-conformance app` against it and checks both rows: PASS with the generated start module,
-// FAIL when the applyLevelCrud line is removed. It needs pnpm and the network (or a warm pnpm store). Every child process runs in
+// FAIL when the applyLevelCrud line is removed. It starts pnpm from npm_execpath, else `corepack pnpm`, and needs the network (or a warm pnpm store). Every child process runs in
 // its own process group under a wall-clock limit and is killed with the group; nothing is left running.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -71,6 +71,12 @@ function run(cmd: string, args: string[], cwd: string, limitMs: number): Promise
   });
 }
 
+/** pnpm the way the repo scripts start it: the running pnpm (npm_execpath, set when pnpm runs the test script), else `corepack pnpm` (the CI image has no pnpm on PATH). */
+const NPM_EXECPATH = process.env.npm_execpath;
+function runPnpm(args: string[], cwd: string, limitMs: number): Promise<Ran> {
+  return NPM_EXECPATH ? run(process.execPath, [NPM_EXECPATH, ...args], cwd, limitMs) : run("corepack", ["pnpm", ...args], cwd, limitMs);
+}
+
 const tail = (r: Ran) => `exit ${r.status}${r.timedOut ? " (wall-clock limit)" : ""}\n${r.stderr.slice(-1500)}\n${r.stdout.slice(-1500)}`;
 const A21 = ["A21.owner_row_widened_level", "A21.owner_row_narrowed_level"] as const;
 
@@ -83,7 +89,7 @@ describe("a generated app runs the conformance suite it pins", () => {
       root = mkdtempSync(join(tmpdir(), "create-tb-miniapp-conf-"));
       dir = join(root, "conf-app");
       createMiniapp({ dir, id: "conf-app", name: "Conf App" });
-      const install = await run("pnpm", ["install", "--frozen-lockfile", "--ignore-scripts"], dir, 100_000);
+      const install = await runPnpm(["install", "--frozen-lockfile", "--ignore-scripts"], dir, 100_000);
       assert.equal(install.status, 0, `pnpm install --frozen-lockfile: ${tail(install)}`);
       const kit = await run(process.execPath, ["--run", "kit"], dir, 50_000);
       assert.equal(kit.status, 0, `node --run kit: ${tail(kit)}`);
