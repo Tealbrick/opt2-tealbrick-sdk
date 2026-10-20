@@ -6,7 +6,7 @@
 // its own process group under a wall-clock limit and is killed with the group; nothing is left running.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -89,6 +89,9 @@ describe("a generated app runs the conformance suite it pins", () => {
   before(
     async () => {
       root = mkdtempSync(join(tmpdir(), "create-tb-miniapp-conf-"));
+      // mkdtemp makes the folder 0700. A root runner (the CI step container) starts the app as root and the SDK then drops to uid 1000 (C53):
+      // that uid must still read migrations/ and node_modules/ below this folder, or the app never claims ("no claim within 30000 ms").
+      chmodSync(root, 0o755);
       dir = join(root, "conf-app");
       createMiniapp({ dir, id: "conf-app", name: "Conf App" });
       const install = await runPnpm(["install", "--frozen-lockfile", "--ignore-scripts"], dir, 100_000);
