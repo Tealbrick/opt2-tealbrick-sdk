@@ -10,6 +10,7 @@ import type { BridgeClient } from "./bridge-client.ts";
 import type { AttentionCode } from "./claim-guard.ts";
 import type { ContextExtras, SdkAppDefinition, SdkEventContext } from "./context.ts";
 import type { SdkConfig } from "./env.ts";
+import type { EventOutbox } from "./events.ts";
 import type { JobRunner } from "./jobs.ts";
 import type { KeysInternals } from "./keys.ts";
 import type { SecretRegistry } from "./log.ts";
@@ -46,6 +47,8 @@ export interface Runtime {
   readonly secretsStore: AppSecrets;
   readonly backups: BackupApi;
   readonly bridge: BridgeClient | null;
+  /** v0.1.38 (C274c/C274d): THE event outbox of this process (ctx.emit, purges, tb.hold.decided) and its sender */
+  readonly events: EventOutbox;
   /** v0.1.21 (R1): THE job runner of this process (tb_jobs) */
   readonly jobs: JobRunner;
   /** v0.1.21: a verified grant of `callerId` (newest wins for its pending scheduled ops) */

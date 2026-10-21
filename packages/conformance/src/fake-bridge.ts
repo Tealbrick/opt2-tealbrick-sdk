@@ -47,8 +47,10 @@ import {
   type WorkspaceId,
 } from "@opt2-tealbrick/spec/credentials";
 import type { AgentMode, CrudAction, HoldFamily, Manifest } from "@opt2-tealbrick/spec/manifest";
+import { CRUD_ACTIONS } from "@opt2-tealbrick/spec/manifest";
 import type { OperationView } from "@opt2-tealbrick/spec/sdk";
 import { AppClient } from "./app-client.ts";
+import { EventLog } from "./event-log.ts";
 import { closeServer, HttpError, header, listen, parseJson, readRaw, sendError, sendJson } from "./http.ts";
 import { Mint, newId, nowS, peek } from "./tokens.ts";
 
@@ -173,6 +175,15 @@ export class FakeBridge {
   readonly forgotten: { from: number; to: number | null }[] = [];
   /** every companion grant a slice of this run carried (A16: an app-initiated call must present one of them) */
   readonly sliceGrants = new Set<string>();
+  /**
+   * conformance 0.1.28 (C274c, BRIDGE §14): every `POST /tb/v1/events` attempt that passed the instance assertion: the items and the
+   * HTTP status answered (a 503 from `control.failNextEvents` included), in arrival order.
+   */
+  readonly eventPosts: { items: Record<string, unknown>[]; status: number; at: number }[] = [];
+  /** the next `n` ingest requests are answered with this status (A-EV-4: retry with the same key) */
+  eventFailQueue: { status: number; code: string }[] = [];
+  /** the per-agent event log (BRIDGE §14.1–§14.3) the `tealbrick/events/*` methods read */
+  readonly events: EventLog;
   /** the first K6 for the app instance (`TB_ENROL_CODE`) */
   readonly enrolCode: string;
   url = "";
@@ -261,6 +272,19 @@ export class FakeBridge {
     });
     this.enrolCode = this.issueEnrolCode(this.ids.ins);
     this.control = new FakeBridgeControl(this);
+    // the fake's grant rule for events: every slice agent holds a valid grant with every crud; a bound agent's wf = every agent op
+    const agentOps = opts.manifest.operations.filter((o) => o.audience === "agent").map((o) => o.id);
+    this.events = new EventLog({
+      manifest: (ins) => (ins === this.ids.ins ? this.manifest : null),
+      grantees: (ins) => (ins === this.ids.ins ? this.ids.agents.map((a) => a.id) : []),
+      claims: (agent, ins) => {
+        const a = ins === this.ids.ins ? this.ids.agents.find((x) => x.id === agent) : undefined;
+        return a ? { mode: a.mode, wf: a.mode === "bound" ? agentOps : [], crud: [...CRUD_ACTIONS] } : null;
+      },
+      agentPaused: (agent) => this.pause.workspace || this.pause.agents.has(agent),
+      instancePaused: (ins) => this.pause.instances.has(ins),
+      hookMatches: () => false,
+    });
   }
 
   static async create(opts: FakeBridgeOptions): Promise<FakeBridge> {
@@ -470,6 +494,8 @@ export class FakeBridge {
       if (req.method === "POST" && path === BRIDGE_INTERNAL_PATHS.status) return await this.#status(req, pathAndQuery, raw, res);
       if (req.method === "GET" && path.startsWith("/tb/v1/keys/")) return this.#keys(req, pathAndQuery, path, res);
       if (req.method === "POST" && path === BRIDGE_INTERNAL_PATHS.call) return await this.#call(req, pathAndQuery, raw, res);
+      if (req.method === "POST" && path === BRIDGE_INTERNAL_PATHS.events) return this.#ingest(req, pathAndQuery, raw, res);
+      if (path === "/mcp") return this.#mcp(req, raw, res);
       if (req.method === "GET" && path === BRIDGE_INTERNAL_PATHS.metrics) {
         res.writeHead(200, { "content-type": "text/plain" });
         return void res.end(`tb_fake_bridge_requests_total ${this.captured.filter((c) => c.dir === "bridge-in").length}\n`);
@@ -502,6 +528,48 @@ export class FakeBridge {
     });
     if (!r.ok) throw new HttpError(401, "unauthenticated", `instance assertion refused (${r.reason})`);
     return { ins, ...(svc ? { svc } : {}), iat: r.claims.iat, exp: r.claims.exp, kid: r.header.kid };
+  }
+
+  /** conformance 0.1.28 (BRIDGE §14.1): `POST /tb/v1/events` from the claimed APP instance (a companion service → 403). */
+  #ingest(req: IncomingMessage, pathAndQuery: string, raw: Buffer, res: ServerResponse): void {
+    const who = this.#verifyInstance(req, pathAndQuery, raw);
+    if (who.svc) throw new HttpError(403, "forbidden", "a companion service sends no events");
+    if (raw.length > 512 * 1024) throw new HttpError(413, "payload_too_large", "ingest body over 512 KiB");
+    const b = parseJson(raw) as { items?: unknown } | undefined;
+    const items = Array.isArray(b?.items) ? (b.items as Record<string, unknown>[]) : null;
+    if (!items || items.length < 1 || items.length > 100) throw new HttpError(400, "input_invalid", "EventIngestBody {items: 1..100}");
+    const fail = this.eventFailQueue.shift();
+    this.eventPosts.push({ items, status: fail?.status ?? 200, at: Date.now() });
+    if (fail) throw new HttpError(fail.status, fail.code, "event ingest refused by the control API");
+    sendJson(res, 200, this.events.ingest(who.ins, this.manifest.id, items));
+  }
+
+  /**
+   * conformance 0.1.28 (BRIDGE §14.3, fake only): the three `tealbrick/events/*` JSON-RPC methods on `POST /mcp`, and `GET /mcp` as
+   * the SSE stream of `notifications/tealbrick/event` frames. FAKE authentication: `Authorization: Bearer <agent id>` of a slice
+   * agent (a runtime under test talks to this fake with an agent id, never a real token).
+   */
+  #mcp(req: IncomingMessage, raw: Buffer, res: ServerResponse): void {
+    const auth = header(req, "authorization") ?? "";
+    const agent = auth.startsWith("Bearer ") ? (auth.slice(7).trim() as AgentId) : null;
+    if (!agent || !this.ids.agents.some((a) => a.id === agent)) throw new HttpError(401, "unauthenticated", "fake /mcp: Bearer <slice agent id>");
+    if (req.method === "GET") {
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
+      const frame = (e: unknown) => {
+        const ev = e as { id: string };
+        res.write(`id: ${ev.id}\ndata: ${JSON.stringify({ jsonrpc: "2.0", method: "notifications/tealbrick/event", params: { event: e } })}\n\n`);
+      };
+      const last = header(req, "last-event-id");
+      const backlog = this.events.poll(agent, last, 100);
+      if (!("error" in backlog)) for (const e of backlog.events) frame(e);
+      const off = this.events.subscribe(agent, frame);
+      req.once("close", off);
+      return;
+    }
+    const msg = parseJson(raw) as { id?: unknown; method?: unknown; params?: unknown } | undefined;
+    const id = msg?.id ?? null;
+    const r = typeof msg?.method === "string" ? this.events.rpc(agent, [this.ids.ins], msg.method, msg.params) : null;
+    sendJson(res, 200, r === null ? { jsonrpc: "2.0", id, error: { code: -32601, message: "method not found" } } : { jsonrpc: "2.0", id, ...r });
   }
 
   async #claim(raw: Buffer, res: ServerResponse): Promise<void> {
@@ -825,6 +893,14 @@ export class FakeBridgeControl {
   unlistCompanionCaller(ins: InstanceId): Promise<number> {
     this.#b.companionCallers = this.#b.companionCallers.filter((x) => x.ins !== ins);
     return this.#b.rebuildSlice();
+  }
+  /** conformance 0.1.28 (A-EV-4): the next `n` event ingest requests are refused with `status` (default 503 app_not_claimed). */
+  failNextEvents(n: number, status = 503, code = "app_not_claimed"): void {
+    for (let i = 0; i < n; i++) this.#b.eventFailQueue.push({ status, code });
+  }
+  /** conformance 0.1.28: every emit / purge item the fake answered 200 for, in arrival order (with the batch status). */
+  eventItems(): { item: Record<string, unknown>; status: number; at: number }[] {
+    return this.#b.eventPosts.flatMap((p) => p.items.map((item) => ({ item, status: p.status, at: p.at })));
   }
   /** spec 0.1.54 (C292): sets `bridge.caps` of the slice (`undefined` = the member is omitted) and publishes the slice. */
   setBridgeCaps(caps: readonly unknown[] | undefined): Promise<number> {

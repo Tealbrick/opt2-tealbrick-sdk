@@ -123,6 +123,7 @@ export interface ConformanceConfig {
   callerListedOp?: CallerListedFixture;
   /** conformance 0.1.27 (C292, spec 0.1.54): a person op whose output is `ctx.bridgeCaps()` (absent → the A22 rows are not_applicable) */
   bridgeCapsOp?: BridgeCapsFixture;
+  eventsProbe?: EventsProbeFixture;
 }
 
 /**
@@ -201,13 +202,26 @@ export interface BridgeCapsFixture {
   input?: Json;
 }
 
+/**
+ * `eventsProbe` (conformance 0.1.28, C274c, spec 0.1.57, SDK >= 0.1.38): `op` = a PERSON op the A-EV rows drive with
+ * `{case, key?, instanceId?, kind?}` (cases: emit, rollback, commit_throw, invalid {kind: payload | undeclared | reserved} → output
+ * {code}, scoped, purge); `event` = the declared event `emit` sends; `scopedEvent` = a declared SCOPED event `scoped` sends (optional:
+ * without it A-EV-6 and A-EV-7 are not_applicable); `instanceId` = the scope instance of `scoped` and `purge` (placeholders allowed).
+ */
+export interface EventsProbeFixture {
+  op: string;
+  event: string;
+  scopedEvent?: string;
+  instanceId?: Json;
+}
+
 export const EMPTY_CONFIG: ConformanceConfig = Object.freeze({ waivers: [], peers: [], contractOps: {}, setup: [], inputs: {}, inputsAs: {}, dynamic: {} });
 
 /** A whole-string placeholder `${name}`; any other string (also one that merely contains `${`) is a literal. */
 export const PLACEHOLDER_RE = /^\$\{([A-Za-z_][A-Za-z0-9_.]*)\}$/;
 const CAPTURE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const STEP_ID_RE = /^[A-Za-z0-9_.-]{1,64}$/;
-const TOP_KEYS = new Set(["waivers", "peers", "contractOps", "setup", "inputs", "inputsAs", "dynamic", "narrowing", "scopeGrantOp", "companionCallersOp", "hookCallerProduct", "callerListedOp", "bridgeCapsOp", "$schema", "$comment"]);
+const TOP_KEYS = new Set(["waivers", "peers", "contractOps", "setup", "inputs", "inputsAs", "dynamic", "narrowing", "scopeGrantOp", "companionCallersOp", "hookCallerProduct", "callerListedOp", "bridgeCapsOp", "eventsProbe", "$schema", "$comment"]);
 const PEER_KEYS = new Set(["product", "version", "channel", "settings"]);
 const PRODUCT_RE = /^[a-z][a-z0-9-]{1,31}$/;
 const SEMVER_RE = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/;
@@ -217,6 +231,7 @@ const COMPANION_CALLERS_KEYS = new Set(["op", "path", "input", "agentProbe"]);
 const COMPANION_PROBE_KEYS = new Set(["op", "path", "input"]);
 const CALLER_LISTED_KEYS = new Set(["op", "path", "input"]);
 const BRIDGE_CAPS_KEYS = new Set(["op", "path", "input"]);
+const EVENTS_PROBE_KEYS = new Set(["op", "event", "scopedEvent", "instanceId"]);
 const HOOK_CALLER_PRODUCT_KEYS = new Set(["hook", "product", "op", "input"]);
 const SCOPE_GRANT_KEYS = new Set(["op", "input", "aboveCeiling", "agentProbe"]);
 const SCOPE_PROBE_KEYS = new Set(["op", "input", "path"]);
@@ -237,7 +252,7 @@ export function placeholderNames(v: unknown, out: string[] = []): string[] {
 /** Validates a parsed `tealbrick-conformance.json` (`where` names the file in errors). */
 export function parseConformanceConfig(doc: unknown, where: string): ConformanceConfig {
   if (!isRecord(doc)) throw new WaiverError(`${where}: must be a JSON object`);
-  for (const k of Object.keys(doc)) if (!TOP_KEYS.has(k)) throw new WaiverError(`${where}: unknown key ${JSON.stringify(k)} (allowed: waivers, peers, contractOps, setup, inputs, inputsAs, dynamic, narrowing, scopeGrantOp, companionCallersOp, hookCallerProduct, callerListedOp, bridgeCapsOp)`);
+  for (const k of Object.keys(doc)) if (!TOP_KEYS.has(k)) throw new WaiverError(`${where}: unknown key ${JSON.stringify(k)} (allowed: waivers, peers, contractOps, setup, inputs, inputsAs, dynamic, narrowing, scopeGrantOp, companionCallersOp, hookCallerProduct, callerListedOp, bridgeCapsOp, eventsProbe)`);
   const waivers = parseWaivers(doc.waivers, where);
   const peers = parsePeers(doc.peers, where);
   const contractOps = parseContractOps(doc.contractOps, peers, where);
@@ -392,7 +407,19 @@ export function parseConformanceConfig(doc: unknown, where: string): Conformance
     if (g.input !== undefined) known(placeholderNames(g.input), "bridgeCapsOp.input", "any setup step");
     bridgeCapsOp = { op: g.op, ...(typeof g.path === "string" ? { path: g.path } : {}), ...(g.input !== undefined ? { input: g.input as Json } : {}) };
   }
-  return { waivers, peers, contractOps, setup, inputs, inputsAs, dynamic, ...(narrowing ? { narrowing } : {}), ...(scopeGrantOp ? { scopeGrantOp } : {}), ...(companionCallersOp ? { companionCallersOp } : {}), ...(hookCallerProduct ? { hookCallerProduct } : {}), ...(callerListedOp ? { callerListedOp } : {}), ...(bridgeCapsOp ? { bridgeCapsOp } : {}) };
+  let eventsProbe: EventsProbeFixture | undefined;
+  if (doc.eventsProbe !== undefined) {
+    const g = doc.eventsProbe;
+    const shape = `${where}: eventsProbe must be {op: "<person op id>", event: "<declared event name>", scopedEvent?: "<declared scoped event name>", instanceId?}`;
+    if (!isRecord(g)) throw new WaiverError(shape);
+    for (const k of Object.keys(g)) if (!EVENTS_PROBE_KEYS.has(k)) throw new WaiverError(`${where}: eventsProbe: unknown key ${JSON.stringify(k)} (allowed: op, event, scopedEvent, instanceId)`);
+    if (typeof g.op !== "string" || g.op.length === 0) throw new WaiverError(`${shape}; op missing`);
+    if (typeof g.event !== "string" || g.event.length === 0) throw new WaiverError(`${shape}; event missing`);
+    if (g.scopedEvent !== undefined && (typeof g.scopedEvent !== "string" || g.scopedEvent.length === 0)) throw new WaiverError(`${shape}; scopedEvent must be a name`);
+    if (g.instanceId !== undefined) known(placeholderNames(g.instanceId), "eventsProbe.instanceId", "any setup step");
+    eventsProbe = { op: g.op, event: g.event, ...(typeof g.scopedEvent === "string" ? { scopedEvent: g.scopedEvent } : {}), ...(g.instanceId !== undefined ? { instanceId: g.instanceId as Json } : {}) };
+  }
+  return { waivers, peers, contractOps, setup, inputs, inputsAs, dynamic, ...(narrowing ? { narrowing } : {}), ...(scopeGrantOp ? { scopeGrantOp } : {}), ...(companionCallersOp ? { companionCallersOp } : {}), ...(hookCallerProduct ? { hookCallerProduct } : {}), ...(callerListedOp ? { callerListedOp } : {}), ...(bridgeCapsOp ? { bridgeCapsOp } : {}), ...(eventsProbe ? { eventsProbe } : {}) };
 }
 
 /** `peers` (CONF-MULTIAPP): 0..MAX_PEERS entries `{product, version, channel?, settings?}`; an unknown key, a duplicate product or a malformed value is a usage error. */

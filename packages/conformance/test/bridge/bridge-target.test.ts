@@ -30,7 +30,43 @@ const PAUSE_INSTANCE_IDS = ["P1.instance.hook_app_paused", "P1.instance.other_ap
 const KEYS_ORIGIN_IDS = ["B11.main_origin_keys_404", "B11.keys_origin_only", "B11.keys_origin_csp", "B11.keys_origin_unset_503"];
 const GOOD_IDS = ["B1.health", "B1.mcp_requires_auth", "B1.internal_not_public", "C1.K5", "cred.p1.bridge_rejects_clerk_jwt", "cred.p1.bridge_rejects_tbo", "B7.list_exact", "B7.no_person_ops", "B8.forward", "B8.grant_and_proof", "B5.bound_outside_wf", "P1.workspace.mcp", "B9.portal_paths", "B9.no_payload"];
 
+const EVENT_IDS = Array.from({ length: 17 }, (_, i) => `B-EV-${i + 1}`);
+const asserted = (r: Report, id: string) => r.checks.find((c) => c.id === id)?.asserted ?? "";
+
 describe("bridge target", () => {
+  it("spec 0.1.57 (B-EV): a bridge that DECLARES events and implements BRIDGE §14 passes every B-EV row", { timeout: 300_000 }, async () => {
+    const r = await run({ events: true }, ["events"]);
+    for (const id of EVENT_IDS) assert.equal(status(r, id), "pass", `${id}: ${asserted(r, id)}`);
+  });
+
+  it("spec 0.1.57 (B-EV): a bridge that declares no events cap is not_applicable on every row, whatever version it reports", { timeout: 120_000 }, async () => {
+    const r = await run({ version: "0.2.7" }, ["events"]);
+    for (const id of EVENT_IDS) assert.equal(status(r, id), "not_applicable", `${id}: ${asserted(r, id)}`);
+    assert.match(asserted(r, "B-EV-1"), /does not declare the events capability.*never by version/);
+  });
+
+  it("fire-on-bad (B-EV): each broken §14 rule fails its row; a bridge that declares events without implementing it fails", { timeout: 900_000 }, async () => {
+    const cases: [MiniFlags, string[]][] = [
+      [{ events: true, eventFaults: { deliverToCause: true } }, ["B-EV-4", "B-EV-17"]],
+      [{ events: true, eventFaults: { ignoreEligible: true } }, ["B-EV-3", "B-EV-14"]],
+      [{ events: true, eventFaults: { noDeliveryRecheck: true } }, ["B-EV-6"]],
+      [{ events: true, eventFaults: { keepSummaryWithHook: true } }, ["B-EV-9"]],
+      [{ events: true, eventFaults: { noDedupe: true } }, ["B-EV-13"]],
+      [{ events: true, eventFaults: { noReId: true } }, ["B-EV-7"]],
+      [{ events: true, eventFaults: { noTruncated: true } }, ["B-EV-8", "B-EV-11"]],
+      [{ events: true, eventFaults: { noReserved: true } }, ["B-EV-10", "B-EV-12"]],
+      [{ events: true, eventFaults: { noPurge: true } }, ["B-EV-15", "B-EV-16"]],
+      [{ declaredCaps: ["owner_rows", "events"] }, ["B-EV-1", "B-EV-17"]],
+    ];
+    // independent worlds and bridges (own ports): run them side by side
+    const reports = await Promise.all(cases.map(([flags]) => run(flags, ["events"])));
+    cases.forEach(([flags, ids], i) => {
+      const r = reports[i] as Report;
+      for (const id of ids) assert.equal(status(r, id), "fail", `${JSON.stringify(flags)} ${id}: ${status(r, id)} ${asserted(r, id)}`);
+    });
+  });
+
+
   it("reports every catalogued id; unselected groups are not_run; a correct bridge passes the selected rules", async () => {
     const r = await run({}, ["surface", "auth", "mcp", "call", "pause.workspace", "scan"]);
     assert.equal(r.target, "bridge");

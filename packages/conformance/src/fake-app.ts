@@ -350,6 +350,18 @@ export class FakeApp {
     return request(`${this.#world.bridgeInternalUrl()}${path}`, { headers: assert ? { [BRIDGE_HEADERS.assertion]: await this.#assert("GET", path) } : {} });
   }
 
+  /** conformance 0.1.28 (BRIDGE §14.1): `POST /tb/v1/events` with this instance's assertion (htm, htu, bd). */
+  async postEvents(items: unknown[]): Promise<HttpAnswer> {
+    const path = "/tb/v1/events";
+    const raw = new TextEncoder().encode(JSON.stringify({ items }));
+    return request(`${this.#world.bridgeInternalUrl()}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", [BRIDGE_HEADERS.assertion]: await this.#assert("POST", path, raw) },
+      body: raw,
+      timeoutMs: 40_000,
+    });
+  }
+
   async companion(env: CallEnvelope, grant: string | null): Promise<HttpAnswer> {
     const path = "/tb/v1/call";
     const raw = new TextEncoder().encode(JSON.stringify(env));

@@ -327,6 +327,8 @@ export async function installSlice(rt: Runtime, token: string): Promise<boolean>
     return false;
   }
   const slice = rt.trust.slice;
+  // v0.1.38 (C274c): a new slice may carry the `events` cap: the outbox sender looks at once (rows waited for it)
+  rt.events.wake();
   if (!r.changed || !slice) return true;
   for (const a of slice.agents) await rt.ensureAgent(a);
   for (const a of r.changed.removed) {

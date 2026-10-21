@@ -6,9 +6,9 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { digest, type Ed25519KeyPair, generateKeyPair, signCallProof, signGrant, signKeySetStatement, signSlice, signTicket, ulid } from "@opt2-tealbrick/manifest";
+import { digest, type Ed25519KeyPair, generateKeyPair, keySetFrom, signCallProof, signGrant, signKeySetStatement, signSlice, signTicket, ulid, verifyAssertion } from "@opt2-tealbrick/manifest";
 import type { InstanceSlice } from "@opt2-tealbrick/spec/bridge";
-import type { AgentId, BridgeId, Ed25519PublicJwk, FreeCaps, InstanceId, PersonId, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
+import { type AgentId, type BridgeId, type Ed25519PublicJwk, type FreeCaps, type InstanceId, type PersonId, TYP, type WorkspaceId } from "@opt2-tealbrick/spec/credentials";
 import type { CrudAction, HoldFamily, HookHoldFamily } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 
@@ -215,6 +215,12 @@ export class FakeBridge {
   calls: { body: Record<string, unknown>; grant: string; assert: string }[] = [];
   /** answer of POST /tb/v1/call (default: ok) */
   onCall: (body: Record<string, unknown>) => { status: number; body: unknown } = () => ({ status: 200, body: { status: "ok", output: { done: true } } });
+  /** v0.1.38 (C274c): every POST /tb/v1/events attempt: items, and whether the instance assertion verified (htm, htu, bd) */
+  eventPosts: { items: Record<string, unknown>[]; assertOk: boolean }[] = [];
+  /** answer of POST /tb/v1/events (default: 200, stored for each item; an emit key seen before → duplicate) */
+  onEvents: ((items: Record<string, unknown>[]) => { status: number; body: unknown } | null) | null = null;
+  /** emit items stored once each (dedupe by key, as the bridge does per app instance) */
+  storedEvents: Record<string, unknown>[] = [];
   #slice: string | null = null;
   #rev = 0;
   #waiting: ServerResponse[] = [];
@@ -247,8 +253,32 @@ export class FakeBridge {
   async #handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const chunks: Buffer[] = [];
     for await (const c of req) chunks.push(c as Buffer);
-    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : null;
+    const raw = Buffer.concat(chunks);
+    const body = chunks.length ? JSON.parse(raw.toString("utf8")) : null;
     const url = new URL(req.url ?? "/", "http://x");
+    if (url.pathname === "/tb/v1/events" && req.method === "POST") {
+      const token = String(req.headers["tb-assert"] ?? "");
+      const keys = this.instanceKey ? keySetFrom({ keys: [this.instanceKey] }, `tb:ins:${this.w.ins}`) : null;
+      const v = keys ? verifyAssertion(token, keys, { typ: TYP.instanceAssertion, aud: `tb:brg:${this.w.brg}`, now: nowS(), method: "POST", pathAndQuery: url.pathname + url.search, body: new Uint8Array(raw) }) : { ok: false };
+      const items = Array.isArray(body?.items) ? (body.items as Record<string, unknown>[]) : [];
+      this.eventPosts.push({ items, assertOk: v.ok });
+      if (!v.ok) {
+        res.writeHead(401, { "content-type": "application/json" });
+        return void res.end(JSON.stringify({ error: { code: "unauthenticated", message: "assertion", requestId: "req_test" } }));
+      }
+      const a = this.onEvents?.(items) ?? null;
+      if (a) {
+        res.writeHead(a.status, { "content-type": "application/json" });
+        return void res.end(JSON.stringify(a.body));
+      }
+      const results = items.map((it) => {
+        if (it.kind === "emit" && this.storedEvents.some((x) => x.key === it.key)) return { key: it.key, status: "duplicate" };
+        this.storedEvents.push(it);
+        return { key: it.key, status: "stored", recipients: 0 };
+      });
+      res.writeHead(200, { "content-type": "application/json" });
+      return void res.end(JSON.stringify({ results }));
+    }
     if (url.pathname === "/tb/v1/claim") {
       const code = String(body?.code ?? "");
       if (this.oneTimeCodes && this.claimCodes.includes(code)) {

@@ -47,9 +47,10 @@ import {
   withStandardOps,
 } from "@opt2-tealbrick/manifest";
 import type { ClaimRecord, EnrolResponse, HookEntry, WorkspaceConfig } from "@opt2-tealbrick/spec/bridge";
-import { BRIDGE_OP_PATH, type BridgeOp, type Ed25519PublicJwk, type HoldVerdictClaim, type PortalKeyEntry } from "@opt2-tealbrick/spec/credentials";
+import { type AgentId, BRIDGE_OP_PATH, type BridgeOp, type Ed25519PublicJwk, type HoldVerdictClaim, type PortalKeyEntry } from "@opt2-tealbrick/spec/credentials";
 import type { DynamicCatalogEntry, Manifest, Operation } from "@opt2-tealbrick/spec/manifest";
 import type { Json, OperationView } from "@opt2-tealbrick/spec/sdk";
+import { EventLog, type EventLogFaults } from "../../src/event-log.ts";
 
 export interface MiniFlags {
   /** pre-C98: a required op without a _meta key is refused input_invalid, a supported one is forwarded keyless (no derived key) */
@@ -108,6 +109,13 @@ export interface MiniFlags {
   ownerRows?: boolean;
   /** spec 0.1.54: the caps the acks declare INSTEAD of the ones `ownerRows` implies (e.g. ["future_cap"], or ["owner_rows"] without implementing it) */
   declaredCaps?: string[];
+  /**
+   * spec 0.1.57 (C274c, conformance 0.1.28): implements BRIDGE §14 (ingest POST /tb/v1/events, the per-agent log, tealbrick/events/*
+   * on /mcp and the GET /mcp frames) with the reference EventLog and DECLARES the `events` cap in every ack (with owner_rows)
+   */
+  events?: boolean;
+  /** conformance 0.1.28: one §14 rule broken (B-EV sensitivity) */
+  eventFaults?: EventLogFaults;
   /** spec 0.1.50 (C283 A1): declares owner_rows but never lists the ops an app's scope_summary names in admittedOps (fails B5.gate_scoped_above_grant) */
   ignoresAdmittedOps?: boolean;
   /** pre-C283 gate: refuses a scoped op above the grant's crud with crud_exceeds_grant although it lists it (fails B5.gate_scoped_above_grant) */
@@ -244,7 +252,7 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     return fetch(`${portal}${path}`, { method, headers: { "content-type": "application/json", "TB-Assert": assertion }, body: raw, signal: AbortSignal.timeout(5000) });
   };
   /** spec 0.1.54 (C292): StatusReport.bridge.caps of every ack */
-  const declaredCaps: string[] = flags.declaredCaps ?? (flags.ownerRows ? ["owner_rows"] : []);
+  const declaredCaps: string[] = flags.declaredCaps ?? [...(flags.ownerRows || flags.events ? ["owner_rows"] : []), ...(flags.events ? ["events"] : [])];
   const ack = (extra: Record<string, unknown> = {}) =>
     cfg &&
     portalCall("POST", enrol.ackPath, {
@@ -610,6 +618,31 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     return toolError(code);
   };
 
+  // ── spec 0.1.57 (BRIDGE §14): the per-agent event log (reference implementation, conformance src/event-log.ts) ──
+  const peekClaims = (jws: string): Record<string, unknown> => {
+    try {
+      return JSON.parse(Buffer.from(jws.split(".")[1] ?? "", "base64url").toString()) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  };
+  const evLog = new EventLog(
+    {
+      manifest: (ins) => (cfg?.apps.some((a) => a.ins === ins) ? (manifests.get(ins) ?? null) : null),
+      grantees: (ins) => [...new Set((cfg?.grants ?? []).map(peekClaims).filter((g) => g.aud === `tb:ins:${ins}` && String(g.sub).startsWith("tb:agt:")).map((g) => String(g.sub).slice(7) as AgentId))],
+      claims: (agent, ins) => grantsOf(agent).find((g) => g.claims.aud === `tb:ins:${ins}`)?.claims ?? null,
+      agentPaused: (agent) => !!cfg && (cfg.pause.workspace || cfg.pause.agents.includes(agent as never)),
+      instancePaused: (ins) => !!cfg && cfg.pause.instances.includes(ins as never),
+      hookMatches: (ins, opId) => {
+        const m = manifests.get(ins);
+        const op = m ? withStandardOps(m).find((o) => o.id === opId) : undefined;
+        if (!m || !op) return false;
+        return (cfg?.hooks ?? []).some((h) => h.enabled !== false && (h.phase === "before" || h.phase === "after") && (h.match.products.includes("*") || h.match.products.includes(m.id)) && (!h.match.operations || h.match.operations.includes(op.id)) && (!h.match.effects || h.match.effects.includes(op.effect)));
+      },
+    },
+    flags.eventFaults ?? {},
+  );
+
   const authAgent = (req: IncomingMessage): string | null => {
     const bearer = /^Bearer (\S+)$/.exec(req.headers.authorization ?? "")?.[1] ?? "";
     const c = cfg;
@@ -677,6 +710,14 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     if (path === "/mcp") {
       const agt = authAgent(req);
       if (!agt) return send(res, 401, { error: { code: "unauthenticated", message: "agent session required", requestId: "req_mini" } }, { "www-authenticate": `Bearer resource_metadata="${pub}/.well-known/oauth-protected-resource"` });
+      if (req.method === "GET" && flags.events) {
+        // BRIDGE §14.3: the session's SSE stream carries notifications/tealbrick/event frames (SSE id = event.id)
+        res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
+        const frame = (e: { id: string }) => res.write(`id: ${e.id}\ndata: ${JSON.stringify({ jsonrpc: "2.0", method: "notifications/tealbrick/event", params: { event: e } })}\n\n`);
+        const off = evLog.subscribe(agt as AgentId, frame);
+        req.once("close", off);
+        return;
+      }
       if (req.method !== "POST") return send(res, 405, {});
       const msg = JSON.parse(raw.toString() || "{}") as { id?: unknown; method?: string; params?: Record<string, unknown> };
       if (msg.id === undefined) return void res.writeHead(202).end();
@@ -687,6 +728,11 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
         return send(res, 200, { jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: true } }, serverInfo: { name: "mini", version: "0.0.0" }, instructions: paused ? "paused by the owner" : "" } }, { "mcp-session-id": randomUUID() });
       }
       if (msg.method === "tools/list" || msg.method === "tools/call") await ensureManifests();
+      if (flags.events && typeof msg.method === "string" && msg.method.startsWith("tealbrick/events/")) {
+        await ensureManifests();
+        const r = evLog.rpc(agt as AgentId, c.apps.map((a) => a.ins), msg.method, msg.params);
+        if (r) return send(res, 200, { jsonrpc: "2.0", id: msg.id, ...r });
+      }
       if (msg.method === "tools/list") result = { tools: tools(agt).map((t) => ({ name: t.name, inputSchema: t.inputSchema })) };
       if (msg.method === "tools/call") {
         const meta = msg.params?._meta as Record<string, unknown> | undefined;
@@ -789,6 +835,17 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
       const fwd = await pipeline({ caller, grant, grantJti: g.claims.jti, ins: target.ins, m, op, input: (env.input ?? null) as Json, context: {}, ...(env.idempotencyKey ? { idem: env.idempotencyKey } : {}), hooks: !flags.appCallsSkipHooks, depth });
       if ("error" in fwd) return err(fwd.error === "hook_denied" ? 403 : 502, fwd.error);
       return send(res, fwd.status, fwd.body);
+    }
+    // spec 0.1.57 (BRIDGE §14.1): app event ingest, instance assertion of a deployed app
+    if (path === "/tb/v1/events" && req.method === "POST" && flags.events) {
+      const ins = instanceOf(req, raw);
+      if (!ins) return send(res, 401, { error: { code: "unauthenticated", message: "instance assertion refused", requestId: "req_mini" } });
+      const app = cfg?.apps.find((a) => a.ins === ins);
+      if (!app) return send(res, 503, { error: { code: "app_not_claimed", message: "app_not_claimed", requestId: "req_mini" } });
+      await ensureManifests();
+      const items = (JSON.parse(raw.toString() || "{}") as { items?: unknown }).items;
+      if (!Array.isArray(items) || items.length < 1 || items.length > 100) return send(res, 400, { error: { code: "input_invalid", message: "items 1..100", requestId: "req_mini" } });
+      return send(res, 200, evLog.ingest(ins as never, app.product, items));
     }
     // key fetch is not implemented by this minimal bridge: every caller is unauthenticated
     if (path.startsWith("/tb/v1/keys/")) return send(res, 401, { error: { code: "unauthenticated", message: "instance assertion required", requestId: "req_mini" } });

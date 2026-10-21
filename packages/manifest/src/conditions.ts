@@ -59,7 +59,16 @@ export function conditionHolds(when: Condition | undefined, settings: SettingVal
   return true;
 }
 
-/** Key requirements in force for these settings, optionally only those a consumer (`"app"` or a service id) uses. */
+/**
+ * Key requirements in force for these settings, optionally only those a consumer (`"app"` or a service id) uses.
+ * v0.1.30 (SPEC GAP, admin queue b, Knowledge lead): a key is in force when its own `when` holds AND, when it names a `step`,
+ * that step's `when` holds too (MANIFEST §7: a step whose `when` is false is skipped, so the keys it shows do not apply).
+ * Stored setting values (defaults included) are unchanged; only which keys count. One function for Core missingKeys, the
+ * GUI and the bridge (L1). A key that must stay in force while its step is skipped belongs in no step (or in another step).
+ */
 export function activeKeyRequirements(manifest: Manifest, settings: SettingValues, usedBy?: string): KeyRequirement[] {
-  return (manifest.settings?.keys ?? []).filter((k) => (usedBy === undefined || k.usedBy.includes(usedBy)) && conditionHolds(k.when, settings));
+  const stepWhen = new Map((manifest.settings?.steps ?? []).map((s) => [s.id, s.when]));
+  return (manifest.settings?.keys ?? []).filter(
+    (k) => (usedBy === undefined || k.usedBy.includes(usedBy)) && conditionHolds(k.when, settings) && (k.step === undefined || conditionHolds(stepWhen.get(k.step), settings)),
+  );
 }

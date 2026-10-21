@@ -14,6 +14,7 @@ import { type BridgeStart, type BridgeStartResult, BridgeWorld } from "./bridge-
 import { authChecks, B13_VARIANTS, callChecks, claimChecks, companionChecks, dynamicChecks, enrolChecks, enrolRequests, hookChecks, mcpChecks, peerCatalog, surfaceChecks } from "./checks/bridge.ts";
 import { c117Checks } from "./checks/bridge-c117.ts";
 import { BridgeCtx, type BridgeHarness } from "./checks/bridge-ctx.ts";
+import { eventChecks } from "./checks/bridge-events.ts";
 import { addressChecks, configChecks, keyChecks, keySetChecks, keysOriginChecks, listChangedChecks, oauthChecks, pauseChecks, portalDownChecks, reenrolChecks, scanChecks, standaloneChecks } from "./checks/bridge-flows.ts";
 import { BRIDGE_CRED_CASES, BRIDGE_GROUP_ORDER, BRIDGE_GROUPS } from "./checks/bridge-ids.ts";
 import { realAppChecks } from "./checks/bridge-real.ts";
@@ -147,6 +148,7 @@ const RUNNERS: [string[], Group][] = [
   [["spine013"], spine013Checks],
   [["c117"], c117Checks],
   [["real_app"], realAppChecks],
+  [["events"], eventChecks],
   [["claim"], claimChecks],
   [["keys"], keyChecks],
   [["keys_origin"], keysOriginChecks],

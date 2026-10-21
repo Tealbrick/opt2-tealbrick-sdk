@@ -11,6 +11,7 @@ import type {
   Operation,
   SettingField,
 } from "@opt2-tealbrick/spec/manifest";
+import { RESERVED_EVENT_PREFIX } from "@opt2-tealbrick/spec/manifest";
 import manifestSchema from "@opt2-tealbrick/spec/schemas/manifest.schema.json" with { type: "json" };
 import type { Json, OperationView } from "@opt2-tealbrick/spec/sdk";
 import type { ErrorObject, ValidateFunction } from "ajv/dist/2020.js";
@@ -468,7 +469,7 @@ function operationRules(m: Manifest, add: Add): void {
 const NAME_MAP_KEYWORDS = new Set(["properties", "patternProperties", "$defs", "definitions", "dependentSchemas"]);
 
 /** M-OP-8 for one embedded schema: no remote `$ref`, no `$id`, no contentEncoding/contentMediaType; must compile. */
-function ioSchemaRules(schema: JsonSchemaObject, path: string, add: Add): void {
+function ioSchemaRules(schema: JsonSchemaObject, path: string, add: Add, rule = "M-OP-8", code = "io_schema_invalid", compile: (s: JsonSchemaObject) => unknown = compileIo): void {
   let bad = false;
   const walk = (node: unknown, p: string, namesOnly: boolean): void => {
     if (Array.isArray(node)) {
@@ -484,10 +485,10 @@ function ioSchemaRules(schema: JsonSchemaObject, path: string, add: Add): void {
       }
       if (k === "$id" || k === "contentEncoding" || k === "contentMediaType") {
         bad = true;
-        add("M-OP-8", "io_schema_invalid", kp, `${k} is not allowed in operation schemas`);
+        add(rule, code, kp, `${k} is not allowed in ${rule === "M-OP-8" ? "operation" : "event payload"} schemas`);
       } else if ((k === "$ref" || k === "$dynamicRef") && (typeof v !== "string" || !v.startsWith("#"))) {
         bad = true;
-        add("M-OP-8", "io_schema_invalid", kp, "only local $ref is allowed");
+        add(rule, code, kp, "only local $ref is allowed");
       } else if (k === "enum" || k === "const" || k === "examples" || k === "default") {
         // values, not subschemas
       } else {
@@ -498,10 +499,67 @@ function ioSchemaRules(schema: JsonSchemaObject, path: string, add: Add): void {
   walk(schema, path, false);
   if (bad) return;
   try {
-    compileIo(schema);
+    compile(schema);
   } catch (e) {
-    add("M-OP-8", "io_schema_invalid", path, `not a valid JSON Schema 2020-12: ${(e as Error).message}`);
+    add(rule, code, path, `not a valid JSON Schema 2020-12: ${(e as Error).message}`);
   }
+}
+
+// ───────────────────────────── M-EV (v0.1.57, MANIFEST §16; manifest 0.1.30) ─────────────────────────────
+
+/** M-EV-2: payload schemas compile in Ajv 2020 STRICT mode (formats are annotations; unknown keywords refused). */
+const eventAjv = new Ajv2020({ strict: true, allErrors: true, validateFormats: false, logger: false });
+function compileStrict(schema: JsonSchemaObject): void {
+  try {
+    eventAjv.compile(schema);
+  } finally {
+    eventAjv.removeSchema(schema);
+  }
+}
+const EVENT_SCHEMA_MAX_BYTES = 8192;
+
+function eventRules(m: Manifest, add: Add): void {
+  const events = m.events ?? [];
+  if (events.length === 0) return;
+  // M-EV-1: a manifest `tb` declares no events (its wire types `tb.<name>` would read as platform types)
+  if (m.id === "tb") add("M-EV-1", "event_name_invalid", "/events", "a manifest with id tb declares no events (the tb. event namespace is the platform's)");
+  uniq(
+    events,
+    (e) => e.name,
+    (e, i) => add("M-EV-1", "event_name_invalid", ptr("events", i, "name"), `event name ${e.name} not unique`),
+  );
+  const ops = new Map(m.operations.map((o) => [o.id, o]));
+  events.forEach((e, i) => {
+    const p = ptr("events", i);
+    // the schema pattern already refuses these; kept so a hand-built manifest object that skipped the schema is still refused
+    if (e.name.startsWith(RESERVED_EVENT_PREFIX)) add("M-EV-1", "event_name_invalid", `${p}/name`, `event names starting with ${RESERVED_EVENT_PREFIX} are the platform's`);
+    const ps = e.payloadSchema;
+    if (ps.type !== "object") add("M-EV-2", "event_schema_invalid", `${p}/payloadSchema/type`, "payloadSchema must have an object root");
+    let bytes = 0;
+    try {
+      bytes = Buffer.byteLength(canonicalize(ps as unknown as Json));
+    } catch {
+      bytes = Number.POSITIVE_INFINITY;
+    }
+    if (bytes > EVENT_SCHEMA_MAX_BYTES) add("M-EV-2", "event_schema_invalid", `${p}/payloadSchema`, `payloadSchema is ${bytes} JCS bytes (max ${EVENT_SCHEMA_MAX_BYTES})`);
+    else ioSchemaRules(ps, `${p}/payloadSchema`, add, "M-EV-2", "event_schema_invalid", compileStrict);
+    // M-EV-4: the summary travels in the envelope (ctx.emit), never in the payload
+    const props = (ps as { properties?: unknown }).properties;
+    if (props && typeof props === "object" && Object.hasOwn(props, "summary"))
+      add("M-EV-4", "event_schema_invalid", `${p}/payloadSchema/properties/summary`, "payloadSchema declares no top-level summary (the summary travels in the envelope)");
+    // M-EV-3: an agent op of this manifest, not dynamic
+    const op = ops.get(e.visibleWith);
+    if (!op) add("M-EV-3", "event_visible_with_invalid", `${p}/visibleWith`, `visibleWith ${e.visibleWith} is not an operation of this manifest`);
+    else if (op.audience !== "agent" || op.dynamic) add("M-EV-3", "event_visible_with_invalid", `${p}/visibleWith`, `visibleWith ${e.visibleWith} must be an agent operation that is not dynamic`);
+  });
+}
+
+/** Schema failures inside `events[]` carry the M-EV rule and code (the schema owns the name pattern and the object root). */
+function eventSchemaIssue(issue: ManifestIssue): ManifestIssue {
+  const m = /^\/events\/\d+\/(name|payloadSchema|visibleWith)(\/|$)/.exec(issue.path);
+  if (!m) return issue;
+  const [rule, code] = m[1] === "name" ? ["M-EV-1", "event_name_invalid"] : m[1] === "payloadSchema" ? ["M-EV-2", "event_schema_invalid"] : ["M-EV-3", "event_visible_with_invalid"];
+  return { ...issue, rule: rule as string, code: code as string };
 }
 
 const TEMPLATE_VAR_RE = /\{([^{}]*)\}/g;
@@ -790,7 +848,7 @@ export function manifestDigest(manifest: Manifest): `sha256:${string}` {
 /** Schema + every M-* rule. Returns the manifest (same object) and its digest, or every issue found. */
 export function validateManifest(json: unknown): ManifestValidation {
   const schemaErrors = checkSchema(json);
-  if (schemaErrors.length) return { ok: false, errors: schemaErrors };
+  if (schemaErrors.length) return { ok: false, errors: schemaErrors.map(eventSchemaIssue) };
   const m = json as Manifest;
   let bytes: number;
   try {
@@ -821,6 +879,7 @@ export function validateManifest(json: unknown): ManifestValidation {
   companionRules(m, add);
   skillHintRules(m, idx, add);
   backupArtifactRouteRules(m, add);
+  eventRules(m, add);
   return errors.length ? { ok: false, errors } : { ok: true, manifest: m, digest: manifestDigest(m) };
 }
 

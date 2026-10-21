@@ -321,7 +321,8 @@ describe("bridgeCaps is advisory: nothing in the SDK reads it for authorization"
   const files = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(join(dir, e.name)) : e.name.endsWith(".ts") ? [join(dir, e.name)] : []));
 
   test("the name appears only in the slice accessor (trust.ts), the context builders and their types", T, () => {
-    const allowed = new Set(["server/trust.ts", "server/ops.ts", "server/app.ts", "server/context.ts", "server/runtime.ts"]);
+    // v0.1.38: server/events.ts gates SENDING (never authorization) by the events cap (SDK-API §20, C292)
+    const allowed = new Set(["server/trust.ts", "server/ops.ts", "server/app.ts", "server/context.ts", "server/runtime.ts", "server/events.ts"]);
     const hits = files(src)
       .filter((f) => /bridgeCaps/.test(readFileSync(f, "utf8")))
       .map((f) => relative(src, f));

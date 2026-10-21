@@ -68,7 +68,15 @@ export interface ScopeStoreInternals extends ScopeStore {
   applyDefaultsFor(caller: string, name: string): void;
   /** v0.1.31: the highest access level the manifest gives AGENTS by default for `type` (see ScopeGrantOps); null = none. */
   agentCeiling(type: string): string | null;
+  /** v0.1.38 (C274c, SDK-API §20): every row on one instance (any caller), with its EFFECTIVE crud and authority (event `eligible`). */
+  rowsOn(type: string, instanceId: string): ScopeGrantRow[];
 }
+
+/**
+ * v0.1.38 (C274c/C274d, SDK-API §20): called INSIDE the transaction of a row change when a row of `agent` on (`type`, `instanceId`)
+ * was removed, its effective crud narrowed, or its authority went from owner to bounded (the outbox writes a purge row).
+ */
+export type RowNarrowed = (agent: string, type: string, instanceId: string) => void;
 
 /**
  * v0.1.31 (SDK-INSTANCE-GRANT): the write paths behind `ctx.scopeGrants` / `ctx.scopeSelfRevoke`. Deliberately NOT members
@@ -110,7 +118,7 @@ export interface GrantBy {
   refusal(agent: string): { reason: string; message: string } | null;
 }
 
-export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog, onChange: () => void): ScopeStoreInternals {
+export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog, onChange: () => void, onNarrowed: RowNarrowed = () => {}): ScopeStoreInternals {
   const scopes = new Map<string, Scope>((manifest.scopes ?? []).map((s) => [s.type, s]));
   const scopeOf = (type: string): Scope => {
     const s = scopes.get(type);
@@ -189,6 +197,16 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
   const accessOf = (caller: string, type: string, id: string): ScopeGrantRow | null => {
     const r = db.prepare("SELECT * FROM tb_scopes WHERE agent = ? AND type = ? AND instance_id = ?").get(caller, type, id) as Row | undefined;
     return r ? toRow(r) : null;
+  };
+  /**
+   * v0.1.38 (C274c/C274d): compares a row before and after a change (call INSIDE its transaction). Removed, effective crud
+   * narrowed (an action it gave is gone) or owner → bounded → `onNarrowed` (a purge row of the event outbox).
+   */
+  const noteChange = (before: ScopeGrantRow | null, agent: string, type: string, instanceId: string): void => {
+    if (!before) return;
+    const after = accessOf(agent, type, instanceId);
+    const lost = after === null || !(before.crud ?? []).every((c) => (after.crud ?? []).includes(c)) || (before.authority === "owner" && after.authority !== "owner");
+    if (lost) onNarrowed(agent, type, instanceId);
   };
 
   /**
@@ -274,8 +292,10 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
       throw new TbError("scope_instance_unknown", "scope instance does not exist", 404);
     let acceptedAdds: CrudAction[] = [];
     tx(db, () => {
+      const before = accessOf(agent, type, instanceId);
       if (access === null) {
         db.prepare("DELETE FROM tb_scopes WHERE agent = ? AND type = ? AND instance_id = ?").run(agent, type, instanceId);
+        noteChange(before, agent, type, instanceId);
         return;
       }
       const cur = db.prepare("SELECT * FROM tb_scopes WHERE agent = ? AND type = ? AND instance_id = ?").get(agent, type, instanceId) as Row | undefined;
@@ -294,11 +314,22 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
         `INSERT INTO tb_scopes (agent, type, instance_id, access, source, granted_by_op, authority, crud_snapshot) VALUES (?, ?, ?, ?, 'owner', NULL, ?, ?)
          ON CONFLICT (agent, type, instance_id) DO UPDATE SET access = excluded.access, source = 'owner', granted_by_op = NULL, authority = excluded.authority, crud_snapshot = excluded.crud_snapshot`,
       ).run(agent, type, instanceId, access, authority === "owner" ? "owner" : "bounded", snapshot);
+      noteChange(before, agent, type, instanceId);
     });
     await audit.record({ actor: principal.id, action: "scope.set", target: agent, detail: { type, instance: instanceId, access, ...(access !== null ? { authority } : {}) } });
     if (acceptedAdds.length > 0) await audit.record({ actor: principal.id, action: "scope.offer_accepted", target: agent, detail: { type, instance: instanceId, access, adds: acceptedAdds } });
     bump();
   };
+
+  /** Deletes one row and notes the removal (purge row) in the same transaction; false when there was none. */
+  const removeRow = (agent: string, type: string, instanceId: string): boolean =>
+    tx(db, () => {
+      const before = accessOf(agent, type, instanceId);
+      const r = db.prepare("DELETE FROM tb_scopes WHERE agent = ? AND type = ? AND instance_id = ?").run(agent, type, instanceId);
+      if (Number(r.changes ?? 0) === 0) return false;
+      noteChange(before, agent, type, instanceId);
+      return true;
+    });
 
   const store: ScopeStoreInternals = {
     instances: {
@@ -346,6 +377,9 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
     },
     crudOf,
     agentCeiling,
+    rowsOn(type, instanceId) {
+      return (db.prepare("SELECT * FROM tb_scopes WHERE type = ? AND instance_id = ? ORDER BY agent").all(type, instanceId) as Row[]).map(toRow);
+    },
     rev: () => metaGet<number>(db, "scopes_rev") ?? 0,
     resolve(caller, type, instanceId) {
       if (instanceId !== null) {
@@ -406,11 +440,15 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
         throw bad("above_ceiling", `access level ${access} is above the agent ceiling ${ceiling}`);
       const refused = by.refusal(agent);
       if (refused) throw bad(refused.reason, refused.message);
-      db.prepare(
-        // v0.1.35 (C283 A1): authority 'bounded' also when this overwrites an owner row (an app never makes a row primary)
-        `INSERT INTO tb_scopes (agent, type, instance_id, access, source, granted_by_op, authority) VALUES (?, ?, ?, ?, 'app', ?, 'bounded')
-         ON CONFLICT (agent, type, instance_id) DO UPDATE SET access = excluded.access, source = 'app', granted_by_op = excluded.granted_by_op, authority = 'bounded', crud_snapshot = NULL`,
-      ).run(agent, type, instanceId, access, by.op);
+      tx(db, () => {
+        const before = accessOf(agent, type, instanceId);
+        db.prepare(
+          // v0.1.35 (C283 A1): authority 'bounded' also when this overwrites an owner row (an app never makes a row primary)
+          `INSERT INTO tb_scopes (agent, type, instance_id, access, source, granted_by_op, authority) VALUES (?, ?, ?, ?, 'app', ?, 'bounded')
+           ON CONFLICT (agent, type, instance_id) DO UPDATE SET access = excluded.access, source = 'app', granted_by_op = excluded.granted_by_op, authority = 'bounded', crud_snapshot = NULL`,
+        ).run(agent, type, instanceId, access, by.op);
+        noteChange(before, agent, type, instanceId);
+      });
       await audit.record({
         actor: by.principal.id,
         action: "scope.set",
@@ -423,8 +461,8 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
     async appRevoke(by, agent, type, instanceId) {
       if (by?.principal?.type !== "person") throw new TbError("session_required", "only a person op can revoke scope access", 403);
       if (!scopes.has(type)) throw new TbError("scope_grant_invalid", `scope type not declared: ${type}`, 400, { reason: "type_unknown" });
-      const r = db.prepare("DELETE FROM tb_scopes WHERE agent = ? AND type = ? AND instance_id = ?").run(agent, type, instanceId);
-      if (Number(r.changes ?? 0) === 0) return;
+      const removed = removeRow(agent, type, instanceId);
+      if (!removed) return;
       await audit.record({
         actor: by.principal.id,
         action: "scope.set",
@@ -435,8 +473,8 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
     },
     async selfRevoke(agent, op, callId, type, instanceId) {
       if (!scopes.has(type)) throw new TbError("scope_grant_invalid", `scope type not declared: ${type}`, 400, { reason: "type_unknown" });
-      const r = db.prepare("DELETE FROM tb_scopes WHERE agent = ? AND type = ? AND instance_id = ?").run(agent, type, instanceId);
-      if (Number(r.changes ?? 0) === 0) return;
+      const removed = removeRow(agent, type, instanceId);
+      if (!removed) return;
       await audit.record({
         // the agent narrowed its own access: it is the actor (AuditEntry.actor is typed for people, but the column is text)
         actor: agent as never,

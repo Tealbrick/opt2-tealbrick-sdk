@@ -218,6 +218,7 @@ export async function runApp(opts: RunAppOptions): Promise<Report> {
       ...(config.hookCallerProduct ? { hookCallerProduct: config.hookCallerProduct } : {}),
       ...(config.callerListedOp ? { callerListedOp: config.callerListedOp } : {}),
       ...(config.bridgeCapsOp ? { bridgeCapsOp: config.bridgeCapsOp } : {}),
+      ...(config.eventsProbe ? { eventsProbe: config.eventsProbe } : {}),
       ...(prepared.length > 0
         ? { multi: (driver) => runPeerChecks({ suite: s, deps, app: { manifest: manifest as Manifest, bridge, driver, timeoutMs }, prepared, config, testRoots, notes }) }
         : {}),

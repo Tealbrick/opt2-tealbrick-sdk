@@ -17,6 +17,7 @@ import { logMountAtBoot } from "./claim-guard.ts";
 import type { SdkAppDefinition, SdkEventContext, StartContext } from "./context.ts";
 import { readEnv, type SdkConfig } from "./env.ts";
 import { TbError } from "./errors.ts";
+import { EventOutbox } from "./events.ts";
 import { startFailedMode } from "./failed.ts";
 import { JOB_KIND_RE, JobRunner, type JobsApi, jobsView, RUNNER_DEFAULTS, sealGrant } from "./jobs.ts";
 import { createKeys } from "./keys.ts";
@@ -31,7 +32,7 @@ import { createScopeStore } from "./scopes.ts";
 import { createSealer, loadInstanceKey, resolveKeks, type Sealer } from "./secrets.ts";
 import { createHttpServer } from "./server.ts";
 import { createServiceHelperCaller } from "./service-helper.ts";
-import { AttentionReader, PendingCounter, StatusPusher } from "./status.ts";
+import { AttentionReader, PendingCounter, pickAttention, StatusPusher } from "./status.ts";
 import {
   type AppliedMigration,
   appDb,
@@ -427,7 +428,10 @@ export async function startApp(
   const counter = new PendingCounter(def.pendingCount, appDb(db), log);
   // v0.1.20 (spec 0.1.28, F89): app-reported attention rides the status push (readiness degraded while present)
   const attentionReader = new AttentionReader(def.attention, appDb(db), log);
-  const scopes = createScopeStore(db, manifest, audit, kick);
+  // v0.1.38 (C274c/C274d, SDK-API §20): THE event outbox; scope-row narrowing and hold decisions write into it in their own transaction
+  const events = new EventOutbox(db, manifest, log);
+  receipts.onHoldDecided((hold, decision) => events.holdDecided(hold, decision));
+  const scopes = createScopeStore(db, manifest, audit, kick, (agent, type, instanceId) => events.rowNarrowed(agent, type, instanceId));
   const appHandle = appDb(db);
   const appSecrets = createAppSecrets(db, sealer, secrets);
   closeOnFail(() => appSecrets.reseal());
@@ -468,6 +472,9 @@ export async function startApp(
     companionTargets,
     appsPolicy,
     bridgeCaps,
+    // v0.1.38 (C274c): event, start and job-handler contexts emit too; no call, so no `causedBy`
+    emit: events.emitFn(),
+    purgeEvents: events.purgeFn(),
     agentScopeRequest,
     ownerLinkFor,
     ...jobsView(rt, jobRunner(), null),
@@ -538,6 +545,7 @@ export async function startApp(
     secretsStore: appSecrets,
     backups: backup.api,
     bridge,
+    events,
     get jobs() {
       return jobRunner();
     },
@@ -592,7 +600,8 @@ export async function startApp(
     },
     // v0.1.21: failed / stuck jobs raise attention when the app reports none (L3); v0.1.22 (SDK-03): a failed, overdue
     // or unparsable scheduled backup comes before them
-    attention: async () => (await attentionReader.read()) ?? backup.attention() ?? jobRunner().attention(),
+    // v0.1.38 (admin queue c/5b): by severity, not first-non-null: a failed or overdue backup is never hidden by an app attention
+    attention: async () => pickAttention({ backup: backup.attention(), app: await attentionReader.read(), jobs: jobRunner().attention() }),
     backupHealth: () => backup.health(),
     ownerLink,
     ownerLinkFor,
@@ -676,6 +685,9 @@ export async function startApp(
   // Fleet: the stored slice is the first slice after boot (a bridge answers a long-poll with 204 while it is current)
   if (trust.slice) void rt.notifyAgents();
   link?.start();
+  // v0.1.38 (C274c): the outbox sender; it sends only while the slice says the bridge has the `events` cap (app-alone mode never sends,
+  // its loop only prunes rows older than 7 days)
+  events.start({ bridge: () => (link && state.claimed ? bridge : null), bridgeCaps, rowsOn: (type, instanceId) => scopes.rowsOn(type, instanceId) });
   runner.start();
   const sweep = setInterval(() => {
     try {
@@ -719,6 +731,7 @@ export async function startApp(
       pusher.stop();
       backup.stop();
       await link?.stop();
+      await events.stop();
       await new Promise<void>((resolve) => {
         server.close(() => resolve());
         server.closeIdleConnections();

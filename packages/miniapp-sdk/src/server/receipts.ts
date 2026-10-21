@@ -114,10 +114,19 @@ function toIdemRow(r: Row): IdempotencyRow {
   return { kind: "result", inputDigest, output: String(r.output) };
 }
 
+/** v0.1.38 (C274c, SDK-API §20): a held call was decided (approved, denied by the owner, or expired); runs INSIDE that transaction. */
+export type HoldDecidedHook = (hold: { id: string; op: string; caller: { type: string; id: string } }, decision: "approved" | "denied" | "expired") => void;
+
 export class Receipts implements ReceiptStore {
   readonly #db: RawDb;
+  #onDecided: HoldDecidedHook | null = null;
   constructor(db: RawDb) {
     this.#db = db;
+  }
+
+  /** v0.1.38: the outbox's `tb.hold.decided` writer (one hook, set once by startApp). */
+  onHoldDecided(hook: HoldDecidedHook): void {
+    this.#onDecided = hook;
   }
 
   async get(id: Receipt["id"]): Promise<Receipt | null> {
@@ -315,13 +324,22 @@ export class Receipts implements ReceiptStore {
       .run(status, patch.summary ?? null, patch.meta === undefined ? null : JSON.stringify(patch.meta), patch.consumed ? 1 : 0, keepView ? 1 : 0, patch.admittedBy ?? null, id);
   }
 
+  /** v0.1.38: the decision and its `tb.hold.decided` outbox row in ONE transaction (only when the row was still held). */
   decide(id: string, status: "approved" | "denied", by: Receipt["decidedBy"], now: number): void {
-    this.#db
-      .prepare(
-        `UPDATE tb_receipts SET status = ?, decided_at = ?, decided_by = ?, expires_at = ?,
-          view = CASE WHEN ? = 'approved' THEN view ELSE NULL END WHERE id = ? AND status = 'held'`,
-      )
-      .run(status, now, by, status === "approved" ? now + APPROVAL_WINDOW_MS : null, status, id);
+    tx(this.#db, () => {
+      const changed = Number(
+        this.#db
+          .prepare(
+            `UPDATE tb_receipts SET status = ?, decided_at = ?, decided_by = ?, expires_at = ?,
+              view = CASE WHEN ? = 'approved' THEN view ELSE NULL END WHERE id = ? AND status = 'held'`,
+          )
+          .run(status, now, by, status === "approved" ? now + APPROVAL_WINDOW_MS : null, status, id).changes ?? 0,
+      );
+      if (changed === 1 && this.#onDecided) {
+        const r = this.#db.prepare("SELECT id, op, caller_type, caller_id FROM tb_receipts WHERE id = ?").get(id) as Row;
+        this.#onDecided({ id: String(r.id), op: String(r.op), caller: { type: String(r.caller_type), id: String(r.caller_id) } }, status);
+      }
+    });
   }
 
   /** The approved, unconsumed hold for this exact call (§4.3), if still inside its retry window. */
@@ -351,11 +369,17 @@ export class Receipts implements ReceiptStore {
   /** Expires pending holds (→ denied by "expiry"), drops views of lapsed approvals, purges old rows and keys. `expired`
    *  > 0 → the caller pushes the status (v0.1.13: statusChanged on hold expiry). */
   sweep(now: number): { expired: number } {
-    const expired = Number(
-      this.#db
-        .prepare("UPDATE tb_receipts SET status = 'denied', decided_by = 'expiry', decided_at = ?, view = NULL WHERE status = 'held' AND expires_at <= ?")
-        .run(now, now).changes,
-    );
+    // v0.1.38 (C274c): each expired hold and its `tb.hold.decided` (decision "expired") outbox row in ONE transaction
+    const expired = tx(this.#db, () => {
+      const rows = this.#onDecided ? (this.#db.prepare("SELECT id, op, caller_type, caller_id FROM tb_receipts WHERE status = 'held' AND expires_at <= ? ORDER BY created_at, id").all(now) as Row[]) : [];
+      const n = Number(
+        this.#db
+          .prepare("UPDATE tb_receipts SET status = 'denied', decided_by = 'expiry', decided_at = ?, view = NULL WHERE status = 'held' AND expires_at <= ?")
+          .run(now, now).changes,
+      );
+      for (const r of rows) this.#onDecided?.({ id: String(r.id), op: String(r.op), caller: { type: String(r.caller_type), id: String(r.caller_id) } }, "expired");
+      return n;
+    });
     this.#db.prepare("UPDATE tb_receipts SET view = NULL WHERE status = 'approved' AND view IS NOT NULL AND expires_at <= ?").run(now);
     this.#db.prepare("DELETE FROM tb_receipts WHERE created_at < ?").run(now - RECEIPT_RETENTION_MS);
     this.#db.prepare("DELETE FROM tb_idempotency WHERE expires_at <= ?").run(now);
