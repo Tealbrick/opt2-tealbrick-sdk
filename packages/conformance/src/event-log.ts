@@ -95,6 +95,7 @@ export class EventLog {
   readonly faults: EventLogFaults;
   readonly #rows = new Map<AgentId, Row[]>();
   readonly #keys = new Map<string, number>();
+  #keysPruned = 0;
   readonly #dropped = new Map<AgentId, string>();
   readonly #truncFlag = new Set<AgentId>();
   readonly #subs = new Map<AgentId, Set<(e: AgentEvent) => void>>();
@@ -123,6 +124,9 @@ export class EventLog {
     if (!isObj(it)) return refuse("event_payload_invalid");
     if (it.kind === "purge") {
       if (typeof it.instanceId !== "string" || !EVENT_KEY_RE.test(key)) return refuse("event_payload_invalid");
+      // specs#33: purge keys are deduped exactly like emit keys, so a retried batch never applies a purge twice (a second
+      // application would delete events stored after it)
+      if (this.#seen(ins, key)) return { key, status: "duplicate" };
       if (!this.faults.noPurge) this.purge(ins, it.instanceId, typeof it.agent === "string" ? (it.agent as AgentId) : null);
       return { key, status: "stored" };
     }
@@ -155,10 +159,7 @@ export class EventLog {
     if (decl.audience === "target" ? !Array.isArray(to) || to.length < 1 || to.length > EVENT_TO_MAX || !to.every((a) => typeof a === "string") : to !== undefined) return refuse("event_target_invalid");
     // 5. dedupe per (app instance, key), 7 days
     const now = this.now();
-    for (const [k, at] of this.#keys) if (at < now - EVENT_WINDOW_MS) this.#keys.delete(k);
-    const dk = `${ins}|${key}`;
-    if (!this.faults.noDedupe && this.#keys.has(dk)) return { key, status: "duplicate" };
-    this.#keys.set(dk, now);
+    if (this.#seen(ins, key)) return { key, status: "duplicate" };
     // fan-out at write time (MANIFEST §16.2 rules 1–4)
     const eligible = new Map<string, "owner" | "bounded">();
     if (Array.isArray(it.eligible)) for (const e of it.eligible) if (isObj(e) && typeof e.agent === "string") eligible.set(e.agent, e.authority === "owner" ? "owner" : "bounded");
@@ -192,6 +193,19 @@ export class EventLog {
       if (!row.held && !this.#w.agentPaused(agent)) this.#notify(agent);
     }
     return { key, status: "stored", recipients };
+  }
+
+  /** (app instance, key) seen in the last 7 days (emit and purge keys alike); records it otherwise */
+  #seen(ins: InstanceId, key: string): boolean {
+    const now = this.now();
+    if (now - this.#keysPruned > 60_000) {
+      this.#keysPruned = now;
+      for (const [k, at] of this.#keys) if (at < now - EVENT_WINDOW_MS) this.#keys.delete(k);
+    }
+    const dk = `${ins}|${key}`;
+    if (!this.faults.noDedupe && this.#keys.has(dk)) return true;
+    this.#keys.set(dk, now);
+    return false;
   }
 
   /** Deletes the stored rows of (agent | every agent, app instance, instanceId), delivered or not. */

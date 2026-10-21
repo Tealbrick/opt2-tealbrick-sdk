@@ -99,13 +99,14 @@ export class PendingCounter {
 }
 
 /**
- * v0.1.38 (admin queue c/5b): ONE attention for `AppStatus.attention`, by severity (the owner sees one line):
+ * v0.1.38 (admin queue c/5b, sdk#41 review): ONE attention for `AppStatus.attention`, by severity (the owner sees one line):
  * 1. the SDK's backup attention (invalid or never-firing schedule, failed, overdue): data protection is broken and nothing else
- *    shows it; 2. the app's own `attention()` (it knows why it is degraded); 3. the SDK's job attention (failed, stuck jobs).
+ *    shows it; 2. `events_send_failing` (10 failed event sends in a row: agents are no longer told about changes);
+ * 3. the app's own `attention()` (it knows why it is degraded); 4. the SDK's job attention (failed, stuck jobs).
  * Before 0.1.38 the app's attention came first and hid a failed or overdue backup.
  */
-export function pickAttention(a: { backup: Attention | null; app: Attention | null; jobs: Attention | null }): Attention | null {
-  return a.backup ?? a.app ?? a.jobs;
+export function pickAttention(a: { backup: Attention | null; events?: Attention | null; app: Attention | null; jobs: Attention | null }): Attention | null {
+  return a.backup ?? a.events ?? a.app ?? a.jobs;
 }
 
 /** v0.1.20 (spec 0.1.28, F89): `AppStatus.attention` limits (BRIDGE §10.3). */

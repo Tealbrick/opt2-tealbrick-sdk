@@ -161,6 +161,7 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
     "B-EV-15": "purge with agent → that agent's stored rows of that instance are gone",
     "B-EV-16": "purge without agent → every agent's rows of that instance are gone",
     "B-EV-17": "\"events\" in every StatusReport of a bridge that passes all of these, never otherwise",
+    "B-EV-18": "a bridge without the events capability answers tealbrick/events/* with JSON-RPC -32601 (method not found)",
   }),
   claim: ids({
     "C1.K6": "claim with a one-time enrolment code",

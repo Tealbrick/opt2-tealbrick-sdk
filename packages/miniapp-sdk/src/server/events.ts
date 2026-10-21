@@ -4,6 +4,7 @@
 // sender drains the outbox in id order to `POST /tb/v1/events`, only while the slice says the bridge has the `events` cap.
 import {
   EVENT_BATCH_MAX,
+  EVENT_ELIGIBLE_MAX,
   EVENT_INSTANCE_ID_MAX,
   EVENT_KEY_RE,
   EVENT_SUBJECT_ID_MAX,
@@ -36,13 +37,21 @@ const BACKOFF_MIN_MS = 1_000;
 const BACKOFF_MAX_MS = 60_000;
 /** Slow fallback timer: the sender is woken on release and on every installed slice; this only catches anything missed. */
 export const SENDER_FALLBACK_MS = 30_000;
+/** SDK-API §20 (specs#33): after this many consecutive failed sends (any cause) the app reports `events_send_failing`. */
+export const SEND_FAILING_AFTER = 10;
+/** while a transaction is open on the connection the sender waits this long and looks again (it drains COMMITTED rows only) */
+const TX_WAIT_MS = 50;
 const AGENT_RE = /^agt_[0-9A-HJKMNP-TV-Z]{26}$/;
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const subset = (a: readonly string[], b: readonly string[]): boolean => a.every((x) => b.includes(x));
 
-/** The outbox body of one row (`body` column): the ingest item without `eligible`, which the sender computes at SEND time. */
-type EmitBody = Omit<EventEmitItem, "eligible">;
+/**
+ * The outbox body of one row (`body` column): the ingest item without `eligible`, which the sender computes at SEND time, plus
+ * `scopeType` = the scope type of the event when it was emitted (null = unscoped; SDK-internal, never sent): a row whose
+ * `visibleWith` scope type changed by an app update before it was sent is dropped (SDK-API §20, specs#33).
+ */
+type EmitBody = Omit<EventEmitItem, "eligible"> & { scopeType?: string | null };
 type PurgeBody = EventPurgeItem;
 
 /** Who emits: `causedBy` = the verified agent caller of the op (absent for persons, apps, events, start, jobs). */
@@ -53,11 +62,13 @@ export interface EmitOrigin {
 /** What the sender needs from the running app (late-bound: the outbox exists before the bridge link). */
 export interface SenderDeps {
   /** the claimed bridge client, or null (no claim yet / app-alone mode) */
-  bridge(): { request(method: "POST", path: string, body: unknown): Promise<BridgeResponse> } | null;
+  bridge(): { request(method: "POST", path: string, body: unknown, headers?: Record<string, string>, signal?: AbortSignal): Promise<BridgeResponse> } | null;
   /** the CURRENT slice's `bridge.caps` (C292): the sender sends only while it includes "events"; never read for authorization */
   bridgeCaps(): readonly string[];
   /** the scope rows on one instance with their EFFECTIVE crud and authority (scopes.ts `rowsOn`) */
   rowsOn(type: string, instanceId: string): ScopeGrantRow[];
+  /** true when the agent is in the CURRENT verified slice (`eligible` lists only those, SDK-API §20) */
+  inSlice(agent: string): boolean;
 }
 
 const bad = (code: string, message: string): TbError => new TbError(code, message, 400);
@@ -69,8 +80,6 @@ export class EventOutbox {
   readonly #db: RawDb;
   readonly #m: Manifest;
   readonly #log: Logger;
-  /** scope types some declared event is scoped on (purge rows are written only for rows of these types) */
-  readonly #scopedTypes: ReadonlySet<string>;
   #deps: SenderDeps | null = null;
   #timer: NodeJS.Timeout | null = null;
   #running = false;
@@ -79,17 +88,23 @@ export class EventOutbox {
   #backoff = 0;
   #retryAt = 0;
   #inflight: Promise<void> | null = null;
+  /** aborts the send in flight on stop() */
+  #abort: AbortController | null = null;
+  /** consecutive failed sends (any cause); reset by a send the bridge answered in full */
+  #failures = 0;
+  /** batch size: halved on a 413 (down to 1), doubled again after each answered send (up to EVENT_BATCH_MAX) */
+  #limit = EVENT_BATCH_MAX;
 
-  constructor(db: RawDb, manifest: Manifest, log: Logger) {
+  readonly #backoffMin: number;
+  readonly #backoffMax: number;
+
+  /** `timing` is for tests only (the retry backoff bounds); production uses 1 s … 60 s. */
+  constructor(db: RawDb, manifest: Manifest, log: Logger, timing: { backoffMinMs?: number; backoffMaxMs?: number } = {}) {
     this.#db = db;
     this.#m = manifest;
     this.#log = log;
-    const types = new Set<string>();
-    for (const e of manifest.events ?? []) {
-      const t = eventScopeType(manifest, e);
-      if (t) types.add(t);
-    }
-    this.#scopedTypes = types;
+    this.#backoffMin = timing.backoffMinMs ?? BACKOFF_MIN_MS;
+    this.#backoffMax = timing.backoffMaxMs ?? BACKOFF_MAX_MS;
   }
 
   /** `ctx.emit` for one context: app names only (a `tb.*` name is refused `event_reserved`). */
@@ -118,10 +133,11 @@ export class EventOutbox {
 
   /**
    * A scope row of `agent` on (`type`, `instanceId`) was removed, its effective crud narrowed or it lost owner authority: a purge
-   * row in the SAME transaction (the caller runs it inside the row change). Only agent rows of a type some event is scoped on.
+   * row in the SAME transaction (the caller runs it inside the row change). Agent rows of EVERY scope type (specs#33: an app update
+   * may have removed the event while older events of it are still stored); app callers receive no events.
    */
-  rowNarrowed(agent: string, type: string, instanceId: string): void {
-    if (!agent.startsWith("agt_") || !this.#scopedTypes.has(type)) return;
+  rowNarrowed(agent: string, _type: string, instanceId: string): void {
+    if (!agent.startsWith("agt_")) return;
     this.#insert("purge", { kind: "purge", key: `purge:${ulid()}`, agent: agent as AgentId, instanceId });
   }
 
@@ -136,8 +152,10 @@ export class EventOutbox {
     if (!payload.ok) throw new TbError(payload.code, payload.code === "event_too_large" ? "event data exceeds 2 KiB (JCS)" : "event data does not match the payloadSchema", 400, { errors: payload.errors });
     if (o.key !== undefined && (typeof o.key !== "string" || !EVENT_KEY_RE.test(o.key))) throw bad("event_payload_invalid", "key must match ^[A-Za-z0-9._:-]{8,128}$");
     if (o.summary !== undefined && typeof o.summary !== "string") throw bad("event_payload_invalid", "summary must be a string");
+    // BRIDGE §14.1 (specs#33): the summary length counts UTF-16 code units, i.e. a JavaScript string length
     if (typeof o.summary === "string" && o.summary.length > EVENT_SUMMARY_MAX) throw bad("event_too_large", `summary exceeds ${EVENT_SUMMARY_MAX} characters`);
-    const scoped = eventScopeType(this.#m, decl) !== null;
+    const scopeType = eventScopeType(this.#m, decl);
+    const scoped = scopeType !== null;
     if (scoped && (typeof o.instanceId !== "string" || o.instanceId.length < 1 || o.instanceId.length > EVENT_INSTANCE_ID_MAX))
       throw bad("event_instance_invalid", `event ${name} is scoped: instanceId (1..256 characters) is required`);
     if (!scoped && o.instanceId !== undefined) throw bad("event_instance_invalid", `event ${name} is not scoped: no instanceId`);
@@ -163,6 +181,7 @@ export class EventOutbox {
       data: data as EmitBody["data"],
       ...(decl.audience === "target" ? { to: [...(o.to as AgentId[])] } : {}),
       ...(origin.causedBy ? { causedBy: origin.causedBy } : {}),
+      scopeType,
     };
     this.#insert("emit", body);
   }
@@ -192,7 +211,18 @@ export class EventOutbox {
     this.#stopped = true;
     if (this.#timer) clearTimeout(this.#timer);
     this.#timer = null;
+    // a send in flight is aborted (its rows stay and go again after the next start, same keys)
+    this.#abort?.abort(new TbError("app_stopping", "the app is stopping", 503));
     await this.#inflight?.catch(() => {});
+  }
+
+  /**
+   * SDK-API §20 (specs#33): `events_send_failing` after SEND_FAILING_AFTER consecutive failed sends (any cause), until a send
+   * succeeds, so the owner sees it long before the 7-day prune. Null otherwise.
+   */
+  attention(): { code: string; reason: string } | null {
+    if (this.#failures < SEND_FAILING_AFTER) return null;
+    return { code: "events_send_failing", reason: `The app could not send its events to the bridge (${this.#failures} tries in a row). Agents are not told about changes until this works again.` };
   }
 
   #arm(ms: number): void {
@@ -227,10 +257,16 @@ export class EventOutbox {
   async #drain(): Promise<void> {
     const deps = this.#deps;
     if (!deps) return;
+    // COMMITTED rows only (specs#33): never read or delete while a transaction is open on this connection (app code may hold
+    // one across an await with raw BEGIN); look again shortly
+    if (this.#inTx()) {
+      this.#arm(TX_WAIT_MS);
+      return;
+    }
     const now = Date.now();
     // the bridge window: an unsent row older than 7 days would be outside its dedupe window anyway
     const pruned = Number(this.#db.prepare("DELETE FROM tb_event_outbox WHERE created_at < ?").run(now - EVENT_WINDOW_MS).changes ?? 0);
-    if (pruned > 0) this.#log.warn("event outbox rows pruned unsent after 7 days", { count: pruned });
+    if (pruned > 0) this.#log.info("event outbox rows pruned unsent after 7 days", { count: pruned });
     if (now < this.#retryAt) {
       this.#arm(this.#retryAt - now);
       return;
@@ -241,35 +277,83 @@ export class EventOutbox {
       if (!deps.bridgeCaps().includes(EVENTS_CAP)) break;
       const bridge = deps.bridge();
       if (!bridge) break;
-      const rows = this.#db.prepare("SELECT id, kind, key, body FROM tb_event_outbox ORDER BY id LIMIT ?").all(EVENT_BATCH_MAX) as Row[];
+      if (this.#inTx()) {
+        this.#arm(TX_WAIT_MS);
+        return;
+      }
+      const rows = this.#db.prepare("SELECT id, kind, key, body FROM tb_event_outbox ORDER BY id LIMIT ?").all(this.#limit) as Row[];
       if (rows.length === 0) break;
       const batch: { id: string; item: EventIngestItem }[] = [];
+      const drop: { id: string; why: string }[] = [];
       let bytes = 16;
       for (const r of rows) {
         const item = this.#item(r, deps);
+        if ("drop" in item) {
+          drop.push({ id: String(r.id), why: item.drop });
+          continue;
+        }
         const size = Buffer.byteLength(JSON.stringify(item)) + 1;
         if (batch.length > 0 && bytes + size > BATCH_MAX_BYTES) break;
         bytes += size;
         batch.push({ id: String(r.id), item });
+        // a batch ENDS after a purge (specs#33): a lost answer + retry never re-sends a purge ahead of a later event
+        if (item.kind === "purge") break;
       }
+      if (drop.length > 0) {
+        const del = this.#db.prepare("DELETE FROM tb_event_outbox WHERE id = ?");
+        for (const d of drop) {
+          this.#log.warn("event dropped before sending", { reason: d.why });
+          del.run(d.id);
+        }
+      }
+      if (batch.length === 0) continue;
+      const ac = new AbortController();
+      this.#abort = ac;
       let res: BridgeResponse;
       try {
-        res = await bridge.request("POST", BRIDGE_INTERNAL_PATHS.events, { items: batch.map((b) => b.item) });
+        res = await bridge.request("POST", BRIDGE_INTERNAL_PATHS.events, { items: batch.map((b) => b.item) }, {}, ac.signal);
       } catch (e) {
+        if (this.#stopped) return;
         this.#fail(`transport: ${e instanceof TbError ? e.code : "error"}`);
         return;
+      } finally {
+        this.#abort = null;
+      }
+      if (res.status === 413) {
+        if (batch.length > 1) {
+          // halve and retry at once, down to one item
+          this.#limit = Math.max(1, Math.floor(batch.length / 2));
+          this.#failures++;
+          continue;
+        }
+        // one item still too large: a permanent refusal, so one oversized row never blocks the outbox
+        await this.#settled();
+        const one = batch[0] as (typeof batch)[number];
+        this.#log.warn("event refused by the bridge", { kind: one.item.kind, name: one.item.kind === "emit" ? one.item.name : null, key: one.item.key, code: "event_too_large" });
+        this.#db.prepare("DELETE FROM tb_event_outbox WHERE id = ?").run(one.id);
+        this.#limit = Math.min(EVENT_BATCH_MAX, this.#limit * 2);
+        this.#failures = 0;
+        continue;
       }
       const results = res.status === 200 && isObj(res.body) && Array.isArray(res.body.results) ? (res.body as unknown as EventIngestResult).results : null;
-      if (!results || results.length !== batch.length) {
-        // 401/413/429/5xx/503 app_not_claimed, or a 200 that does not answer every item: retry the whole batch (same keys)
-        this.#fail(`bridge answered ${res.status}${res.status === 200 ? " without one result per item" : ""}`);
+      const answered =
+        results !== null &&
+        results.length === batch.length &&
+        results.every((r, i) => isObj(r) && r.key === batch[i]?.item.key && (r.status === "stored" || r.status === "duplicate" || r.status === "refused"));
+      if (!answered) {
+        // 401, 429, 5xx, 503 app_not_claimed, any other status, or a 200 that does not answer every item with its own key in
+        // order: retry the whole batch (same keys, the bridge dedupes)
+        this.#fail(`bridge answered ${res.status}${res.status === 200 ? " without one result per item (its own key, in order)" : ""}`);
         return;
       }
       this.#backoff = 0;
       this.#retryAt = 0;
+      this.#failures = 0;
+      this.#limit = Math.min(EVENT_BATCH_MAX, this.#limit * 2);
+      await this.#settled();
       const del = this.#db.prepare("DELETE FROM tb_event_outbox WHERE id = ?");
       batch.forEach((b, i) => {
-        const r = results[i];
+        const r = (results as EventIngestResult["results"])[i];
         if (r?.status === "refused") this.#log.warn("event refused by the bridge", { kind: b.item.kind, name: b.item.kind === "emit" ? b.item.name : null, key: b.item.key, code: typeof r.code === "string" ? r.code : "refused" });
         del.run(b.id);
       });
@@ -277,25 +361,46 @@ export class EventOutbox {
     this.#arm(SENDER_FALLBACK_MS);
   }
 
+  /** a transaction is open on the connection (node:sqlite `isTransaction`; false where the runtime lacks it) */
+  #inTx(): boolean {
+    return (this.#db as RawDb & { isTransaction?: boolean }).isTransaction === true;
+  }
+
+  /** waits until no transaction is open (deletes of sent rows never join an app transaction that may roll back) */
+  async #settled(): Promise<void> {
+    while (this.#inTx()) await new Promise((r) => setTimeout(r, TX_WAIT_MS));
+  }
+
   #fail(reason: string): void {
-    this.#backoff = this.#backoff === 0 ? BACKOFF_MIN_MS : Math.min(BACKOFF_MAX_MS, this.#backoff * 2);
+    this.#failures++;
+    this.#backoff = this.#backoff === 0 ? this.#backoffMin : Math.min(this.#backoffMax, this.#backoff * 2);
     this.#retryAt = Date.now() + this.#backoff;
-    this.#log.warn("event send failed; retrying", { reason, retryInMs: this.#backoff });
+    this.#log.warn("event send failed; retrying", { reason, retryInMs: this.#backoff, failures: this.#failures });
     this.#arm(this.#backoff);
   }
 
-  /** The wire item of one row. A scoped emit gets `eligible` NOW (MANIFEST §16.2 rule 2), ∩ `to` for a target event. */
-  #item(r: Row, deps: SenderDeps): EventIngestItem {
-    const body = JSON.parse(String(r.body)) as EmitBody | PurgeBody;
-    if (body.kind !== "emit") return body;
+  /**
+   * The wire item of one row, or `{drop}`. A scoped emit gets `eligible` NOW (MANIFEST §16.2 rule 2): agent rows on (scopeType,
+   * instanceId) whose effective crud ⊇ visibleWith.crud, LIMITED to agents in the current verified slice, at most 500, ∩ `to` for
+   * a target event. A row whose scope type changed since the emit (an app update) is dropped, never sent with `eligible` computed
+   * on another type (SDK-API §20, specs#33).
+   */
+  #item(r: Row, deps: SenderDeps): EventIngestItem | { drop: string } {
+    const parsed = JSON.parse(String(r.body)) as EmitBody | PurgeBody;
+    if (parsed.kind !== "emit") return parsed;
+    const { scopeType: recorded, ...body } = parsed;
     const decl = eventDecl(this.#m, body.name);
-    const type = decl ? eventScopeType(this.#m, decl) : null;
-    if (!decl || !type || body.instanceId === undefined) return body;
+    // undeclared now (an update removed the event): sent as it is, the bridge refuses it (event_undeclared) and the row goes
+    if (!decl) return body;
+    const type = eventScopeType(this.#m, decl);
+    if (recorded !== undefined && recorded !== type) return { drop: `event ${body.name}: scope type ${recorded ?? "none"} at emit, ${type ?? "none"} now` };
+    if (!type || body.instanceId === undefined) return body;
     const need: CrudAction[] = eventVisibleCrud(this.#m, decl);
     const to = body.to ? new Set<string>(body.to) : null;
     const eligible: EventEligible[] = deps
       .rowsOn(type, body.instanceId)
-      .filter((row) => row.agent.startsWith("agt_") && subset(need, row.crud ?? []) && (to === null || to.has(row.agent)))
+      .filter((row) => row.agent.startsWith("agt_") && deps.inSlice(row.agent) && subset(need, row.crud ?? []) && (to === null || to.has(row.agent)))
+      .slice(0, EVENT_ELIGIBLE_MAX)
       .map((row) => ({ agent: row.agent, authority: row.authority === "owner" ? "owner" : "bounded" }));
     return { ...body, eligible };
   }

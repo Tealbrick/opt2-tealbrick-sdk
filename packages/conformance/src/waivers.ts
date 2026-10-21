@@ -205,7 +205,8 @@ export interface BridgeCapsFixture {
 /**
  * `eventsProbe` (conformance 0.1.28, C274c, spec 0.1.57, SDK >= 0.1.38): `op` = a PERSON op the A-EV rows drive with
  * `{case, key?, instanceId?, kind?}` (cases: emit, rollback, commit_throw, invalid {kind: payload | undeclared | reserved} → output
- * {code}, scoped, purge); `event` = the declared event `emit` sends; `scopedEvent` = a declared SCOPED event `scoped` sends (optional:
+ * {code}, scoped, purge, grant {agent, access} = ctx.scopeGrants.grant(agent, <scopedEvent's scope type>, instanceId, access));
+ * `event` = the declared event `emit` sends; `scopedEvent` = a declared SCOPED event `scoped` sends (optional:
  * without it A-EV-6 and A-EV-7 are not_applicable); `instanceId` = the scope instance of `scoped` and `purge` (placeholders allowed).
  */
 export interface EventsProbeFixture {

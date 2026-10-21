@@ -22,9 +22,11 @@ const RETENTION_ROWS = 10_000;
 type Ev = { id: string; origin: string; type: string; app: string; instanceId?: string; summary?: string; data: Record<string, unknown>; causedBy?: string };
 type Poll = { events: Ev[]; cursor: string | null; truncated: boolean; paused?: boolean } | { problem: string };
 
-/** the rows in BRIDGE §14.4 order (titles in bridge-ids.ts, group `events`) */
-const ROWS: [string, string][] = (BRIDGE_GROUPS.events ?? []).map((x) => [x.id, x.title]);
-export const EVENT_CHECK_TITLES: Record<string, string> = Object.fromEntries(ROWS);
+/** the rows in BRIDGE §14.4 order, then B-EV-18 (titles in bridge-ids.ts, group `events`) */
+const ALL_ROWS: [string, string][] = (BRIDGE_GROUPS.events ?? []).map((x) => [x.id, x.title]);
+/** B-EV-1..17 (the §14.4 cases; B-EV-18 is the no-cap row) */
+const ROWS: [string, string][] = ALL_ROWS.filter(([id]) => id !== "B-EV-18");
+export const EVENT_CHECK_TITLES: Record<string, string> = Object.fromEntries(ALL_ROWS);
 
 /** true when one StatusReport declares the events cap */
 const declares = (ack: { bridge?: { caps?: unknown } }): boolean => {
@@ -42,11 +44,23 @@ export async function eventChecks(c: BridgeCtx): Promise<void> {
     await c.run("B-EV-17", EVENT_CHECK_TITLES["B-EV-17"] as string, "every StatusReport declares events, or none does", () =>
       declaring === 0 ? na(why) : bad(`${declaring} of ${acks.length} StatusReports declared ${EVENTS_CAP}, the latest does not: a bridge declares it in EVERY report or never`),
     );
+    // CONFORMANCE v0.1.57 (specs#33): a bridge WITHOUT the cap answers tealbrick/events/* with JSON-RPC -32601 (runtimes keep their polls)
+    await c.run("B-EV-18", EVENT_CHECK_TITLES["B-EV-18"] as string, "the free agent calls tealbrick/events/list, poll and stream on its /mcp session → each answer is a JSON-RPC error with code -32601", async () => {
+      const s = await c.session("free");
+      const seen: string[] = [];
+      for (const method of [EVENT_MCP_METHODS.list, EVENT_MCP_METHODS.poll, EVENT_MCP_METHODS.stream]) {
+        const { message } = await s.rpc(method, {});
+        const code = isObj(message?.error) ? Number(message.error.code) : null;
+        seen.push(`${method} → ${code ?? JSON.stringify(message?.result ?? null).slice(0, 60)}`);
+        if (code !== -32601) return bad(`${seen.join("; ")} (expected -32601 method not found from a bridge without the ${EVENTS_CAP} cap)`);
+      }
+      return ok(seen.join("; "));
+    });
     return;
   }
   const ev = c.w.eventApps;
   if (!ev) {
-    for (const [id, title] of ROWS) await c.run(id, title, "BRIDGE §14.4", () => notRun("the suite could not derive event apps from the example manifest (eventManifest)"));
+    for (const [id, title] of ALL_ROWS) await c.run(id, title, "BRIDGE §14.4", () => notRun("the suite could not derive event apps from the example manifest (eventManifest)"));
     return;
   }
   const { a, b, tb } = ev;
@@ -70,7 +84,7 @@ export async function eventChecks(c: BridgeCtx): Promise<void> {
   try {
     const applied = await c.apply();
     if (!applied.acked) {
-      for (const [id, title] of ROWS) await c.run(id, title, "BRIDGE §14.4", () => bad(`the config listing the event apps (rev ${applied.rev}) was not acknowledged`));
+      for (const [id, title] of ALL_ROWS) await c.run(id, title, "BRIDGE §14.4", () => bad(`the config listing the event apps (rev ${applied.rev}) was not acknowledged`));
       return;
     }
     await runRows(c, { a, b, tb, agents, scopedOp, T, boundSpec, hookKey });
@@ -493,12 +507,15 @@ async function runRows(c: BridgeCtx, e: Env): Promise<void> {
     return verdict(left === 0, `purge ${r.results[0]?.status}; rows of i16 delivered after it: ${left}`);
   });
 
-  await run("B-EV-17", "every StatusReport the fake Portal received since the first that declared events declares it, and B-EV-1..16 have no fail", async () => {
+  await run("B-EV-17", "every StatusReport the fake Portal received in this run declares events, and every one of B-EV-1..16 PASSED (not_applicable or not_run counts as not passed)", async () => {
     const acks = c.w.portal.acks;
-    const first = acks.findIndex(declares);
-    const later = acks.slice(first).filter((x) => !declares(x)).length;
-    const failed = [...results].filter(([, o]) => o.pass === false || o.status === "fail").map(([id]) => id);
-    if (later > 0) return bad(`${later} StatusReport(s) after the first that declared ${EVENTS_CAP} do not declare it`);
-    return failed.length ? bad(`the bridge declares ${EVENTS_CAP} but fails ${failed.join(", ")}`) : ok(`${acks.length - first} StatusReports declare ${EVENTS_CAP}; B-EV-1..16 have no fail`);
+    const missing = acks.filter((x) => !declares(x)).length;
+    const notPassed = ROWS.slice(0, -1)
+      .map(([id]) => [id, results.get(id)] as const)
+      .filter(([, o]) => !o || !(o.status === "pass" || (o.status === undefined && o.pass === true)))
+      .map(([id, o]) => `${id} ${o?.status ?? (o?.pass === false ? "fail" : "missing")}`);
+    if (missing > 0) return bad(`${missing} of ${acks.length} StatusReports of this run do not declare ${EVENTS_CAP} (a bridge declares it in EVERY report or never)`);
+    return notPassed.length ? bad(`the bridge declares ${EVENTS_CAP} but these rows did not pass: ${notPassed.join(", ")}`) : ok(`all ${acks.length} StatusReports declare ${EVENTS_CAP}; B-EV-1..16 all passed`);
   });
+  await c.run("B-EV-18", EVENT_CHECK_TITLES["B-EV-18"] as string, "a bridge WITHOUT the cap answers tealbrick/events/* with -32601", () => na(`the bridge declares the ${EVENTS_CAP} capability: the no-cap row does not apply`));
 }

@@ -149,15 +149,16 @@ describe("ctx.emit validation and the outbox row (SDK-API §20)", () => {
     }
   });
 
-  test("purgeEvents writes one all-agent purge row; rowNarrowed only for agents on a scoped event type", () => {
+  test("purgeEvents writes one all-agent purge row; rowNarrowed for agent rows of EVERY scope type (specs#33), never app callers", () => {
     const u = unit();
     try {
       u.ob.purgeFn()("nb");
       u.ob.rowNarrowed(AGT, "notebook", "nb");
       u.ob.rowNarrowed(`ins_${ulid()}`, "notebook", "nb");
-      u.ob.rowNarrowed(AGT, "other_type", "nb");
+      u.ob.rowNarrowed(AGT, "other_type", "nb2");
       const rows = u.rows();
-      assert.equal(rows.length, 2);
+      assert.equal(rows.length, 3);
+      assert.deepEqual({ ...rows[2]?.body, key: "k" }, { kind: "purge", key: "k", agent: AGT, instanceId: "nb2" });
       assert.deepEqual({ ...rows[0]?.body, key: "k" }, { kind: "purge", key: "k", instanceId: "nb" });
       assert.deepEqual({ ...rows[1]?.body, key: "k" }, { kind: "purge", key: "k", agent: AGT, instanceId: "nb" });
       assert.equal(codeOf(() => u.ob.purgeFn()("")), "event_instance_invalid");
@@ -432,7 +433,7 @@ describe("outbox prune and an app without a bridge", () => {
     try {
       u.ob.emitFn()("note.pinged", { n: 1 }, { subject: { kind: "note", id: "a" }, to: [AGT] });
       u.db.prepare("UPDATE tb_event_outbox SET created_at = ?").run(Date.now() - 8 * 86_400_000);
-      u.ob.start({ bridge: () => null, bridgeCaps: () => [], rowsOn: () => [] });
+      u.ob.start({ bridge: () => null, bridgeCaps: () => [], rowsOn: () => [], inSlice: () => true });
       await until(async () => u.rows().length === 0);
       await u.ob.stop();
     } finally {

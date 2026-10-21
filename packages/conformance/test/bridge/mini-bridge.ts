@@ -116,6 +116,8 @@ export interface MiniFlags {
   events?: boolean;
   /** conformance 0.1.28: one §14 rule broken (B-EV sensitivity) */
   eventFaults?: EventLogFaults;
+  /** without `events`: answers tealbrick/events/* with an empty result instead of -32601 (fails B-EV-18) */
+  eventsMethodsAnswerEmpty?: boolean;
   /** spec 0.1.50 (C283 A1): declares owner_rows but never lists the ops an app's scope_summary names in admittedOps (fails B5.gate_scoped_above_grant) */
   ignoresAdmittedOps?: boolean;
   /** pre-C283 gate: refuses a scoped op above the grant's crud with crud_exceeds_grant although it lists it (fails B5.gate_scoped_above_grant) */
@@ -733,6 +735,9 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
         const r = evLog.rpc(agt as AgentId, c.apps.map((a) => a.ins), msg.method, msg.params);
         if (r) return send(res, 200, { jsonrpc: "2.0", id: msg.id, ...r });
       }
+      // BRIDGE §14.3: a bridge without the cap answers the events methods with -32601 (method not found)
+      if (!flags.events && !flags.eventsMethodsAnswerEmpty && typeof msg.method === "string" && msg.method.startsWith("tealbrick/events/"))
+        return send(res, 200, { jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "method not found" } });
       if (msg.method === "tools/list") result = { tools: tools(agt).map((t) => ({ name: t.name, inputSchema: t.inputSchema })) };
       if (msg.method === "tools/call") {
         const meta = msg.params?._meta as Record<string, unknown> | undefined;

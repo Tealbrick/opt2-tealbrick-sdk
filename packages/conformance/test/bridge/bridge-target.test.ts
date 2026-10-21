@@ -31,17 +31,22 @@ const KEYS_ORIGIN_IDS = ["B11.main_origin_keys_404", "B11.keys_origin_only", "B1
 const GOOD_IDS = ["B1.health", "B1.mcp_requires_auth", "B1.internal_not_public", "C1.K5", "cred.p1.bridge_rejects_clerk_jwt", "cred.p1.bridge_rejects_tbo", "B7.list_exact", "B7.no_person_ops", "B8.forward", "B8.grant_and_proof", "B5.bound_outside_wf", "P1.workspace.mcp", "B9.portal_paths", "B9.no_payload"];
 
 const EVENT_IDS = Array.from({ length: 17 }, (_, i) => `B-EV-${i + 1}`);
+const NO_CAP_ROW = "B-EV-18";
 const asserted = (r: Report, id: string) => r.checks.find((c) => c.id === id)?.asserted ?? "";
 
 describe("bridge target", () => {
   it("spec 0.1.57 (B-EV): a bridge that DECLARES events and implements BRIDGE §14 passes every B-EV row", { timeout: 300_000 }, async () => {
     const r = await run({ events: true }, ["events"]);
     for (const id of EVENT_IDS) assert.equal(status(r, id), "pass", `${id}: ${asserted(r, id)}`);
+    assert.equal(status(r, NO_CAP_ROW), "not_applicable");
   });
 
-  it("spec 0.1.57 (B-EV): a bridge that declares no events cap is not_applicable on every row, whatever version it reports", { timeout: 120_000 }, async () => {
+  it("spec 0.1.57 (B-EV): a bridge that declares no events cap is not_applicable on every §14.4 row, whatever version it reports; it answers the methods with -32601 (B-EV-18)", { timeout: 120_000 }, async () => {
     const r = await run({ version: "0.2.7" }, ["events"]);
     for (const id of EVENT_IDS) assert.equal(status(r, id), "not_applicable", `${id}: ${asserted(r, id)}`);
+    assert.equal(status(r, NO_CAP_ROW), "pass", `${NO_CAP_ROW}: ${asserted(r, NO_CAP_ROW)}`);
+    const empty = await run({ eventsMethodsAnswerEmpty: true }, ["events"]);
+    assert.equal(status(empty, NO_CAP_ROW), "fail", `${NO_CAP_ROW} must fail a bridge that answers the events methods without the cap: ${asserted(empty, NO_CAP_ROW)}`);
     assert.match(asserted(r, "B-EV-1"), /does not declare the events capability.*never by version/);
   });
 

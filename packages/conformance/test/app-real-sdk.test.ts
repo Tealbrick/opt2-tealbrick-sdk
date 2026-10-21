@@ -30,10 +30,10 @@ am.events = [
   { name: "item.created", title: "An item was created", payloadSchema: { type: "object", additionalProperties: false, required: ["itemId"], properties: { itemId: { type: "string" } } }, visibleWith: "item_get", audience: "granted" },
 ];
 type Emit = (name: string, data: unknown, opts: Record<string, unknown>) => void;
-type EvCtx = { emit: Emit; purgeEvents(id: string): void; db: { exec(sql: string): void; transaction<T>(fn: () => T): T } };
+type EvCtx = { emit: Emit; purgeEvents(id: string): void; db: { exec(sql: string): void; transaction<T>(fn: () => T): T }; scopeGrants: { grant(a: string, t: string, id: string, access: string): Promise<unknown> } };
 /** sensitivity run only: a probe (and an SDK) that break the A-EV rules */
 const broken = { on: false };
-async function eventsProbe(input: { case: string; key?: string; instanceId?: string; kind?: string }, ctx: EvCtx): Promise<unknown> {
+async function eventsProbe(input: { case: string; key?: string; instanceId?: string; kind?: string; agent?: string; access?: string }, ctx: EvCtx): Promise<unknown> {
   const subject = { kind: "item", id: "i1" };
   if (broken.on) {
     // emits twice for one change; "rollback" commits; invalid emits are swallowed
@@ -86,6 +86,9 @@ async function eventsProbe(input: { case: string; key?: string; instanceId?: str
       return {};
     case "purge":
       ctx.purgeEvents(String(input.instanceId));
+      return {};
+    case "grant":
+      await ctx.scopeGrants.grant(String(input.agent), "space", String(input.instanceId), String(input.access));
       return {};
     default:
       return {};
@@ -140,6 +143,15 @@ const outbox = (await import(new URL("../../miniapp-sdk/src/server/events.ts", i
 const eventsConfig = { eventsProbe: { op: "events_probe", event: "item.ping", scopedEvent: "item.created", instanceId: "${tb.agentA}" } };
 
 describe("conformance 0.1.24 to 0.1.28 rows against the real miniapp-sdk", { timeout: 300_000 }, () => {
+  it("a manifest that declares events with no eventsProbe FAILS every A-EV row (never not_applicable; specs#33)", { timeout: 240_000 }, async () => {
+    const r = await runApp({ manifest: am, manifestPath: path, config: parseConformanceConfig({}, "test config"), start: startReal as never, deployTemplate: template, timeoutMs: 8000 });
+    for (let i = 1; i <= 8; i++) {
+      const c = r.checks.find((x) => x.id === `A-EV-${i}`);
+      assert.equal(c?.status, "fail", `A-EV-${i}: ${c?.status} ${c?.asserted}`);
+      assert.match(c?.asserted ?? "", /no eventsProbe/);
+    }
+  });
+
   it("A-EV rows FAIL on a broken probe and an outbox that drops purges and tb.hold.decided (sensitivity)", { timeout: 240_000 }, async () => {
     const proto = outbox.EventOutbox.prototype;
     const saved = { holdDecided: proto.holdDecided, rowNarrowed: proto.rowNarrowed };

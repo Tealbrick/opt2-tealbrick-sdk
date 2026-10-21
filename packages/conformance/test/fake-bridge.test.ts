@@ -224,6 +224,16 @@ describe("fake bridge: app events (conformance 0.1.28, BRIDGE §14)", () => {
     assert.equal((await rpc(y?.id as string, "tealbrick/events/poll", { cursor: "not-a-ulid" })).error?.data?.code, "cursor_invalid");
     const list = await rpc(y?.id as string, "tealbrick/events/list");
     assert.ok(((list.result?.types ?? []) as { type: string }[]).some((t) => t.type === "tb.hold.decided"));
+    // specs#33: [P, E2] stored, the answer lost, the same batch again → both duplicate, E2 still stored (the purge is not re-applied)
+    const yid = y?.id as string;
+    const before = await rpc(yid, "tealbrick/events/poll", { cursor: again.result?.cursor });
+    const batch = { items: [{ kind: "purge", key: "purge-key-replay1", agent: yid, instanceId: "sp1" }, it1({ key: "e2-key-replay-1", name: "x.scoped", instanceId: "sp1", eligible: [{ agent: yid, authority: "bounded" }], data: {} })] };
+    const first = await signed(b, key, "POST", "/tb/v1/events", batch);
+    const retry = await signed(b, key, "POST", "/tb/v1/events", batch);
+    assert.deepEqual((first.body.results as { status: string }[]).map((z) => z.status), ["stored", "stored"]);
+    assert.deepEqual((retry.body.results as { status: string }[]).map((z) => z.status), ["duplicate", "duplicate"]);
+    const after = await rpc(yid, "tealbrick/events/poll", { cursor: before.result?.cursor ?? again.result?.cursor });
+    assert.equal(((after.result?.events ?? []) as { instanceId?: string }[]).filter((e) => e.instanceId === "sp1").length, 1, "E2 survives the retried purge");
     b.control.failNextEvents(1);
     assert.equal((await signed(b, key, "POST", "/tb/v1/events", { items: [it1({})] })).status, 503);
     assert.equal(b.control.eventItems().at(-1)?.status, 503);

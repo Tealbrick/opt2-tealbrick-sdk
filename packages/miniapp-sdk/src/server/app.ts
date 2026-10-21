@@ -601,7 +601,7 @@ export async function startApp(
     // v0.1.21: failed / stuck jobs raise attention when the app reports none (L3); v0.1.22 (SDK-03): a failed, overdue
     // or unparsable scheduled backup comes before them
     // v0.1.38 (admin queue c/5b): by severity, not first-non-null: a failed or overdue backup is never hidden by an app attention
-    attention: async () => pickAttention({ backup: backup.attention(), app: await attentionReader.read(), jobs: jobRunner().attention() }),
+    attention: async () => pickAttention({ backup: backup.attention(), events: events.attention(), app: await attentionReader.read(), jobs: jobRunner().attention() }),
     backupHealth: () => backup.health(),
     ownerLink,
     ownerLinkFor,
@@ -687,7 +687,7 @@ export async function startApp(
   link?.start();
   // v0.1.38 (C274c): the outbox sender; it sends only while the slice says the bridge has the `events` cap (app-alone mode never sends,
   // its loop only prunes rows older than 7 days)
-  events.start({ bridge: () => (link && state.claimed ? bridge : null), bridgeCaps, rowsOn: (type, instanceId) => scopes.rowsOn(type, instanceId) });
+  events.start({ bridge: () => (link && state.claimed ? bridge : null), bridgeCaps, rowsOn: (type, instanceId) => scopes.rowsOn(type, instanceId), inSlice: (agent) => !trust.stale(Date.now()) && trust.agent(agent) !== undefined });
   runner.start();
   const sweep = setInterval(() => {
     try {

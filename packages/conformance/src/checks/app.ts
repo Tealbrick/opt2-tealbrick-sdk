@@ -2789,13 +2789,19 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   // {case, key?, instanceId?, kind?}: "emit" = one declared change that emits exactly one `event` (key = the given key);
   // "rollback" = an emit inside a transaction that rolls back (the op answers 200); "commit_throw" = an emit in a committed
   // transaction, then the op throws; "invalid" with kind payload | undeclared | reserved = a bad ctx.emit whose TbError code the op
-  // returns as {code}; "scoped" = one `scopedEvent` for `instanceId` (key = the given key); "purge" = ctx.purgeEvents(instanceId).
+  // returns as {code}; "scoped" = one `scopedEvent` for `instanceId` (key = the given key); "purge" = ctx.purgeEvents(instanceId);
+  // "grant" {agent, access} = ctx.scopeGrants.grant(agent, <scope type>, instanceId, access) (A-EV-7 owner → bounded).
+  // A manifest that declares events and has no eventsProbe FAILS every row (SDK-API §20, specs#33).
   // The fake bridge records every POST /tb/v1/events (BRIDGE §14.1); its slices carry the `events` cap only inside this block.
   const evCfg = ctx.eventsProbe;
   const evGate = (): Outcome | null => {
     const v = b.claims[0]?.request.sdkVersion;
     if (versionBelow(v, EVENTS_SINCE)) return na(`SDK ${v} (self-reported) predates ${EVENTS_SINCE} (ctx.emit, spec 0.1.57): not applicable by version`);
-    if (!evCfg) return na("no eventsProbe in tealbrick-conformance.json (the app's events are not observable black-box without a probe op)");
+    if (!evCfg)
+      // SDK-API §20 (specs#33): a manifest that declares events but offers the suite no way to trigger them FAILS the A-EV rows
+      return (m.events ?? []).length > 0
+        ? bad(`the manifest declares ${(m.events ?? []).length} event(s) but tealbrick-conformance.json has no eventsProbe: the suite cannot trigger them (a FAIL, never not_applicable)`)
+        : na("the manifest declares no events and tealbrick-conformance.json has no eventsProbe");
     if (!personOps.some((o) => o.id === evCfg.op)) return bad(`tealbrick-conformance.json eventsProbe.op ${JSON.stringify(evCfg.op)}: not a person op of this manifest`);
     if (!eventDecl(m, evCfg.event) || isReservedEventName(evCfg.event)) return bad(`tealbrick-conformance.json eventsProbe.event ${JSON.stringify(evCfg.event)}: not an event the manifest declares`);
     if (!sess) return bad("no person session");
@@ -2849,9 +2855,10 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
       if (a.status !== 200) return bad(`${evCfg?.op} {case: emit}: ${show(a)}`);
       await evWait(() => evStored(key).length > 0);
       await new Promise((r) => setTimeout(r, 500));
+      // app events only: tb.hold.decided rows of earlier holds may drain now that the cap is in the slice
       const got = evItems()
         .slice(before)
-        .filter((x) => x.kind === "emit");
+        .filter((x) => x.kind === "emit" && !(typeof x.name === "string" && isReservedEventName(x.name)));
       if (got.length !== 1 || got[0]?.key !== key) return bad(`emit items sent for one change: ${got.length} (keys ${got.map((x) => String(x.key)).join(", ") || "none"}; expected exactly one, with key ${key})`);
       const shape = evShape(got[0] as Record<string, unknown>);
       return verdict(shape === null, shape ?? `one ${String(got[0]?.name)} item, payload valid`);
@@ -2883,7 +2890,9 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
         if (got !== code) return bad(`${seen.join("; ")} (expected ${code})`);
       }
       await new Promise((r) => setTimeout(r, 500));
-      const extra = evItems().slice(before).filter((x) => x.kind === "emit");
+      const extra = evItems()
+        .slice(before)
+        .filter((x) => x.kind === "emit" && !(typeof x.name === "string" && isReservedEventName(x.name)));
       return verdict(extra.length === 0, extra.length ? `${extra.length} emit item(s) sent during the invalid emits` : seen.join("; "));
     }),
   );
@@ -2951,7 +2960,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
       return verdict(JSON.stringify(want) === JSON.stringify(got), `eligible ${JSON.stringify(got)}; the rows admit ${JSON.stringify(want)} (visibleWith crud ${need.join(",")})`);
     });
   });
-  await s.run("A-EV-7", "a row removal or narrowing sends a purge after the earlier events; ctx.purgeEvents sends an all-agent purge", "agent B gets an owner row on (scopeType, instanceId) at the widest level (tb.scopes_set); a scoped emit K; B's row narrowed to the narrowest level (if one is narrower) → purge {agent B, instanceId}; B's row removed → purge {agent B}; each after K; eventsProbe {case: purge} → purge {instanceId} without agent; the rows are restored", async () => {
+  await s.run("A-EV-7", "a row removal, narrowing or owner→bounded change sends a purge after the earlier events; ctx.purgeEvents sends an all-agent purge", "agent B gets an owner row on (scopeType, instanceId) at the widest level (tb.scopes_set); a scoped emit K1 (200, sent); B's row narrowed to the narrowest level (if one is narrower) → purge {agent B}; removed → purge {agent B}; an owner row at the agent ceiling, a scoped emit K2 (200, sent), then eventsProbe {case: grant} (ctx.scopeGrants.grant of the same level: owner → bounded) → purge {agent B}; each after the earlier event; eventsProbe {case: purge} → purge {instanceId} without agent; the rows are restored", async () => {
     const g = scopedGate();
     if (g) return g;
     const sc = (m.scopes ?? []).find((x) => x.type === scopedType);
@@ -2962,12 +2971,27 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
       const widest = [...sc.access].sort((x, y) => y.crud.length - x.crud.length)[0];
       const narrowest = [...sc.access].sort((x, y) => x.crud.length - y.crud.length)[0];
       if (!widest) return bad("scope has no access level");
+      // the agent ceiling (SDK-API §7.2): the widest level a default grant gives agents; ctx.scopeGrants.grant may give at most it
+      const ceilingId = sc.defaultGrants
+        .filter((d) => !d.callers || d.callers.includes("agent"))
+        .map((d) => sc.access.find((x) => x.id === d.access))
+        .filter((x): x is NonNullable<typeof x> => !!x)
+        .sort((x, y) => y.crud.length - x.crud.length)[0]?.id;
       const set = (access: string | null) => c().personOp(sess as PersonSession, "tb.scopes_set", { agent: agentB.id, type: scopedType as string, id: inst, access });
+      const emitScoped = async (label: string): Promise<{ key: string } | { problem: string }> => {
+        const key = evKey();
+        const r = await evProbe({ case: "scoped", key });
+        if (r.status !== 200) return { problem: `${label}: {case: scoped} → ${show(r)}` };
+        if (!(await evWait(() => evStored(key).length > 0))) return { problem: `${label}: the scoped event ${key} was not sent` };
+        return { key };
+      };
+      const purgesB = () => evItems().filter((x) => x.kind === "purge" && x.instanceId === inst && x.agent === agentB.id);
+      const keys = () => evItems().map((x) => String(x.key));
+      const steps: string[] = [];
       const w = await set(widest.id);
       if (w.status !== 200) return bad(`tb.scopes_set ${widest.id}: ${show(w)}`);
-      const key = evKey();
-      await evProbe({ case: "scoped", key });
-      const steps: string[] = [];
+      const k1 = await emitScoped("K1");
+      if ("problem" in k1) return bad(k1.problem);
       const narrower = narrowest && narrowest.crud.length < widest.crud.length ? narrowest : null;
       if (narrower) {
         await set(narrower.id);
@@ -2975,17 +2999,30 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
       }
       await set(null);
       steps.push("remove");
+      let wantB = narrower ? 2 : 1;
+      if (!(await evWait(() => purgesB().length >= wantB))) return bad(`purges for agent B on ${inst}: ${purgesB().length} (expected ${wantB}) after ${steps.join(", ")}`);
+      if (keys().indexOf(k1.key) < 0 || keys().indexOf(k1.key) > keys().indexOf(String(purgesB()[0]?.key))) return bad("a purge was sent before the earlier scoped event K1");
+      let k2: { key: string } | null = null;
+      if (ceilingId) {
+        const o = await set(ceilingId);
+        if (o.status !== 200) return bad(`tb.scopes_set ${ceilingId}: ${show(o)}`);
+        const e2 = await emitScoped("K2");
+        if ("problem" in e2) return bad(e2.problem);
+        k2 = e2;
+        const gr = await evProbe({ case: "grant", agent: agentB.id, access: ceilingId });
+        if (gr.status !== 200) return bad(`eventsProbe {case: grant, agent, instanceId, access: ${ceilingId}} (ctx.scopeGrants.grant over the owner row) → ${show(gr)}`);
+        wantB += 1;
+        steps.push(`owner→bounded at ${ceilingId}`);
+        if (!(await evWait(() => purgesB().length >= wantB))) return bad(`no purge for agent B after its owner row became bounded (ctx.scopeGrants.grant): ${purgesB().length} of ${wantB} after ${steps.join(", ")}`);
+        const last = String(purgesB().at(-1)?.key);
+        if (keys().indexOf(k2.key) < 0 || keys().indexOf(k2.key) > keys().indexOf(last)) return bad("the owner→bounded purge was sent before the earlier scoped event K2");
+      } else steps.push("owner→bounded not tested (no default grant gives agents a level)");
       const p = await evProbe({ case: "purge" });
       if (p.status !== 200) return bad(`{case: purge}: ${show(p)}`);
-      const purgesFor = () => evItems().filter((x) => x.kind === "purge" && x.instanceId === inst);
-      const wantB = narrower ? 2 : 1;
-      const ok2 = await evWait(() => purgesFor().filter((x) => x.agent === agentB.id).length >= wantB && purgesFor().some((x) => x.agent === undefined));
+      const all = await evWait(() => evItems().some((x) => x.kind === "purge" && x.instanceId === inst && x.agent === undefined));
       const restore = await withRestore(before, ok("restored"));
-      if (!ok2) return bad(`purges for ${inst}: ${JSON.stringify(purgesFor().map((x) => x.agent ?? "*"))} (expected ${wantB}× agent B, then one without agent) after: ${steps.join(", ")}`);
-      const keys = evItems().map((x) => x.key);
-      const firstPurge = keys.indexOf(purgesFor().find((x) => x.agent === agentB.id)?.key as string);
-      if (keys.indexOf(key) > firstPurge) return bad("a purge was sent before the earlier scoped event");
-      return restore.pass === true ? ok(`${steps.join(", ")}: ${wantB} purge(s) for agent B after the event, then an all-agent purge`) : restore;
+      if (!all) return bad(`no all-agent purge for ${inst} after {case: purge}`);
+      return restore.pass === true ? ok(`${steps.join(", ")}: ${wantB} purge(s) for agent B, each after the earlier event; then an all-agent purge`) : restore;
     });
   });
   await s.run("A-EV-8", "tb.hold.decided goes to the agent caller on approve and deny, never to an app caller", "two agent holds (approve, deny) → items tb.hold.decided {holdId, op, decision approved|denied}, to [agent], subject {kind: hold, id}, no summary; an app caller's hold, decided → no item. Expiry (15 min TTL) is covered by the miniapp-sdk tests only", async () => {
