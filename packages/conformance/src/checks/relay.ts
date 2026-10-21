@@ -9,7 +9,7 @@ import { join, relative } from "node:path";
 import { digest } from "@opt2-tealbrick/manifest";
 import { TYP } from "@opt2-tealbrick/spec/credentials";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
-import type { FakeUpstream } from "../fake-upstream.ts";
+import { FakeUpstream } from "../fake-upstream.ts";
 import { bad, notRun, type Suite, verdict } from "../suite.ts";
 
 export interface StdioPeer {
@@ -214,6 +214,67 @@ export async function runRelayChecks(x: RelayContext): Promise<void> {
     u.notify({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
     const got = await waitFor(() => peer.received.some((m) => m.method === "notifications/tools/list_changed"), T);
     return verdict(got, got ? "forwarded" : "not forwarded");
+  });
+  // conformance 0.1.29 (BRIDGE §14.3 client duties; C274c S5): the relay keeps an app event subscription alive. Gated by
+  // what the fake upstream offers (C292 pattern), never by the relay's version. Frames reach a session's GET stream only
+  // after that session subscribed (the fake models it), so a relay that skips any step loses the next event.
+  const evOf = (n: number) => ({ id: `01JCONF0EVENT000000000000${n}`, origin: `01JCONF0EVENT000000000000${n}`, type: "conformance.item.assigned", app: "conformance", at: "2026-10-21T00:00:00Z", subject: { kind: "issue", id: `iss_conformance_${n}` }, data: {} });
+  const ev = evOf(1);
+  const noEvents = () => notRun("the fake upstream offers no tealbrick/events/* methods");
+  const frames = (from: number, event: Record<string, unknown>) => peer.received.slice(from).filter((m) => m.method === "notifications/tealbrick/event" && same(m, FakeUpstream.eventFrame(event)));
+  let streamId: number | undefined;
+  await s.run("B10.events_forwarded", "app event frames forwarded to stdio verbatim", "tealbrick/events/stream reaches the upstream (same id) and its answer comes back unchanged; a notifications/tealbrick/event frame (SSE id = event id) on the subscribed GET stream appears on stdout as the whole JSON-RPC message, deep-equal", async () => {
+    if (!u.events) return noEvents();
+    const outBefore = peer.received.length;
+    const sub = await rpc("tealbrick/events/stream", {});
+    const upstreamSub = u.requests.find((r) => r.rpc === "tealbrick/events/stream" && r.rpcId === sub.id);
+    const answered = same(res(sub.res), { cursor: null, truncated: false });
+    if (!upstreamSub || !answered) return verdict(false, `stream request reached the upstream with id ${sub.id}: ${!!upstreamSub}; answer ${answered ? "=" : "≠"} upstream`);
+    streamId = sub.id;
+    if (!(await waitFor(() => u.subscribedStreams() > 0, T))) return verdict(false, "no GET stream open on the subscribed session");
+    u.notifyEvent(ev);
+    const got = await waitFor(() => frames(outBefore, ev).length > 0, T);
+    return verdict(got && frames(outBefore, ev).length === 1, got ? `forwarded whole (${frames(outBefore, ev).length}×)` : "the frame did not reach stdout deep-equal");
+  });
+  await s.run("B10.events_last_event_id", "a GET reconnect carries Last-Event-ID", "the upstream ends the GET stream; the relay's next GET /mcp on the same session carries Last-Event-ID = the id of the last event frame", async () => {
+    if (!u.events) return noEvents();
+    if (streamId === undefined) return notRun("B10.events_forwarded did not subscribe");
+    const before = u.requests.length;
+    u.endStreams();
+    const isGet = (r: { method: string; path: string }) => r.method === "GET" && r.path.split("?")[0] === "/mcp";
+    const again = await waitFor(() => u.requests.slice(before).some(isGet), Math.max(T, 15_000));
+    const get = u.requests.slice(before).find(isGet);
+    return verdict(again && get?.headers["last-event-id"] === ev.id, again ? `reconnect Last-Event-ID ${JSON.stringify(get?.headers["last-event-id"] ?? null)}` : "no reconnect");
+  });
+  await s.run("B10.events_resubscribe", "a lost session → re-initialize + stream from the last event, delivery resumes", "the upstream forgets every session (404); the relay sends initialize, then tealbrick/events/stream on the NEW session with cursor = the last event id, opens a GET on it, and the next event reaches stdout; the suite sends nothing meanwhile and the relay writes no answer of its own to stdout (no result/error, no second answer to an id)", async () => {
+    if (!u.events) return noEvents();
+    if (streamId === undefined) return notRun("B10.events_forwarded did not subscribe");
+    const before = u.requests.length;
+    const outBefore = peer.received.length;
+    const sessionsBefore = u.issuedSessions.length;
+    u.forgetSessions();
+    const resub = () => u.requests.slice(before).find((r) => r.rpc === "tealbrick/events/stream");
+    const ok = await waitFor(() => !!resub(), Math.max(T, 20_000));
+    const r = resub();
+    let cursor: unknown = null;
+    try {
+      cursor = (JSON.parse(r?.body ?? "{}") as { params?: { cursor?: unknown } }).params?.cursor ?? null;
+    } catch {
+      cursor = null;
+    }
+    const fresh = u.issuedSessions.slice(sessionsBefore);
+    const onNew = !!r && fresh.includes(r.headers["mcp-session-id"] ?? "");
+    // delivery resumes only on an open GET of the re-subscribed session
+    const getOpen = onNew && (await waitFor(() => u.subscribedStreams(r?.headers["mcp-session-id"]) > 0, Math.max(T, 15_000)));
+    const ev2 = evOf(2);
+    if (getOpen) u.notifyEvent(ev2);
+    const delivered = getOpen && (await waitFor(() => frames(outBefore, ev2).length > 0, T));
+    await sleep(Math.max(1000, T / 4));
+    const answers = peer.received.slice(outBefore).filter((m) => m.result !== undefined || m.error !== undefined);
+    const seen = new Set<unknown>();
+    const twice = peer.received.filter((m) => (m.result !== undefined || m.error !== undefined) && (seen.has(m.id) || !seen.add(m.id)));
+    const pass = ok && onNew && cursor === ev.id && getOpen && delivered && answers.length === 0 && twice.length === 0;
+    return verdict(pass, ok ? `new sessions ${fresh.length}; stream on a new session ${onNew}; cursor ${JSON.stringify(cursor)}; GET on it ${getOpen}; next event on stdout ${delivered}; relay-own answers on stdout ${answers.length}; ids answered twice ${twice.length}` : "no tealbrick/events/stream after the session was lost");
   });
   await s.run("B10.stdio_only", "relay speaks stdio only (no listener)", "no TCP LISTEN or UDP socket in the relay's process tree", () => {
     const pids = processTree(peer.pids());

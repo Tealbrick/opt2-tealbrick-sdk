@@ -357,6 +357,10 @@ export const RELAY_CHECKS: readonly PendingCheck[] = ids({
   "B10.forwards_verbatim": "JSON-RPC answers forwarded verbatim",
   "B10.no_local_checks": "every request reaches the deployed bridge (no local refusal)",
   "B10.notifications": "server notifications forwarded",
+  // conformance 0.1.29 (BRIDGE §14.3 client duties; C274c S5): only when the fake upstream offers tealbrick/events/*
+  "B10.events_forwarded": "app event frames forwarded to stdio verbatim",
+  "B10.events_last_event_id": "a GET reconnect carries Last-Event-ID = the last event id",
+  "B10.events_resubscribe": "a lost session (404) → re-initialize + tealbrick/events/stream from the last event; the relay's own answer stays off stdio",
   "B10.upstream_paths": "upstream traffic only /oauth/token and /mcp",
   "B10.no_state_on_disk": "no grants, keys, config or tokens written to disk",
   "B10.memory_snapshot": "no grants, config or key values in the relay's heap",

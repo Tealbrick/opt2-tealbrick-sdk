@@ -1,5 +1,6 @@
 // Relay target sensitivity: a minimal correct stdio relay passes every relay check; variants that open a listener,
-// filter tools/list, write the token to disk, present a person credential upstream or refuse calls locally fail the
+// filter tools/list, write the token to disk, present a person credential upstream, refuse calls locally, reconnect
+// without Last-Event-ID, do not re-subscribe after a lost session or leak their own re-subscribe answer fail the
 // matching check. Without a login the relay has no credential and the run fails.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -26,6 +27,14 @@ describe("relay target", () => {
     ["writes its token to disk", "disk", "B10.no_state_on_disk"],
     ["presents a person credential upstream", "person", "cred.p1.relay_rejects_person"],
     ["refuses unlisted tools locally", "local", "B10.no_local_checks"],
+    ["answers tealbrick/events/stream locally", "local-stream", "B10.events_forwarded"],
+    ["changes the event frame it forwards", "mangle-event", "B10.events_forwarded"],
+    ["reconnects without Last-Event-ID", "no-last-event-id", "B10.events_last_event_id"],
+    ["does not stream again after a lost session", "no-resubscribe", "B10.events_resubscribe"],
+    ["writes its own re-subscribe answer to stdout", "leak-resub", "B10.events_resubscribe"],
+    ["re-sends the client's initialize and writes that answer to stdout", "leak-reinit", "B10.events_resubscribe"],
+    ["re-subscribes without the new session id", "resub-nosession", "B10.events_resubscribe"],
+    ["re-subscribes but opens no new GET stream", "no-new-get", "B10.events_resubscribe"],
   ];
   for (const [name, flag, id] of broken) {
     it(`fails a relay that ${name}`, async () => {
@@ -34,6 +43,11 @@ describe("relay target", () => {
       assert.equal(r.ok, false);
     });
   }
+  it("an upstream without tealbrick/events/* → the B10.events_* rows are not_run (gated by what the upstream offers, never by relay version)", async () => {
+    const r = await runRelayTarget({ cmd: `node ${relay} serve`, loginCmd: `node ${relay} login`, timeoutMs: 4000, upstreamEvents: false });
+    for (const id of ["B10.events_forwarded", "B10.events_last_event_id", "B10.events_resubscribe"]) assert.equal(status(r, id), "not_run", why(r, id));
+    for (const c of r.checks.filter((c) => !c.id.startsWith("B10.events_"))) assert.equal(c.status, "pass", why(r, c.id));
+  });
   it("without a login the relay has no credential: key_connection not_run, run fails", async () => {
     const r = await run("", false);
     assert.equal(status(r, "B10.key_connection"), "not_run");

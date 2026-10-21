@@ -36,10 +36,17 @@ export class FakeUpstream {
   unknownToolResult: Record<string, unknown> = {};
   /** connection revoked / unknown: jwt-bearer refused and every K5 rejected */
   refuseAll = false;
+  /** conformance 0.1.29 (BRIDGE §14.3): this upstream offers `tealbrick/events/*` (the relay B10.events_* rows run only then) */
+  events = true;
+  /** sessions in the order this upstream issued them (initialize answers) */
+  readonly issuedSessions: string[] = [];
+  /** sessions with a `tealbrick/events/stream` subscription: event frames go only to their GET streams (BRIDGE §14.3) */
+  readonly #subscribed = new Set<string>();
   #key!: Ed25519KeyPair;
   readonly #connections: () => readonly ConnectionEntry[];
   readonly #replay = memoryReplayGuard();
-  readonly #streams = new Set<ServerResponse>();
+  /** open GET streams → their session id */
+  readonly #streams = new Map<ServerResponse, string>();
   readonly #sessions = new Set<string>();
   readonly #server = createServer((req, res) => void this.#handle(req, res));
 
@@ -60,13 +67,48 @@ export class FakeUpstream {
     return this.#streams.size;
   }
 
+  /** the frame `notifyEvent` writes for `event` (the checks compare it whole) */
+  static eventFrame(event: Record<string, unknown>): Record<string, unknown> {
+    return { jsonrpc: "2.0", method: "notifications/tealbrick/event", params: { event } };
+  }
+
+  /** Sends one app event frame (`id:` = the event id, BRIDGE §14.3) on the open GET streams of SUBSCRIBED sessions only;
+   *  returns how many streams got it. */
+  notifyEvent(event: Record<string, unknown> & { id: string }): number {
+    let n = 0;
+    for (const [s, sid] of this.#streams) {
+      if (!this.#subscribed.has(sid)) continue;
+      s.write(`id: ${event.id}\nevent: message\ndata: ${JSON.stringify(FakeUpstream.eventFrame(event))}\n\n`);
+      n += 1;
+    }
+    return n;
+  }
+
+  /** open GET streams of a subscribed session */
+  subscribedStreams(sid?: string): number {
+    return [...this.#streams.values()].filter((x) => this.#subscribed.has(x) && (sid === undefined || x === sid)).length;
+  }
+
+  /** Ends every open GET stream (a proxy idle cut): the relay reconnects. */
+  endStreams(): void {
+    for (const s of this.#streams.keys()) s.end();
+    this.#streams.clear();
+  }
+
+  /** The bridge restarted: every current session (and its subscription) is unknown from now on (404); new ones work. */
+  forgetSessions(): void {
+    this.#sessions.clear();
+    this.#subscribed.clear();
+    this.endStreams();
+  }
+
   /** Sends a JSON-RPC notification on every open GET stream. */
   notify(message: Record<string, unknown>): void {
-    for (const s of this.#streams) s.write(`event: message\ndata: ${JSON.stringify(message)}\n\n`);
+    for (const s of this.#streams.keys()) s.write(`event: message\ndata: ${JSON.stringify(message)}\n\n`);
   }
 
   async close(): Promise<void> {
-    for (const s of this.#streams) s.end();
+    for (const s of this.#streams.keys()) s.end();
     await closeServer(this.#server);
   }
 
@@ -86,15 +128,19 @@ export class FakeUpstream {
       res.end(JSON.stringify({ error: { code: "unauthenticated", message: "agent session required", requestId: "req_fake" } }));
       return;
     }
+    // a session id this upstream never issued, or one it forgot (restart) / ended (DELETE) → 404 (Streamable HTTP)
+    const sid = header(req, "mcp-session-id");
+    if (sid !== undefined && !this.#sessions.has(sid)) return sendJson(res, 404, { jsonrpc: "2.0", id: null, error: { code: -32001, message: "unknown session" } });
     if (req.method === "GET") {
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
       res.write(": open\n\n");
-      this.#streams.add(res);
+      this.#streams.set(res, sid ?? "");
       req.once("close", () => this.#streams.delete(res));
       return;
     }
     if (req.method === "DELETE") {
-      this.#sessions.delete(header(req, "mcp-session-id") ?? "");
+      this.#sessions.delete(sid ?? "");
+      this.#subscribed.delete(sid ?? "");
       return void res.writeHead(200).end();
     }
     let msg: Record<string, unknown> = {};
@@ -109,11 +155,19 @@ export class FakeUpstream {
     const extra: Record<string, string> = {};
     let result: Record<string, unknown>;
     if (msg.method === "initialize") {
-      const sid = `sess_${Math.random().toString(36).slice(2)}`;
-      this.#sessions.add(sid);
-      extra["mcp-session-id"] = sid;
+      const fresh = `sess_${Math.random().toString(36).slice(2)}`;
+      this.#sessions.add(fresh);
+      this.issuedSessions.push(fresh);
+      extra["mcp-session-id"] = fresh;
       result = this.initializeResult;
     } else if (msg.method === "tools/list") result = this.toolsList;
+    else if (this.events && msg.method === "tealbrick/events/stream") {
+      // the subscription belongs to a session (BRIDGE §14.3): no session → 400, like any non-initialize request
+      if (!sid) return sendJson(res, 400, { jsonrpc: "2.0", id: msg.id, error: { code: -32600, message: "mcp-session-id required" } });
+      this.#subscribed.add(sid);
+      result = { cursor: isObj(msg.params) && typeof msg.params.cursor === "string" ? msg.params.cursor : null, truncated: false };
+    }
+    else if (!this.events && typeof msg.method === "string" && msg.method.startsWith("tealbrick/events/")) return sendJson(res, 200, { jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: `method not found: ${msg.method}` } }, extra);
     else if (msg.method === "tools/call") {
       const name = isObj(msg.params) ? String(msg.params.name) : "";
       result = this.toolResults.get(name) ?? this.unknownToolResult;
