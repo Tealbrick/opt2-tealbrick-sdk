@@ -7,9 +7,11 @@ Targets: `app`, `manifest`, `bridge`, `relay`, `core` (`tb-conformance --help`).
 
 Relay target, BRIDGE §14.3 client duties. The rows run only when the fake upstream offers `tealbrick/events/*` (C292 pattern: by what is offered, never by relay version; `runRelayTarget({upstreamEvents: false})` → not_run). No change in manifest or miniapp-sdk.
 
-- `B10.events_forwarded`: after `tealbrick/events/stream`, a `notifications/tealbrick/event` frame (SSE `id:` = event id) on the upstream GET stream reaches stdout deep-equal.
+- `B10.events_forwarded`: `tealbrick/events/stream` reaches the upstream (same id) and its answer comes back unchanged; a `notifications/tealbrick/event` frame (SSE `id:` = event id) on the subscribed GET stream reaches stdout as the whole JSON-RPC message, deep-equal.
 - `B10.events_last_event_id`: the upstream ends the GET stream; the relay's next `GET /mcp` carries `Last-Event-ID` = the last event id.
-- `B10.events_resubscribe`: the upstream forgets the session (404 on the idle GET); the relay sends `initialize`, then `tealbrick/events/stream` with `cursor` = the last event id, and writes no answer for its own requests to stdout.
+- `B10.events_resubscribe`: the upstream forgets every session (404); the relay sends `initialize`, then `tealbrick/events/stream` on the NEW session with `cursor` = the last event id, opens a GET on it, and the next event reaches stdout; the suite sends nothing meanwhile and the relay writes no answer of its own to stdout (no result/error, no second answer to an id).
+
+The fake upstream models sessions strictly for these rows: a session id it never issued, forgot or ended → 404; `tealbrick/events/stream` without a session → 400; event frames go only to GET streams of a subscribed session.
 
 ## 0.1.28 (spec 0.1.57, C274c, C274d): app events
 

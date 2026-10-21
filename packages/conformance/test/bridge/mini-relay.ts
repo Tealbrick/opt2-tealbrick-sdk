@@ -63,17 +63,19 @@ async function serve(): Promise<void> {
   let subscribed = false;
   let lastEvent = "";
   let gen = 0;
-  const post = (body: string) =>
-    fetch(`${item.bridgeUrl}/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${token}`, ...(session ? { "mcp-session-id": session } : {}), ...extra }, body });
+  const post = (body: string, withSession = true) =>
+    fetch(`${item.bridgeUrl}/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${token}`, ...(session && withSession ? { "mcp-session-id": session } : {}), ...extra }, body });
   /** the session is gone (404): a new one, and the event subscription again from the last event (unless broken) */
   const renew = async () => {
     session = "";
     const r = await post(initLine);
     session = r.headers.get("mcp-session-id") ?? "";
-    await r.body?.cancel();
+    // the client's own initialize (its id) answered again on stdout: a relay-own answer
+    if (broken === "leak-reinit") write(await r.json());
+    else await r.body?.cancel();
     await (await post(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }))).body?.cancel();
     if (subscribed && broken !== "no-resubscribe") {
-      const a = await post(JSON.stringify({ jsonrpc: "2.0", id: "relay-resub", method: "tealbrick/events/stream", params: lastEvent ? { cursor: lastEvent } : {} }));
+      const a = await post(JSON.stringify({ jsonrpc: "2.0", id: "relay-resub", method: "tealbrick/events/stream", params: lastEvent ? { cursor: lastEvent } : {} }), broken !== "resub-nosession");
       const answer = await a.json();
       if (broken === "leak-resub") write(answer);
     }
@@ -84,6 +86,7 @@ async function serve(): Promise<void> {
       if (r.status === 404) {
         await r.body?.cancel();
         await renew();
+        if (broken === "no-new-get") return;
         continue;
       }
       let buf = "";
@@ -95,7 +98,11 @@ async function serve(): Promise<void> {
           const id = lines.find((l) => l.startsWith("id:"))?.slice(3).trim();
           if (id) lastEvent = id;
           const data = lines.filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("");
-          if (data) write(JSON.parse(data));
+          if (!data) continue;
+          const msg = JSON.parse(data) as { method?: string; jsonrpc?: string; params?: unknown };
+          // changes the frame it forwards (keeps only params: drops jsonrpc)
+          if (broken === "mangle-event" && msg.method === "notifications/tealbrick/event") write({ method: msg.method, params: msg.params });
+          else write(msg);
         }
       }
       await new Promise((res) => setTimeout(res, 200));
@@ -111,7 +118,11 @@ async function serve(): Promise<void> {
       if (broken === "local" && m.method === "tools/call" && !listed.has(String(m.params?.name))) return write({ jsonrpc: "2.0", id: m.id, error: { code: -32602, message: "unknown tool" } });
       if (!token) await getToken();
       if (m.method === "initialize") initLine = line;
-      if (m.method === "tealbrick/events/stream") subscribed = true;
+      if (m.method === "tealbrick/events/stream") {
+        subscribed = true;
+        // answers the subscription itself instead of forwarding it
+        if (broken === "local-stream") return write({ jsonrpc: "2.0", id: m.id, result: { cursor: null, truncated: false } });
+      }
       let r = await post(line);
       if (r.status === 404 && m.method !== "initialize" && initLine) {
         await r.body?.cancel();

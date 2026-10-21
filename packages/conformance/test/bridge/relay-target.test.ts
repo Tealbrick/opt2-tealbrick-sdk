@@ -27,9 +27,14 @@ describe("relay target", () => {
     ["writes its token to disk", "disk", "B10.no_state_on_disk"],
     ["presents a person credential upstream", "person", "cred.p1.relay_rejects_person"],
     ["refuses unlisted tools locally", "local", "B10.no_local_checks"],
+    ["answers tealbrick/events/stream locally", "local-stream", "B10.events_forwarded"],
+    ["changes the event frame it forwards", "mangle-event", "B10.events_forwarded"],
     ["reconnects without Last-Event-ID", "no-last-event-id", "B10.events_last_event_id"],
     ["does not stream again after a lost session", "no-resubscribe", "B10.events_resubscribe"],
     ["writes its own re-subscribe answer to stdout", "leak-resub", "B10.events_resubscribe"],
+    ["re-sends the client's initialize and writes that answer to stdout", "leak-reinit", "B10.events_resubscribe"],
+    ["re-subscribes without the new session id", "resub-nosession", "B10.events_resubscribe"],
+    ["re-subscribes but opens no new GET stream", "no-new-get", "B10.events_resubscribe"],
   ];
   for (const [name, flag, id] of broken) {
     it(`fails a relay that ${name}`, async () => {
