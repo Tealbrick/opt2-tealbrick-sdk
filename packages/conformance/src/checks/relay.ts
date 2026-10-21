@@ -215,6 +215,53 @@ export async function runRelayChecks(x: RelayContext): Promise<void> {
     const got = await waitFor(() => peer.received.some((m) => m.method === "notifications/tools/list_changed"), T);
     return verdict(got, got ? "forwarded" : "not forwarded");
   });
+  // conformance 0.1.29 (BRIDGE §14.3 client duties; C274c S5): the relay keeps an app event subscription alive. Gated by
+  // what the fake upstream offers (C292 pattern), never by the relay's version.
+  const ev = { id: "01JCONF0EVENT0000000000001", origin: "01JCONF0EVENT0000000000001", type: "conformance.item.assigned", app: "conformance", at: "2026-10-21T00:00:00Z", subject: { kind: "issue", id: "iss_conformance" }, data: {} };
+  const noEvents = () => notRun("the fake upstream offers no tealbrick/events/* methods");
+  let streamId: number | undefined;
+  await s.run("B10.events_forwarded", "app event frames forwarded to stdio verbatim", "after tealbrick/events/stream, a notifications/tealbrick/event frame (SSE id = event id) on the upstream GET stream appears on stdout deep-equal", async () => {
+    if (!u.events) return noEvents();
+    const sub = await rpc("tealbrick/events/stream", {});
+    streamId = sub.id;
+    if (!(await waitFor(() => u.streams > 0, T))) return verdict(false, "the relay opened no notification stream");
+    u.notifyEvent(ev);
+    const got = await waitFor(() => peer.received.some((m) => m.method === "notifications/tealbrick/event"), T);
+    const frame = peer.received.find((m) => m.method === "notifications/tealbrick/event");
+    return verdict(got && same(isObj(frame?.params) ? frame.params.event : null, ev), got ? `forwarded; event ${same(isObj(frame?.params) ? frame.params.event : null, ev) ? "=" : "≠"} upstream` : "not forwarded");
+  });
+  await s.run("B10.events_last_event_id", "a GET reconnect carries Last-Event-ID", "the upstream ends the GET stream; the relay's next GET /mcp carries Last-Event-ID = the id of the last event frame", async () => {
+    if (!u.events) return noEvents();
+    if (streamId === undefined) return notRun("B10.events_forwarded did not subscribe");
+    const before = u.requests.length;
+    u.endStreams();
+    const again = await waitFor(() => u.requests.slice(before).some((r) => r.method === "GET" && r.path.split("?")[0] === "/mcp"), Math.max(T, 15_000));
+    const get = u.requests.slice(before).find((r) => r.method === "GET" && r.path.split("?")[0] === "/mcp");
+    return verdict(again && get?.headers["last-event-id"] === ev.id, again ? `reconnect Last-Event-ID ${JSON.stringify(get?.headers["last-event-id"] ?? null)}` : "no reconnect");
+  });
+  await s.run("B10.events_resubscribe", "a lost session → re-initialize + stream from the last event", "the upstream forgets the session (404 on the idle GET); the relay sends initialize, then tealbrick/events/stream with cursor = the last event id, and writes no answer to stdout for its own requests", async () => {
+    if (!u.events) return noEvents();
+    if (streamId === undefined) return notRun("B10.events_forwarded did not subscribe");
+    const before = u.requests.length;
+    const outBefore = peer.received.length;
+    u.forgetSessions();
+    const resub = () => u.requests.slice(before).find((r) => r.rpc === "tealbrick/events/stream");
+    const ok = await waitFor(() => !!resub(), Math.max(T, 20_000));
+    const r = resub();
+    let cursor: unknown = null;
+    try {
+      const p = (JSON.parse(r?.body ?? "{}") as { params?: { cursor?: unknown } }).params;
+      cursor = p?.cursor ?? null;
+    } catch {
+      cursor = null;
+    }
+    const reinit = u.requests.slice(before).findIndex((x) => x.rpc === "initialize");
+    const order = reinit >= 0 && !!r && u.requests.indexOf(r) > before + reinit;
+    await sleep(300);
+    const sentIds = new Set(Array.from({ length: id }, (_, i) => i + 1));
+    const foreign = peer.received.slice(outBefore).filter((m) => m.id !== undefined && !sentIds.has(m.id as number));
+    return verdict(ok && order && cursor === ev.id && foreign.length === 0, ok ? `re-initialized ${reinit >= 0 ? "yes" : "no"}, stream after it ${order}; cursor ${JSON.stringify(cursor)}; relay-own answers on stdout ${foreign.length}` : "no tealbrick/events/stream after the session was lost");
+  });
   await s.run("B10.stdio_only", "relay speaks stdio only (no listener)", "no TCP LISTEN or UDP socket in the relay's process tree", () => {
     const pids = processTree(peer.pids());
     let out = "";

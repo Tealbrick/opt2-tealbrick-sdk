@@ -25,6 +25,8 @@ export interface RunRelayOptions {
   loginCmd?: string;
   timeoutMs?: number;
   keepHome?: boolean;
+  /** conformance 0.1.29: false = the fake upstream offers no `tealbrick/events/*` (the B10.events_* rows are not_run); default true */
+  upstreamEvents?: boolean;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -102,6 +104,7 @@ export async function runRelayTarget(opts: RunRelayOptions): Promise<Report> {
   portal.bridgePublicUrl = upstream.url;
   const canary = `cnry${randomBytes(9).toString("hex")}`;
   cannedUpstream(upstream, canary);
+  upstream.events = opts.upstreamEvents !== false;
   const home = mkdtempSync(join(tmpdir(), "tb-conformance-relay-"));
   const heapDir = join(home, "cwd");
   for (const d of [join(home, ".config"), join(home, "tmp"), heapDir]) mkdirSync(d, { recursive: true });

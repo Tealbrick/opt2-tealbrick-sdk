@@ -1,6 +1,8 @@
 // Minimal stdio relay for the relay target's sensitivity tests (NOT the product relay): `login` runs the RFC 8628
 // device flow (scope agent) and stores the agent item in $XDG_CONFIG_HOME/tealbrick (file store); `serve` relays
-// JSON-RPC lines to the deployed bridge with a K5 from a jwt-bearer exchange. `--broken=<rule>` breaks one rule.
+// JSON-RPC lines to the deployed bridge with a K5 from a jwt-bearer exchange, keeps an app event subscription alive
+// (BRIDGE §14.3: Last-Event-ID on a GET reconnect; a lost session → re-initialize + stream from the last event).
+// `--broken=<rule>` breaks one rule.
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
@@ -57,16 +59,46 @@ async function serve(): Promise<void> {
     if (broken === "disk") writeFileSync(join(process.env.TMPDIR ?? ".", "relay-cache.json"), JSON.stringify({ token, at: ulid() }));
   };
   const write = (m: unknown) => process.stdout.write(`${JSON.stringify(m)}\n`);
-  const listenSse = async () => {
-    const r = await fetch(`${item.bridgeUrl}/mcp`, { headers: { accept: "text/event-stream", authorization: `Bearer ${token}`, "mcp-session-id": session } });
-    let buf = "";
-    for await (const chunk of r.body as unknown as AsyncIterable<Uint8Array>) {
-      buf += Buffer.from(chunk).toString("utf8");
-      for (let i = buf.indexOf("\n\n"); i >= 0; i = buf.indexOf("\n\n")) {
-        const data = buf.slice(0, i).split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("");
-        buf = buf.slice(i + 2);
-        if (data) write(JSON.parse(data));
+  let initLine = "";
+  let subscribed = false;
+  let lastEvent = "";
+  let gen = 0;
+  const post = (body: string) =>
+    fetch(`${item.bridgeUrl}/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${token}`, ...(session ? { "mcp-session-id": session } : {}), ...extra }, body });
+  /** the session is gone (404): a new one, and the event subscription again from the last event (unless broken) */
+  const renew = async () => {
+    session = "";
+    const r = await post(initLine);
+    session = r.headers.get("mcp-session-id") ?? "";
+    await r.body?.cancel();
+    await (await post(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }))).body?.cancel();
+    if (subscribed && broken !== "no-resubscribe") {
+      const a = await post(JSON.stringify({ jsonrpc: "2.0", id: "relay-resub", method: "tealbrick/events/stream", params: lastEvent ? { cursor: lastEvent } : {} }));
+      const answer = await a.json();
+      if (broken === "leak-resub") write(answer);
+    }
+  };
+  const listenSse = async (mine: number) => {
+    while (mine === gen) {
+      const r = await fetch(`${item.bridgeUrl}/mcp`, { headers: { accept: "text/event-stream", authorization: `Bearer ${token}`, "mcp-session-id": session, ...(lastEvent && broken !== "no-last-event-id" ? { "last-event-id": lastEvent } : {}) } });
+      if (r.status === 404) {
+        await r.body?.cancel();
+        await renew();
+        continue;
       }
+      let buf = "";
+      for await (const chunk of r.body as unknown as AsyncIterable<Uint8Array>) {
+        buf += Buffer.from(chunk).toString("utf8");
+        for (let i = buf.indexOf("\n\n"); i >= 0; i = buf.indexOf("\n\n")) {
+          const lines = buf.slice(0, i).split("\n");
+          buf = buf.slice(i + 2);
+          const id = lines.find((l) => l.startsWith("id:"))?.slice(3).trim();
+          if (id) lastEvent = id;
+          const data = lines.filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("");
+          if (data) write(JSON.parse(data));
+        }
+      }
+      await new Promise((res) => setTimeout(res, 200));
     }
   };
   const listed = new Set<string>();
@@ -78,10 +110,18 @@ async function serve(): Promise<void> {
     try {
       if (broken === "local" && m.method === "tools/call" && !listed.has(String(m.params?.name))) return write({ jsonrpc: "2.0", id: m.id, error: { code: -32602, message: "unknown tool" } });
       if (!token) await getToken();
-      const r = await fetch(`${item.bridgeUrl}/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${token}`, ...(session ? { "mcp-session-id": session } : {}), ...extra }, body: line });
+      if (m.method === "initialize") initLine = line;
+      if (m.method === "tealbrick/events/stream") subscribed = true;
+      let r = await post(line);
+      if (r.status === 404 && m.method !== "initialize" && initLine) {
+        await r.body?.cancel();
+        await renew();
+        r = await post(line);
+      }
       if (m.method === "initialize") {
         session = r.headers.get("mcp-session-id") ?? "";
-        void listenSse().catch(() => undefined);
+        gen += 1;
+        void listenSse(gen).catch(() => undefined);
       }
       if (r.status === 202) return;
       if (r.status === 401) return write({ jsonrpc: "2.0", id: m.id, error: { code: -32001, message: "agent connection refused" } });

@@ -36,6 +36,10 @@ export class FakeUpstream {
   unknownToolResult: Record<string, unknown> = {};
   /** connection revoked / unknown: jwt-bearer refused and every K5 rejected */
   refuseAll = false;
+  /** conformance 0.1.29 (BRIDGE §14.3): this upstream offers `tealbrick/events/*` (the relay B10.events_* rows run only then) */
+  events = true;
+  /** a forgotten session answers 404 on GET and POST (a bridge restart); `forgetSessions()` sets it */
+  readonly #forgotten = new Set<string>();
   #key!: Ed25519KeyPair;
   readonly #connections: () => readonly ConnectionEntry[];
   readonly #replay = memoryReplayGuard();
@@ -58,6 +62,25 @@ export class FakeUpstream {
 
   get streams(): number {
     return this.#streams.size;
+  }
+
+  /** Sends one app event frame (`id:` = the event id, BRIDGE §14.3) on every open GET stream. */
+  notifyEvent(event: Record<string, unknown> & { id: string }): void {
+    const frame = { jsonrpc: "2.0", method: "notifications/tealbrick/event", params: { event } };
+    for (const s of this.#streams) s.write(`id: ${event.id}\nevent: message\ndata: ${JSON.stringify(frame)}\n\n`);
+  }
+
+  /** Ends every open GET stream (a proxy idle cut): the relay reconnects. */
+  endStreams(): void {
+    for (const s of this.#streams) s.end();
+    this.#streams.clear();
+  }
+
+  /** The bridge restarted: every current session is unknown from now on (404), new ones work. */
+  forgetSessions(): void {
+    for (const sid of this.#sessions) this.#forgotten.add(sid);
+    this.#sessions.clear();
+    this.endStreams();
   }
 
   /** Sends a JSON-RPC notification on every open GET stream. */
@@ -86,6 +109,7 @@ export class FakeUpstream {
       res.end(JSON.stringify({ error: { code: "unauthenticated", message: "agent session required", requestId: "req_fake" } }));
       return;
     }
+    if (this.#forgotten.has(header(req, "mcp-session-id") ?? "")) return sendJson(res, 404, { jsonrpc: "2.0", id: null, error: { code: -32001, message: "unknown session" } });
     if (req.method === "GET") {
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
       res.write(": open\n\n");
@@ -114,6 +138,8 @@ export class FakeUpstream {
       extra["mcp-session-id"] = sid;
       result = this.initializeResult;
     } else if (msg.method === "tools/list") result = this.toolsList;
+    else if (this.events && msg.method === "tealbrick/events/stream") result = { cursor: isObj(msg.params) && typeof msg.params.cursor === "string" ? msg.params.cursor : null, truncated: false };
+    else if (!this.events && typeof msg.method === "string" && msg.method.startsWith("tealbrick/events/")) return sendJson(res, 200, { jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: `method not found: ${msg.method}` } }, extra);
     else if (msg.method === "tools/call") {
       const name = isObj(msg.params) ? String(msg.params.name) : "";
       result = this.toolResults.get(name) ?? this.unknownToolResult;
