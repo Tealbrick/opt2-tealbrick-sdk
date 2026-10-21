@@ -286,6 +286,104 @@ export async function runManifestChecks(json: unknown, opts: ManifestCheckOption
     return verdict(off.length === 0, off.length ? `unknown/invalid: ${off.join(",")}` : `${whens.length} conditions ok`);
   });
 
+  // ── M-EV app events (conformance 0.1.28, spec 0.1.57, MANIFEST §16): the manifest's own events re-asserted, then the ONE
+  // validator must refuse a mutated copy with the rule's code (a probe agent op + a probe event are added to the copy) ──
+  const events = (): Record<string, unknown>[] => {
+    const e = (json as { events?: unknown } | null)?.events;
+    return Array.isArray(e) ? e.filter((x): x is Record<string, unknown> => !!x && typeof x === "object" && !Array.isArray(x)) : [];
+  };
+  const probeEvent = (over: Record<string, unknown> = {}) => ({
+    name: "conformance.probe",
+    title: "Conformance probe event",
+    payloadSchema: { type: "object", additionalProperties: false, properties: { id: { type: "string" } } },
+    visibleWith: "conformance_probe",
+    audience: "granted",
+    ...over,
+  });
+  const withProbeEvents = (evs: Record<string, unknown>[], over: Record<string, unknown> = {}) =>
+    validateManifest({ ...clone(m), ...over, operations: [...clone((m as Manifest).operations), probeOp({})], events: evs });
+  const evRefused = (r: ReturnType<typeof validateManifest>, rule: string, code: string) => !r.ok && r.errors.some((e) => e.rule === rule && e.code === code);
+  const evShow = (r: ReturnType<typeof validateManifest>) => (r.ok ? "accepted" : [...new Set(r.errors.map((e) => `${e.rule}/${e.code}`))].join(","));
+  const evOwn = (check: (e: Record<string, unknown>, i: number) => string | null): string[] =>
+    events()
+      .map((e, i) => check(e, i))
+      .filter((x): x is string => x !== null);
+  const evRow = async (id: string, title: string, asserted: string, own: () => string[], probes: () => { label: string; r: ReturnType<typeof validateManifest>; rule: string; code: string }[]) => {
+    await s.run(id, title, asserted, () => {
+      if (!m) return bad("manifest invalid");
+      const off = own();
+      if (off.length) return bad(`the manifest's events: ${off.join("; ")}`);
+      const valid = withProbeEvents([probeEvent()]);
+      if (!valid.ok) return bad(`the validator refuses a VALID probe event: ${evShow(valid)}`);
+      const p = probes();
+      const missed = p.filter((x) => !evRefused(x.r, x.rule, x.code));
+      const n = events().length;
+      return verdict(missed.length === 0, missed.length ? `validator did not refuse: ${missed.map((x) => `${x.label} (${evShow(x.r)})`).join("; ")}` : `${n ? `${n} declared event(s) ok` : "no events declared"}; validator refuses ${p.map((x) => x.label).join(", ")}`);
+    });
+  };
+  const EV_NAME = /^(?!tb\.)[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/;
+  await evRow(
+    "M-EV-1",
+    "event names unique, pattern, never tb.; a manifest tb declares none (M-EV-1)",
+    "every events[].name matches ^(?!tb\\.)[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$ (≤ 64), names unique, no events when id is tb; validateManifest refuses a duplicate name, a tb.* name and events in a manifest tb (event_name_invalid)",
+    () => {
+      const names = events().map((e) => String(e.name));
+      const off = evOwn((e) => (typeof e.name !== "string" || e.name.length > 64 || !EV_NAME.test(e.name) ? `name ${String(e.name)}` : null));
+      const dup = names.filter((x, i) => names.indexOf(x) !== i);
+      if (dup.length) off.push(`duplicate ${dup.join(",")}`);
+      if (m?.id === "tb" && names.length) off.push("a manifest tb declares events");
+      return off;
+    },
+    () => [
+      { label: "a duplicate name", r: withProbeEvents([probeEvent(), probeEvent()]), rule: "M-EV-1", code: "event_name_invalid" },
+      { label: "tb.hold.decided", r: withProbeEvents([probeEvent({ name: "tb.hold.decided" })]), rule: "M-EV-1", code: "event_name_invalid" },
+      { label: "events in a manifest tb", r: withProbeEvents([probeEvent()], { id: "tb" }), rule: "M-EV-1", code: "event_name_invalid" },
+    ],
+  );
+  await evRow(
+    "M-EV-2",
+    "payloadSchema: object root, strict compile, ≤ 8 KiB, M-OP-8 limits (M-EV-2)",
+    "every events[].payloadSchema has type object, is ≤ 8 KiB (JCS) and has no $id / remote $ref / contentEncoding / contentMediaType; validateManifest refuses an array root, an unknown keyword (strict) and a $id (event_schema_invalid)",
+    () =>
+      evOwn((e) => {
+        const ps = e.payloadSchema as Record<string, unknown> | undefined;
+        if (ps?.type !== "object") return `${String(e.name)}: root type ${String(ps?.type)}`;
+        if (Buffer.byteLength(JSON.stringify(ps)) > 8192) return `${String(e.name)}: over 8 KiB`;
+        const text = JSON.stringify(ps);
+        if (/"\$id"|"contentEncoding"|"contentMediaType"/.test(text) || /"\$ref":"(?!#)/.test(text)) return `${String(e.name)}: a keyword M-OP-8 forbids`;
+        return null;
+      }),
+    () => [
+      { label: "an array root", r: withProbeEvents([probeEvent({ payloadSchema: { type: "array" } })]), rule: "M-EV-2", code: "event_schema_invalid" },
+      { label: "an unknown keyword", r: withProbeEvents([probeEvent({ payloadSchema: { type: "object", properties: { id: { type: "string", conformanceUnknown: 1 } } } })]), rule: "M-EV-2", code: "event_schema_invalid" },
+      { label: "a $id", r: withProbeEvents([probeEvent({ payloadSchema: { type: "object", $id: "urn:conformance" } })]), rule: "M-EV-2", code: "event_schema_invalid" },
+    ],
+  );
+  await evRow(
+    "M-EV-3",
+    "visibleWith = an agent op of the manifest, not dynamic (M-EV-3)",
+    "every events[].visibleWith names an operation of the manifest with audience agent and no dynamic; validateManifest refuses an unknown op and a person op (event_visible_with_invalid)",
+    () =>
+      evOwn((e) => {
+        const op = m?.operations.find((o) => o.id === e.visibleWith);
+        return op?.audience !== "agent" || op.dynamic ? `${String(e.name)}: visibleWith ${String(e.visibleWith)}` : null;
+      }),
+    () => {
+      const person = m?.operations.find((o) => o.audience === "person")?.id;
+      return [
+        { label: "an unknown op", r: withProbeEvents([probeEvent({ visibleWith: "conformance_missing" })]), rule: "M-EV-3", code: "event_visible_with_invalid" },
+        ...(person ? [{ label: `the person op ${person}`, r: withProbeEvents([probeEvent({ visibleWith: person })]), rule: "M-EV-3", code: "event_visible_with_invalid" }] : []),
+      ];
+    },
+  );
+  await evRow(
+    "M-EV-4",
+    "no top-level summary in a payloadSchema (M-EV-4)",
+    "no events[].payloadSchema.properties.summary (the summary travels in the envelope); validateManifest refuses one (event_schema_invalid, rule M-EV-4)",
+    () => evOwn((e) => (Object.hasOwn((e.payloadSchema as { properties?: object } | undefined)?.properties ?? {}, "summary") ? `${String(e.name)}: properties.summary` : null)),
+    () => [{ label: "properties.summary", r: withProbeEvents([probeEvent({ payloadSchema: { type: "object", properties: { summary: { type: "string" } } } })]), rule: "M-EV-4", code: "event_schema_invalid" }],
+  );
+
   // ── M3 digest ──
   await s.run("M3", "digest = sha256(JCS) reproducible", "manifestDigest stable across runs, key order and JSON round-trip", () => {
     if (!m) return bad("manifest invalid");

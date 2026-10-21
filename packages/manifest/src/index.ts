@@ -4,6 +4,7 @@ export * from "./agent-document.ts";
 export * from "./conditions.ts";
 export * from "./cron.ts";
 export * from "./decision.ts";
+export * from "./events.ts";
 export * from "./handles.ts";
 export * from "./hooks.ts";
 export * from "./jcs.ts";

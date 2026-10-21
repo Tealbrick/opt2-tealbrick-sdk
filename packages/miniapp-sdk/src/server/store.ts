@@ -182,6 +182,16 @@ INSERT INTO tb_cap_usage (id, caller_id, effect, op, state, created_at)
     sql: "ALTER TABLE tb_scopes ADD COLUMN crud_snapshot TEXT;",
     after: backfillCrudSnapshots,
   },
+  {
+    // v0.1.38 (C274c/C274d, spec 0.1.57, SDK-API §20): THE transactional outbox of app events. `ctx.emit` / `ctx.purgeEvents` (and the
+    // SDK's purge and tb.hold.decided rows) INSERT one row with the raw handle of the same connection, so a row shares ONLY the fate
+    // of the transaction that is open. `id` = ULID (drain order), `kind` = emit | purge, `key` = the ingest idempotency key (a NEW
+    // ULID made at emit unless the app gives one; not the row id), `body` = the ingest item as JSON without `eligible` (computed at
+    // send time). The sender deletes a row once the bridge answered stored, duplicate or refused; unsent rows go after 7 days.
+    version: 11,
+    name: "sdk_event_outbox",
+    sql: "CREATE TABLE tb_event_outbox (id TEXT PRIMARY KEY, kind TEXT NOT NULL, key TEXT NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL) STRICT;\nCREATE INDEX tb_event_outbox_age ON tb_event_outbox (created_at);",
+  },
 ];
 
 function sha256(text: string | Uint8Array): string {

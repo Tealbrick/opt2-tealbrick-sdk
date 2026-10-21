@@ -38,6 +38,9 @@ export const BRIDGE_FEATURES = [
   { feature: "dynamic_ops", minBridge: "0.1.15", why: "dynamic tool search needs the C91 catalog proof binding" },
   { feature: "wildcard_companion", minBridge: "0.1.16", why: "companion product \"*\" (tb.holds_pending, C82)" },
   { feature: "holds_pending_companion", minBridge: "0.1.16", why: "tb.holds_pending as a companion op (G4)" },
+  // v0.1.30 (spec 0.1.57, MANIFEST §16.3): a manifest with `events` (also an empty list: an older validator refuses the key) needs
+  // a bridge that pins manifest >= 0.1.30 and declares the `events` cap; bridge 0.2.7 is the first
+  { feature: "events", minBridge: "0.2.7", why: "app events (C274)" },
   // C111a: op-limited Free grants (wf + caps) need the Free-wf gate (bridge 0.1.19 = manifest 0.1.12). A grant property, not a
   // manifest feature: Core checks it per workspace bridge before minting such grants (MIN_BRIDGE_FREE_WF).
 ] as const;
@@ -46,6 +49,7 @@ type ManifestLike = {
   operations?: readonly { dynamic?: unknown }[];
   companions?: readonly { product: string; operations: readonly string[] }[];
   requires?: { bridge?: string };
+  events?: readonly unknown[];
 };
 
 /**
@@ -59,6 +63,7 @@ export function requiredBridgeVersion(m: ManifestLike): { bridge: string | null;
     if (c.product === "*") used.add("wildcard_companion");
     if (c.operations.includes("tb.holds_pending")) used.add("holds_pending_companion");
   }
+  if (m.events !== undefined) used.add("events");
   let bridge: string | null = null;
   const reasons: string[] = [];
   const bump = (v: string, why: string) => {

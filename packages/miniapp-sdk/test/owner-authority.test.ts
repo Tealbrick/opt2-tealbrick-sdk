@@ -586,7 +586,7 @@ describe("C283 A1: SDK schema 8 sdk_scope_authority + schema 9 sdk_receipt_admit
       ins.run("agt_default_row", "read", "default", null);
       ins.run("agt_null_source", "read", null, null);
       const applied = applySdkMigrations(db as never);
-      assert.deepEqual(applied.map((m) => `${m.version}:${m.name}`), ["8:sdk_scope_authority", "9:sdk_receipt_admitted_by", "10:sdk_scope_crud_snapshot"]);
+      assert.deepEqual(applied.map((m) => `${m.version}:${m.name}`), ["8:sdk_scope_authority", "9:sdk_receipt_admitted_by", "10:sdk_scope_crud_snapshot", "11:sdk_event_outbox"]);
       assert.equal(storedSchema(db as never).sdk, SDK_SCHEMA);
       const rows = db.prepare("SELECT agent, source, authority, access FROM tb_scopes ORDER BY agent").all() as { agent: string; source: string | null; authority: string; access: string }[];
       assert.equal(rows.length, 4);
@@ -1095,8 +1095,9 @@ describe("C283b/c: SDK schema 10 sdk_scope_crud_snapshot (backfill, once, audite
       fill(db);
       const m = manifestFor(1);
       const applied = applySdkMigrations(db as never, undefined, { manifest: m });
-      assert.deepEqual(applied.map((x) => `${x.version}:${x.name}`), ["10:sdk_scope_crud_snapshot"]);
-      assert.equal(SDK_SCHEMA, 10);
+      // v0.1.38: schema 11 (sdk_event_outbox) follows in the same run
+      assert.deepEqual(applied.map((x) => `${x.version}:${x.name}`), ["10:sdk_scope_crud_snapshot", "11:sdk_event_outbox"]);
+      assert.equal(SDK_SCHEMA, 11);
       const rows = (db.prepare("SELECT agent, crud_snapshot AS c FROM tb_scopes ORDER BY agent").all() as { agent: string; c: string | null }[]).map((r) => ({ agent: r.agent, c: r.c }));
       assert.deepEqual(rows, [
         { agent: "agt_app", c: null },
@@ -1189,7 +1190,7 @@ describe("C283b/c: SDK schema 10 sdk_scope_crud_snapshot (backfill, once, audite
       try {
         const db2 = schema9(t2.dir);
         db2.prepare("INSERT INTO tb_scopes (agent, type, instance_id, access, source, authority) VALUES ('agt_b', 'notebook', 'a', 'read', 'default', 'bounded')").run();
-        assert.deepEqual(applySdkMigrations(db2 as never).map((x) => x.version), [10]);
+        assert.deepEqual(applySdkMigrations(db2 as never).map((x) => x.version), [10, 11]);
         db2.close();
       } finally {
         t2.cleanup();

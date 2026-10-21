@@ -34,6 +34,8 @@ export interface BridgeHarness {
   groups: ReadonlySet<string> | null;
   /** C91 group real_app: SDK module to start the real app with (default: the installed @opt2-tealbrick/miniapp-sdk) */
   sdkModule?: string;
+  /** conformance 0.1.28 (B-EV-8/11): time budget of the volume rows (the 10 100-event flood); default 300 000 ms */
+  eventVolumeBudgetMs?: number;
 }
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

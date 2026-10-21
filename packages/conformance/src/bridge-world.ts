@@ -76,6 +76,48 @@ const peerOp = (id: string, crud: CrudAction[], audience: "agent" | "person"): O
   audience,
 });
 
+/** conformance 0.1.28 (B-EV): the unscoped agent read op every event app adds (the visibleWith of its unscoped events). */
+export const EVENT_READ_OP = "conf_event_read";
+/** conformance 0.1.28: the before hook of an event app on EVENT_READ_OP (rule 6: it strips the summary while enabled). */
+export const EVENT_HOOK_ID = "conf_event_hook";
+
+/**
+ * conformance 0.1.28 (B-EV, BRIDGE §14): an app derived from `base` with id `product` that DECLARES events (`events: true`) or
+ * none (the product `tb` app): runtime services, settings, skills, hooks and companions dropped; one unscoped agent read op
+ * added; events `conf.ping` (unscoped, granted), `conf.target` (unscoped, target) and `conf.scoped` (scoped: visibleWith = the
+ * first scoped agent read op of `base`, when it has one); one before hook on the read op. Null when the result does not
+ * validate (the B-EV rows then report not_run).
+ */
+export function eventManifest(base: Manifest, product: string, events: boolean): Manifest | null {
+  const m = JSON.parse(JSON.stringify(base)) as Manifest & Record<string, unknown>;
+  m.id = product;
+  m.name = `Conformance events ${product}`.slice(0, 60);
+  delete m.settings;
+  delete m.skills;
+  delete m.hooks;
+  delete m.companions;
+  delete m.contracts;
+  delete m.publicRoutes;
+  delete m.artifacts;
+  delete m.unlocks;
+  delete m.requires;
+  m.runtime = { ...m.runtime, env: (m.runtime.env ?? []).filter((e) => !("setting" in e) && !(typeof (e as { value?: unknown }).value === "string" && String((e as { value?: unknown }).value).includes("{"))) };
+  delete (m.runtime as { services?: unknown }).services;
+  m.operations = m.operations.filter((o) => !o.dynamic);
+  m.operations.push({ ...peerOp(EVENT_READ_OP, ["read"], "agent"), title: "Conformance event read" });
+  if (events) {
+    const scopedRead = m.operations.find((o) => o.audience === "agent" && o.scopeType !== undefined && o.crud.length === 1 && o.crud[0] === "read");
+    const payload = { type: "object", additionalProperties: false, required: ["n"], properties: { n: { type: "integer" } } } as const;
+    m.events = [
+      { name: "conf.ping", title: "Conformance ping", payloadSchema: payload as never, visibleWith: EVENT_READ_OP, audience: "granted" },
+      { name: "conf.target", title: "Conformance target", payloadSchema: payload as never, visibleWith: EVENT_READ_OP, audience: "target" },
+      ...(scopedRead ? [{ name: "conf.scoped", title: "Conformance scoped", payloadSchema: payload as never, visibleWith: scopedRead.id, audience: "granted" as const }] : []),
+    ];
+    m.hooks = [{ id: EVENT_HOOK_ID, title: "Conformance event hook", phase: "before", order: 50, match: { products: [product], operations: [EVENT_READ_OP] } }] as Manifest["hooks"];
+  }
+  return validateManifest(m).ok ? m : null;
+}
+
 /**
  * Peer app derived from `base.companions[0]`: id = the companion product, one agent op per companion op, a plain read
  * op outside the companion workflow, two person ops, a list-mode and a search-mode dynamic op, hooks in all three
@@ -233,6 +275,14 @@ export class BridgeWorld {
    * bound (config instanceKeys) once the bridge reported its claim — as Core binds a claimed key.
    */
   realApp: { ins: InstanceId; manifest: Manifest; digest: string; url: string; jwk: Ed25519PublicJwk | null; listed: boolean } | null = null;
+  /**
+   * conformance 0.1.28 (B-EV, BRIDGE §14): two apps that DECLARE events (`a`, `b`) and one app with product `tb`, created with the
+   * world (their origins are on TB_OWN_INFRA_ORIGINS) but listed in the config only once the bridge declared the `events` cap
+   * (`eventAppsListed`): a bridge without the cap would refuse a manifest with `events` at claim. null when the derived
+   * manifests do not validate.
+   */
+  eventApps: { a: FakeApp; b: FakeApp; tb: FakeApp } | null = null;
+  eventAppsListed = false;
 
   private constructor(portal: FakePortal, stranger: Ed25519KeyPair) {
     this.portal = portal;
@@ -264,6 +314,10 @@ export class BridgeWorld {
       w.peer.marker = w.canary;
       w.apps.push(w.peer);
     }
+    const ma = eventManifest(manifests[0] as Manifest, "tbconf-events-a", true);
+    const mb = eventManifest(manifests[0] as Manifest, "tbconf-events-b", true);
+    const mt = eventManifest(manifests[0] as Manifest, "tb", false);
+    if (ma && mb && mt) w.eventApps = { a: await FakeApp.create(ma, adapter), b: await FakeApp.create(mb, adapter), tb: await FakeApp.create(mt, adapter) };
     await w.#agents();
     return w;
   }
@@ -383,7 +437,13 @@ export class BridgeWorld {
 
   /** Origins of the fake apps (they run on the suite's own host: own infrastructure, BRIDGE §5.7). */
   ownInfraOrigins(): string[] {
-    return [...this.apps.map((a) => new URL(a.url).origin), ...(this.realAppPort ? [`http://127.0.0.1:${this.realAppPort}`] : [])];
+    const ev = this.eventApps ? [this.eventApps.a, this.eventApps.b, this.eventApps.tb] : [];
+    return [...[...this.apps, ...ev].map((a) => new URL(a.url).origin), ...(this.realAppPort ? [`http://127.0.0.1:${this.realAppPort}`] : [])];
+  }
+
+  /** The event apps when listed (config apps[], instanceKeys, hooks), else []. */
+  listedEventApps(): FakeApp[] {
+    return this.eventApps && this.eventAppsListed ? [this.eventApps.a, this.eventApps.b, this.eventApps.tb] : [];
   }
 
   /** The current config grant JWS for (role, app). */
@@ -404,7 +464,7 @@ export class BridgeWorld {
       if (state === "absent") return;
       out.push({ id, ins, product: product as HookEntry["product"], hookId: h.id, phase: h.phase, order: h.order, timeoutMs: h.timeoutMs ?? 2000, match: h.match, enabled: this.hooksOn && state !== "disabled" });
     };
-    for (const a of this.apps) for (const h of a.manifest.hooks ?? []) add(a.ins, a.product, h);
+    for (const a of [...this.apps, ...this.listedEventApps()]) for (const h of a.manifest.hooks ?? []) add(a.ins, a.product, h);
     // the listed real SDK app's hooks (B25.real_hook_hold: a REAL before hook answering a hold verdict)
     const real = this.realApp?.listed ? this.realApp : null;
     if (real) for (const h of real.manifest.hooks ?? []) add(real.ins, real.manifest.id, h);
@@ -493,7 +553,7 @@ export class BridgeWorld {
     const pause = { workspace: p.pause.workspace, agents: [...p.pause.agents], instances: [...p.pause.instances] };
     const revoked = { jtis: p.revoked.map((r) => ({ jti: r.jti, exp: r.exp })) };
     const apps: AppEntry[] = [];
-    const entries: { ins: InstanceId; product: string; manifest: Manifest; digest: string; url: string }[] = [...this.apps, ...(real ? [{ ...real, product: real.manifest.id }] : [])];
+    const entries: { ins: InstanceId; product: string; manifest: Manifest; digest: string; url: string }[] = [...this.apps, ...this.listedEventApps(), ...(real ? [{ ...real, product: real.manifest.id }] : [])];
     for (const a of entries) {
       const slice = await signSlice(
         {
@@ -542,7 +602,7 @@ export class BridgeWorld {
       bridge: { id: p.bridgeId, publicUrl: this.advertisedUrl },
       portalKeys,
       ...(portalKeySet ? { portalKeySet } : {}),
-      instanceKeys: [...this.apps.map((a) => ({ ins: a.ins, jwk: a.key.publicJwk })), ...(this.realApp?.jwk ? [{ ins: this.realApp.ins, jwk: this.realApp.jwk }] : [])],
+      instanceKeys: [...[...this.apps, ...this.listedEventApps()].map((a) => ({ ins: a.ins, jwk: a.key.publicJwk })), ...(this.realApp?.jwk ? [{ ins: this.realApp.ins, jwk: this.realApp.jwk }] : [])],
       grants: [...this.grants.values()],
       apps,
       hooks: this.hookEntries(),
@@ -621,7 +681,7 @@ export class BridgeWorld {
   }
 
   async close(): Promise<void> {
-    await Promise.all(this.apps.map((a) => a.close()));
+    await Promise.all([...this.apps, ...(this.eventApps ? [this.eventApps.a, this.eventApps.b, this.eventApps.tb] : [])].map((a) => a.close()));
     await this.portal.close();
   }
 }

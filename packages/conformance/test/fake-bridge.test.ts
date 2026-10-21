@@ -174,7 +174,69 @@ describe("fake bridge: claim", () => {
     const h = { "TB-Assert": assertion };
     await fetch(`${b.url}/tb/v1/keys/SAMPLE_API_KEY`, { headers: h });
     assert.equal((await fetch(`${b.url}/tb/v1/keys/SAMPLE_API_KEY`, { headers: h })).status, 401);
-    for (const p of ["/mcp", "/tb/v1/unknown", "/keys", "/admin/v1/pause"]) assert.equal((await fetch(b.url + p, { method: "POST" })).status, 404, p);
+    for (const p of ["/tb/v1/unknown", "/keys", "/admin/v1/pause"]) assert.equal((await fetch(b.url + p, { method: "POST" })).status, 404, p);
+    // conformance 0.1.28: /mcp serves the tealbrick/events/* methods to a slice agent only (fake authentication)
+    assert.equal((await fetch(`${b.url}/mcp`, { method: "POST" })).status, 401);
+  });
+});
+
+describe("fake bridge: app events (conformance 0.1.28, BRIDGE §14)", () => {
+  // the sample manifest with one unscoped (granted) and one scoped event
+  const m = structuredClone(manifest);
+  const unscoped = m.operations.find((o) => o.audience === "agent" && !o.scopeType && !o.dynamic);
+  m.operations.push({ id: "ev_read", title: "Read", description: "Read.", input: { type: "object" }, output: { type: "object" }, crud: ["read"], effect: "read", idempotency: "none", receipt: false, audience: "agent" } as Manifest["operations"][number]);
+  m.events = [
+    { name: "x.ping", title: "Ping", payloadSchema: { type: "object", properties: { n: { type: "integer" } } }, visibleWith: unscoped?.id ?? "ev_read", audience: "granted" },
+    { name: "x.scoped", title: "Scoped", payloadSchema: { type: "object" }, visibleWith: "item_get", audience: "granted" },
+  ];
+  let b: FakeBridge;
+  let key: Ed25519KeyPair;
+  before(async () => {
+    b = await createFakeBridge({ manifest: m, maxWaitS: 1 });
+    key = await generateKeyPair();
+    assert.equal((await post(`${b.url}/tb/v1/claim`, claimBody(b, key, { manifestDigest: manifestDigest(m) }))).status, 200);
+  });
+  after(() => b.close());
+  const it1 = (o: Record<string, unknown>) => ({ kind: "emit", key: `k-${Math.random().toString(36).slice(2, 12)}`, name: "x.ping", at: new Date().toISOString(), subject: { kind: "x", id: "1" }, data: { n: 1 }, ...o });
+  const rpc = async (agent: string, method: string, params: Record<string, unknown> = {}) => {
+    const res = await fetch(`${b.url}/mcp`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${agent}` }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
+    return (await res.json()) as { result?: Record<string, unknown>; error?: { code: number; data?: { code?: string } } };
+  };
+
+  it("ingest checks in order, fan-out to the slice agents, dedupe, refusals, poll with cursor", async () => {
+    const [x, y] = b.ids.agents;
+    const r = await signed(b, key, "POST", "/tb/v1/events", {
+      items: [it1({ key: "dup-key-0001", causedBy: x?.id }), it1({ key: "dup-key-0001" }), it1({ name: "x.unknown" }), it1({ name: "tb.custom" }), it1({ data: { n: "x" } }), it1({ name: "x.scoped" })],
+    });
+    assert.equal(r.status, 200);
+    assert.deepEqual(
+      (r.body.results as { status: string; code?: string }[]).map((z) => `${z.status}${z.code ? ` ${z.code}` : ""}`),
+      ["stored", "duplicate", "refused event_undeclared", "refused event_reserved", "refused event_payload_invalid", "refused event_instance_invalid"],
+    );
+    const px = await rpc(x?.id as string, "tealbrick/events/poll");
+    const py = await rpc(y?.id as string, "tealbrick/events/poll");
+    assert.equal(((px.result?.events ?? []) as unknown[]).length, 0, "the causing agent gets nothing");
+    const ev = ((py.result?.events ?? []) as { type: string; origin: string; id: string }[])[0];
+    assert.equal(ev?.type, `${m.id}.x.ping`);
+    assert.equal(ev?.origin, ev?.id);
+    const again = await rpc(y?.id as string, "tealbrick/events/poll", { cursor: py.result?.cursor });
+    assert.equal(((again.result?.events ?? []) as unknown[]).length, 0);
+    assert.equal((await rpc(y?.id as string, "tealbrick/events/poll", { cursor: "not-a-ulid" })).error?.data?.code, "cursor_invalid");
+    const list = await rpc(y?.id as string, "tealbrick/events/list");
+    assert.ok(((list.result?.types ?? []) as { type: string }[]).some((t) => t.type === "tb.hold.decided"));
+    // specs#33: [P, E2] stored, the answer lost, the same batch again → both duplicate, E2 still stored (the purge is not re-applied)
+    const yid = y?.id as string;
+    const before = await rpc(yid, "tealbrick/events/poll", { cursor: again.result?.cursor });
+    const batch = { items: [{ kind: "purge", key: "purge-key-replay1", agent: yid, instanceId: "sp1" }, it1({ key: "e2-key-replay-1", name: "x.scoped", instanceId: "sp1", eligible: [{ agent: yid, authority: "bounded" }], data: {} })] };
+    const first = await signed(b, key, "POST", "/tb/v1/events", batch);
+    const retry = await signed(b, key, "POST", "/tb/v1/events", batch);
+    assert.deepEqual((first.body.results as { status: string }[]).map((z) => z.status), ["stored", "stored"]);
+    assert.deepEqual((retry.body.results as { status: string }[]).map((z) => z.status), ["duplicate", "duplicate"]);
+    const after = await rpc(yid, "tealbrick/events/poll", { cursor: before.result?.cursor ?? again.result?.cursor });
+    assert.equal(((after.result?.events ?? []) as { instanceId?: string }[]).filter((e) => e.instanceId === "sp1").length, 1, "E2 survives the retried purge");
+    b.control.failNextEvents(1);
+    assert.equal((await signed(b, key, "POST", "/tb/v1/events", { items: [it1({})] })).status, 503);
+    assert.equal(b.control.eventItems().at(-1)?.status, 503);
   });
 });
 

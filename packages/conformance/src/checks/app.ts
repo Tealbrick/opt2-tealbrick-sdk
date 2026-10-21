@@ -4,7 +4,26 @@
 // can access (from the person op `tb.agents_list`), or come from caller-supplied fixtures.
 import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { digest, type Ed25519KeyPair, HOLDS_PENDING_OP, hookResponseProblem, KNOWN_HOLD_FAMILIES, manifestDigest, normalizeTag, opaqueDigest, PUBLIC_ROUTE_PURPOSES, ulid, validateInput, withStandardOps } from "@opt2-tealbrick/manifest";
+import {
+  digest,
+  type Ed25519KeyPair,
+  EVENT_KEY_RE,
+  eventDecl,
+  eventScopeType,
+  eventVisibleCrud,
+  HOLDS_PENDING_OP,
+  hookResponseProblem,
+  isReservedEventName,
+  KNOWN_HOLD_FAMILIES,
+  manifestDigest,
+  normalizeTag,
+  opaqueDigest,
+  PUBLIC_ROUTE_PURPOSES,
+  ulid,
+  validateEventPayload,
+  validateInput,
+  withStandardOps,
+} from "@opt2-tealbrick/manifest";
 import type { AgentId } from "@opt2-tealbrick/spec/credentials";
 import { type HoldVerdictClaim, type InstanceId, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { CrudAction, HoldFamily, Hook, Manifest, Operation, ProductId } from "@opt2-tealbrick/spec/manifest";
@@ -24,7 +43,7 @@ import { jsonPointer, resolvePlaceholders, runSetup } from "../setup.ts";
 import { bad, na, notRun, type Outcome, ok, refusedWith, type Suite, verdict } from "../suite.ts";
 import { Mint, newId, nowS, peek } from "../tokens.ts";
 import { versionBelow } from "../version.ts";
-import { type BridgeCapsFixture, CAPS_AGENT_PLACEHOLDER, type CallerListedFixture, type CompanionCallersFixture, type ConformanceConfig, type HookCallerProductFixture, type InputCaller, type NarrowingFixture, type ScopeGrantFixture, type SetupStep } from "../waivers.ts";
+import { type BridgeCapsFixture, CAPS_AGENT_PLACEHOLDER, type CallerListedFixture, type CompanionCallersFixture, type ConformanceConfig, type EventsProbeFixture, type HookCallerProductFixture, type InputCaller, type NarrowingFixture, type ScopeGrantFixture, type SetupStep } from "../waivers.ts";
 import { CHECK_IDS } from "./catalog.ts";
 
 export interface AppTargetContext {
@@ -62,6 +81,8 @@ export interface AppTargetContext {
   callerListedOp?: CallerListedFixture;
   /** conformance 0.1.27 (C292, spec 0.1.54): the person op whose output is `ctx.bridgeCaps()` (`bridgeCapsOp` in tealbrick-conformance.json) */
   bridgeCapsOp?: BridgeCapsFixture;
+  /** conformance 0.1.28 (C274c, spec 0.1.57): the person probe op of the A-EV rows (`eventsProbe` in tealbrick-conformance.json) */
+  eventsProbe?: EventsProbeFixture;
   /** report notes (setup step results are appended) */
   notes?: string[];
   /**
@@ -120,6 +141,10 @@ const SCOPE_GRANT_SINCE = "0.1.31";
 const COMPANION_CALLERS_SINCE = "0.1.32";
 /** conformance 0.1.27 (C292, spec 0.1.54): ctx.bridgeCaps() */
 const BRIDGE_CAPS_SINCE = "0.1.37";
+/** conformance 0.1.28 (C274c, spec 0.1.57): ctx.emit, the outbox and tb.hold.decided */
+const EVENTS_SINCE = "0.1.38";
+/** the bridge capability of BRIDGE §14 (slice `bridge.caps`) */
+const EVENTS_CAP = "events";
 
 /**
  * First miniapp-sdk release with the owner-set primary scope row (C283 A1, spec 0.1.50), `caller_unverified` (C261, spec 0.1.49
@@ -2757,6 +2782,288 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     };
     walk(ctx.deployTemplate, "$", null);
     return verdict(offenders.length === 0, offenders.length ? `public domains: ${offenders.join(", ")}` : "no public domain on app services");
+  });
+
+  // ── A-EV app events (C274c/C274d, spec 0.1.57, SDK-API §20, SDK >= 0.1.38) ─────────────────────────────────────────────────
+  // `eventsProbe {op, event, scopedEvent?, instanceId?}` (tealbrick-conformance.json) names a PERSON op the suite drives with
+  // {case, key?, instanceId?, kind?}: "emit" = one declared change that emits exactly one `event` (key = the given key);
+  // "rollback" = an emit inside a transaction that rolls back (the op answers 200); "commit_throw" = an emit in a committed
+  // transaction, then the op throws; "invalid" with kind payload | undeclared | reserved = a bad ctx.emit whose TbError code the op
+  // returns as {code}; "scoped" = one `scopedEvent` for `instanceId` (key = the given key); "purge" = ctx.purgeEvents(instanceId);
+  // "grant" {agent, access} = ctx.scopeGrants.grant(agent, <scope type>, instanceId, access) (A-EV-7 owner → bounded).
+  // A manifest that declares events and has no eventsProbe FAILS every row (SDK-API §20, specs#33).
+  // The fake bridge records every POST /tb/v1/events (BRIDGE §14.1); its slices carry the `events` cap only inside this block.
+  const evCfg = ctx.eventsProbe;
+  const evGate = (): Outcome | null => {
+    const v = b.claims[0]?.request.sdkVersion;
+    if (versionBelow(v, EVENTS_SINCE)) return na(`SDK ${v} (self-reported) predates ${EVENTS_SINCE} (ctx.emit, spec 0.1.57): not applicable by version`);
+    if (!evCfg)
+      // SDK-API §20 (specs#33): a manifest that declares events but offers the suite no way to trigger them FAILS the A-EV rows
+      return (m.events ?? []).length > 0
+        ? bad(`the manifest declares ${(m.events ?? []).length} event(s) but tealbrick-conformance.json has no eventsProbe: the suite cannot trigger them (a FAIL, never not_applicable)`)
+        : na("the manifest declares no events and tealbrick-conformance.json has no eventsProbe");
+    if (!personOps.some((o) => o.id === evCfg.op)) return bad(`tealbrick-conformance.json eventsProbe.op ${JSON.stringify(evCfg.op)}: not a person op of this manifest`);
+    if (!eventDecl(m, evCfg.event) || isReservedEventName(evCfg.event)) return bad(`tealbrick-conformance.json eventsProbe.event ${JSON.stringify(evCfg.event)}: not an event the manifest declares`);
+    if (!sess) return bad("no person session");
+    return null;
+  };
+  const evKey = () => `tbconf-${ulid()}`;
+  const evProbe = async (input: Record<string, Json>) => {
+    const full = { ...input, ...(evCfg?.instanceId !== undefined && input.instanceId === undefined ? { instanceId: grantInput(evCfg.instanceId) } : {}) };
+    return c().personOp(sess as PersonSession, evCfg?.op ?? "", full);
+  };
+  const evItems = () => b.control.eventItems().map((x) => x.item);
+  const evWait = async (pred: () => boolean, ms = T): Promise<boolean> => {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (pred()) return true;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return pred();
+  };
+  const evStored = (key: string) => evItems().filter((x) => x.key === key);
+  const evCaps = async (on: boolean): Promise<void> => {
+    await b.control.waitForSliceRevision(await b.control.setBridgeCaps(on ? ["owner_rows", EVENTS_CAP] : undefined), T);
+  };
+  /** an emit item of a declared event: wire shape and payload against its declaration */
+  const evShape = (it: Record<string, unknown>): string | null => {
+    const d = typeof it.name === "string" ? eventDecl(m, it.name) : null;
+    if (!d) return `name ${String(it.name)} is not declared`;
+    if (typeof it.key !== "string" || !EVENT_KEY_RE.test(it.key)) return `key ${String(it.key)} does not match ${EVENT_KEY_RE.source}`;
+    const p = validateEventPayload(d, it.data);
+    if (!p.ok) return `data: ${p.code} ${JSON.stringify(p.errors.slice(0, 2))}`;
+    if (!isObj(it.subject) || typeof it.subject.kind !== "string" || typeof it.subject.id !== "string") return "subject missing";
+    if (typeof it.at !== "string") return "at missing";
+    return null;
+  };
+  const evRun = async (fn: () => Promise<Outcome>): Promise<Outcome> => {
+    const g = evGate();
+    if (g) return g;
+    try {
+      await evCaps(true);
+      return await fn();
+    } finally {
+      b.eventFailQueue = [];
+      await evCaps(false);
+    }
+  };
+  await s.run("A-EV-1", "a declared change emits exactly one event (SDK-API §20)", "eventsProbe {case: emit, key} → 200; the fake bridge receives exactly ONE emit item for that call (and it has that key), with a declared name, a valid payload, subject and at", () =>
+    evRun(async () => {
+      const key = evKey();
+      const before = evItems().length;
+      const a = await evProbe({ case: "emit", key });
+      if (a.status !== 200) return bad(`${evCfg?.op} {case: emit}: ${show(a)}`);
+      await evWait(() => evStored(key).length > 0);
+      await new Promise((r) => setTimeout(r, 500));
+      // app events only: tb.hold.decided rows of earlier holds may drain now that the cap is in the slice
+      const got = evItems()
+        .slice(before)
+        .filter((x) => x.kind === "emit" && !(typeof x.name === "string" && isReservedEventName(x.name)));
+      if (got.length !== 1 || got[0]?.key !== key) return bad(`emit items sent for one change: ${got.length} (keys ${got.map((x) => String(x.key)).join(", ") || "none"}; expected exactly one, with key ${key})`);
+      const shape = evShape(got[0] as Record<string, unknown>);
+      return verdict(shape === null, shape ?? `one ${String(got[0]?.name)} item, payload valid`);
+    }),
+  );
+  await s.run("A-EV-2", "a rolled-back transaction emits nothing; a committed one followed by a throw still emits", "eventsProbe {case: rollback, key: K1} → nothing with K1 within 1.5 s; {case: commit_throw, key: K2} → the op answers an error and the item K2 arrives", () =>
+    evRun(async () => {
+      const k1 = evKey();
+      const k2 = evKey();
+      const r1 = await evProbe({ case: "rollback", key: k1 });
+      if (r1.status !== 200) return bad(`{case: rollback}: ${show(r1)}`);
+      const r2 = await evProbe({ case: "commit_throw", key: k2 });
+      if (r2.status === 200) return bad("{case: commit_throw}: the op answered 200; it must throw after the commit");
+      const sent = await evWait(() => evStored(k2).length > 0);
+      await new Promise((r) => setTimeout(r, 1500));
+      if (evStored(k1).length > 0) return bad(`the rolled-back emit (key ${k1}) was sent`);
+      return verdict(sent, sent ? `rollback: nothing; commit then throw (${show(r2)}): sent` : `the committed emit (key ${k2}) was not sent after the handler threw`);
+    }),
+  );
+  await s.run("A-EV-3", "an invalid payload, an undeclared name and a tb.* name throw (nothing sent)", "eventsProbe {case: invalid, kind} → output {code}: payload → event_payload_invalid, undeclared → event_undeclared, reserved → event_reserved; no emit item arrives meanwhile", () =>
+    evRun(async () => {
+      const before = evItems().length;
+      const want = { payload: "event_payload_invalid", undeclared: "event_undeclared", reserved: "event_reserved" } as const;
+      const seen: string[] = [];
+      for (const [kind, code] of Object.entries(want)) {
+        const r = await evProbe({ case: "invalid", kind });
+        const got = isObj(r.output) ? r.output.code : undefined;
+        seen.push(`${kind}: ${String(got ?? show(r))}`);
+        if (got !== code) return bad(`${seen.join("; ")} (expected ${code})`);
+      }
+      await new Promise((r) => setTimeout(r, 500));
+      const extra = evItems()
+        .slice(before)
+        .filter((x) => x.kind === "emit" && !(typeof x.name === "string" && isReservedEventName(x.name)));
+      return verdict(extra.length === 0, extra.length ? `${extra.length} emit item(s) sent during the invalid emits` : seen.join("; "));
+    }),
+  );
+  await s.run("A-EV-4", "bridge 503, then retry → stored once with the same key", "the fake bridge answers the next ingest 503; eventsProbe {case: emit, key} → the batch is sent again (same key) and the fake stores it once", () =>
+    evRun(async () => {
+      b.control.failNextEvents(1, 503, "app_not_claimed");
+      const key = evKey();
+      const a = await evProbe({ case: "emit", key });
+      if (a.status !== 200) return bad(`{case: emit}: ${show(a)}`);
+      const ok2 = await evWait(() => b.control.eventItems().some((x) => x.item.key === key && x.status === 200), T + 10_000);
+      const tries = b.control.eventItems().filter((x) => x.item.key === key);
+      if (!ok2) return bad(`after the 503 the item was not sent again (attempts: ${tries.map((x) => x.status).join(",") || "none"})`);
+      const accepted = tries.filter((x) => x.status === 200).length;
+      return verdict(tries.length >= 2 && tries[0]?.status === 503 && accepted === 1, `attempts ${tries.map((x) => x.status).join(" → ")} with key ${key} (accepted ${accepted}×)`);
+    }),
+  );
+  await s.run("A-EV-5", "without the events cap nothing is sent; when the cap appears the backlog goes in order", "slice caps without events → two emits (K1, K2) → nothing sent within 1.5 s; caps with events → K1 then K2", async () => {
+    const g = evGate();
+    if (g) return g;
+    try {
+      await evCaps(false);
+      const k1 = evKey();
+      const k2 = evKey();
+      for (const key of [k1, k2]) {
+        const a = await evProbe({ case: "emit", key });
+        if (a.status !== 200) return bad(`{case: emit}: ${show(a)}`);
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+      if (evStored(k1).length + evStored(k2).length > 0) return bad("sent without the events cap in the slice (decide by capability, C292)");
+      await evCaps(true);
+      const both = await evWait(() => evStored(k1).length > 0 && evStored(k2).length > 0, T + 5000);
+      if (!both) return bad("the backlog was not sent after the cap appeared");
+      const keys = evItems().map((x) => x.key);
+      return verdict(keys.indexOf(k1) < keys.indexOf(k2), keys.indexOf(k1) < keys.indexOf(k2) ? "nothing without the cap; K1 then K2 after it" : "the backlog arrived out of order");
+    } finally {
+      await evCaps(false);
+    }
+  });
+  const scopedDecl = evCfg?.scopedEvent ? eventDecl(m, evCfg.scopedEvent) : null;
+  const scopedType = scopedDecl ? eventScopeType(m, scopedDecl) : null;
+  const scopedGate = (): Outcome | null => {
+    const g = evGate();
+    if (g) return g;
+    if (!evCfg?.scopedEvent) return na("no eventsProbe.scopedEvent (the app declares no scoped event, or the fixture does not name one)");
+    if (!scopedDecl || !scopedType) return bad(`eventsProbe.scopedEvent ${JSON.stringify(evCfg.scopedEvent)}: not a SCOPED event of the manifest (its visibleWith op needs a scopeType)`);
+    if (evCfg.instanceId === undefined) return bad("eventsProbe.instanceId is required with scopedEvent");
+    return null;
+  };
+  const evInstance = (): string => String(evCfg?.instanceId !== undefined ? grantInput(evCfg.instanceId) : "");
+  await s.run("A-EV-6", "scoped emit: eligible = exactly the agents whose row admits visibleWith.crud, with the row's authority", "eventsProbe {case: scoped, key} → the item's eligible equals the agent rows on (scopeType, instanceId) from tb.agents_list whose crud ⊇ visibleWith.crud, each with that row's authority (an apps_only-style row is still listed: the app must not emit there, MANIFEST §16.2)", async () => {
+    const g = scopedGate();
+    if (g) return g;
+    return evRun(async () => {
+      const key = evKey();
+      const a = await evProbe({ case: "scoped", key });
+      if (a.status !== 200) return bad(`{case: scoped}: ${show(a)}`);
+      if (!(await evWait(() => evStored(key).length > 0))) return bad("no scoped item arrived");
+      const it = evStored(key)[0] as Record<string, unknown>;
+      const inst = evInstance();
+      if (it.instanceId !== inst) return bad(`instanceId ${String(it.instanceId)} (the fixture names ${inst})`);
+      const need = eventVisibleCrud(m, scopedDecl as NonNullable<typeof scopedDecl>);
+      const rowsNow = [...(await fullRows()).values()].filter((r) => r.type === scopedType && r.instanceId === inst && r.agent.startsWith("agt_") && subset(need, r.crud ?? []));
+      const want = rowsNow.map((r) => `${r.agent}:${r.authority === "owner" ? "owner" : "bounded"}`).sort();
+      const got = (Array.isArray(it.eligible) ? it.eligible : []).map((e) => (isObj(e) ? `${String(e.agent)}:${String(e.authority)}` : "?")).sort();
+      return verdict(JSON.stringify(want) === JSON.stringify(got), `eligible ${JSON.stringify(got)}; the rows admit ${JSON.stringify(want)} (visibleWith crud ${need.join(",")})`);
+    });
+  });
+  await s.run("A-EV-7", "a row removal, narrowing or owner→bounded change sends a purge after the earlier events; ctx.purgeEvents sends an all-agent purge", "agent B gets an owner row on (scopeType, instanceId) at the widest level (tb.scopes_set); a scoped emit K1 (200, sent); B's row narrowed to the narrowest level (if one is narrower) → purge {agent B}; removed → purge {agent B}; an owner row at the agent ceiling, a scoped emit K2 (200, sent), then eventsProbe {case: grant} (ctx.scopeGrants.grant of the same level: owner → bounded) → purge {agent B}; each after the earlier event; eventsProbe {case: purge} → purge {instanceId} without agent; the rows are restored", async () => {
+    const g = scopedGate();
+    if (g) return g;
+    const sc = (m.scopes ?? []).find((x) => x.type === scopedType);
+    if (!sc) return bad("scope type not declared");
+    const before = await fullRows();
+    return evRun(async () => {
+      const inst = evInstance();
+      const widest = [...sc.access].sort((x, y) => y.crud.length - x.crud.length)[0];
+      const narrowest = [...sc.access].sort((x, y) => x.crud.length - y.crud.length)[0];
+      if (!widest) return bad("scope has no access level");
+      // the agent ceiling (SDK-API §7.2): the widest level a default grant gives agents; ctx.scopeGrants.grant may give at most it
+      const ceilingId = sc.defaultGrants
+        .filter((d) => !d.callers || d.callers.includes("agent"))
+        .map((d) => sc.access.find((x) => x.id === d.access))
+        .filter((x): x is NonNullable<typeof x> => !!x)
+        .sort((x, y) => y.crud.length - x.crud.length)[0]?.id;
+      const set = (access: string | null) => c().personOp(sess as PersonSession, "tb.scopes_set", { agent: agentB.id, type: scopedType as string, id: inst, access });
+      const emitScoped = async (label: string): Promise<{ key: string } | { problem: string }> => {
+        const key = evKey();
+        const r = await evProbe({ case: "scoped", key });
+        if (r.status !== 200) return { problem: `${label}: {case: scoped} → ${show(r)}` };
+        if (!(await evWait(() => evStored(key).length > 0))) return { problem: `${label}: the scoped event ${key} was not sent` };
+        return { key };
+      };
+      const purgesB = () => evItems().filter((x) => x.kind === "purge" && x.instanceId === inst && x.agent === agentB.id);
+      const keys = () => evItems().map((x) => String(x.key));
+      const steps: string[] = [];
+      const w = await set(widest.id);
+      if (w.status !== 200) return bad(`tb.scopes_set ${widest.id}: ${show(w)}`);
+      const k1 = await emitScoped("K1");
+      if ("problem" in k1) return bad(k1.problem);
+      const narrower = narrowest && narrowest.crud.length < widest.crud.length ? narrowest : null;
+      if (narrower) {
+        await set(narrower.id);
+        steps.push(`narrow ${widest.id}→${narrower.id}`);
+      }
+      await set(null);
+      steps.push("remove");
+      let wantB = narrower ? 2 : 1;
+      if (!(await evWait(() => purgesB().length >= wantB))) return bad(`purges for agent B on ${inst}: ${purgesB().length} (expected ${wantB}) after ${steps.join(", ")}`);
+      if (keys().indexOf(k1.key) < 0 || keys().indexOf(k1.key) > keys().indexOf(String(purgesB()[0]?.key))) return bad("a purge was sent before the earlier scoped event K1");
+      let k2: { key: string } | null = null;
+      if (ceilingId) {
+        const o = await set(ceilingId);
+        if (o.status !== 200) return bad(`tb.scopes_set ${ceilingId}: ${show(o)}`);
+        const e2 = await emitScoped("K2");
+        if ("problem" in e2) return bad(e2.problem);
+        k2 = e2;
+        const gr = await evProbe({ case: "grant", agent: agentB.id, access: ceilingId });
+        if (gr.status !== 200) return bad(`eventsProbe {case: grant, agent, instanceId, access: ${ceilingId}} (ctx.scopeGrants.grant over the owner row) → ${show(gr)}`);
+        wantB += 1;
+        steps.push(`owner→bounded at ${ceilingId}`);
+        if (!(await evWait(() => purgesB().length >= wantB))) return bad(`no purge for agent B after its owner row became bounded (ctx.scopeGrants.grant): ${purgesB().length} of ${wantB} after ${steps.join(", ")}`);
+        const last = String(purgesB().at(-1)?.key);
+        if (keys().indexOf(k2.key) < 0 || keys().indexOf(k2.key) > keys().indexOf(last)) return bad("the owner→bounded purge was sent before the earlier scoped event K2");
+      } else steps.push("owner→bounded not tested (no default grant gives agents a level)");
+      const p = await evProbe({ case: "purge" });
+      if (p.status !== 200) return bad(`{case: purge}: ${show(p)}`);
+      const all = await evWait(() => evItems().some((x) => x.kind === "purge" && x.instanceId === inst && x.agent === undefined));
+      const restore = await withRestore(before, ok("restored"));
+      if (!all) return bad(`no all-agent purge for ${inst} after {case: purge}`);
+      return restore.pass === true ? ok(`${steps.join(", ")}: ${wantB} purge(s) for agent B, each after the earlier event; then an all-agent purge`) : restore;
+    });
+  });
+  await s.run("A-EV-8", "tb.hold.decided goes to the agent caller on approve and deny, never to an app caller", "two agent holds (approve, deny) → items tb.hold.decided {holdId, op, decision approved|denied}, to [agent], subject {kind: hold, id}, no summary; an app caller's hold, decided → no item. Expiry (15 min TTL) is covered by the miniapp-sdk tests only", async () => {
+    const g = evGate();
+    if (g) return g;
+    if (!holdOp) return na(NO_HOLDABLE);
+    return evRun(async () => {
+      const mk = async (opts: CallOptions) => {
+        const key = idemKey(holdOp);
+        const a = await c().callOp(holdOp.id, inputFor(holdOp), { ...holdOpts(holdOp), ...opts, ...(key ? { idempotencyKey: key } : {}) });
+        return isHeld(a) ? holdIdOf(a) : null;
+      };
+      const h1 = await mk({ agent: agentA.id });
+      const h2 = await mk({ agent: agentA.id });
+      if (!h1 || !h2) return noHold("the hold op did not hold for agent A");
+      const h3 = await mk({ caller: appCaller, held: [...(holdOp.holdFamily ? [holdOp.holdFamily] : [])] });
+      await decide(h1, "approve");
+      await decide(h2, "deny");
+      if (h3) await decide(h3, "approve");
+      const of = (id: string) => evItems().filter((x) => x.name === "tb.hold.decided" && isObj(x.data) && x.data.holdId === id);
+      await evWait(() => of(h1).length > 0 && of(h2).length > 0);
+      await new Promise((r) => setTimeout(r, 500));
+      const problems: string[] = [];
+      for (const [id, decision] of [
+        [h1, "approved"],
+        [h2, "denied"],
+      ] as const) {
+        const it = of(id)[0];
+        if (!it) {
+          problems.push(`${id}: no tb.hold.decided`);
+          continue;
+        }
+        const d = it.data as Record<string, unknown>;
+        if (d.decision !== decision || d.op !== holdOp.id) problems.push(`${id}: data ${JSON.stringify(d)}`);
+        if (JSON.stringify(it.to) !== JSON.stringify([agentA.id])) problems.push(`${id}: to ${JSON.stringify(it.to)}`);
+        if (!isObj(it.subject) || it.subject.kind !== "hold" || it.subject.id !== id) problems.push(`${id}: subject ${JSON.stringify(it.subject)}`);
+        if (it.summary !== undefined) problems.push(`${id}: carries a summary`);
+      }
+      if (h3 && of(h3).length > 0) problems.push(`the app caller's hold ${h3} produced a tb.hold.decided`);
+      return verdict(problems.length === 0, problems.length ? problems.join("; ") : `approve and deny → tb.hold.decided to agent A${h3 ? "; the app caller's hold → none" : " (the app caller's call was not held: that part not observed)"}`);
+    });
   });
 
   // ── A13 key-set statements on slices (CREDENTIALS §9.5, v0.1.11) ──
