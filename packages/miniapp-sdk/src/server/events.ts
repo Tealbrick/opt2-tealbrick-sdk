@@ -6,6 +6,7 @@ import {
   EVENT_BATCH_MAX,
   EVENT_ELIGIBLE_MAX,
   EVENT_INSTANCE_ID_MAX,
+  EVENT_ITEM_MAX_BYTES,
   EVENT_KEY_RE,
   EVENT_SUBJECT_ID_MAX,
   EVENT_SUBJECT_KIND_RE,
@@ -39,6 +40,8 @@ const BACKOFF_MAX_MS = 60_000;
 export const SENDER_FALLBACK_MS = 30_000;
 /** SDK-API §20 (specs#33): after this many consecutive failed sends (any cause) the app reports `events_send_failing`. */
 export const SEND_FAILING_AFTER = 10;
+/** SDK-API §20 (specs#33 round 2): the batch size doubles back only after this many consecutive fully answered sends */
+const REGROW_AFTER = 10;
 /** while a transaction is open on the connection the sender waits this long and looks again (it drains COMMITTED rows only) */
 const TX_WAIT_MS = 50;
 const AGENT_RE = /^agt_[0-9A-HJKMNP-TV-Z]{26}$/;
@@ -92,8 +95,10 @@ export class EventOutbox {
   #abort: AbortController | null = null;
   /** consecutive failed sends (any cause); reset by a send the bridge answered in full */
   #failures = 0;
-  /** batch size: halved on a 413 (down to 1), doubled again after each answered send (up to EVENT_BATCH_MAX) */
+  /** batch size: halved on a 413 (down to 1), doubled again after REGROW_AFTER consecutive fully answered sends (up to EVENT_BATCH_MAX) */
   #limit = EVENT_BATCH_MAX;
+  /** consecutive fully answered sends since the batch size last changed */
+  #okStreak = 0;
 
   readonly #backoffMin: number;
   readonly #backoffMax: number;
@@ -181,9 +186,12 @@ export class EventOutbox {
       data: data as EmitBody["data"],
       ...(decl.audience === "target" ? { to: [...(o.to as AgentId[])] } : {}),
       ...(origin.causedBy ? { causedBy: origin.causedBy } : {}),
-      scopeType,
     };
-    this.#insert("emit", body);
+    // BRIDGE §14.1 / SDK-API §20 (specs#33 round 2): the whole wire item WITHOUT `eligible` ≤ 4 KiB, measured as the sender
+    // serializes it (e.g. a long `to` list); refused here, at emit, so it never reaches the outbox
+    const bytes = Buffer.byteLength(JSON.stringify(body));
+    if (bytes > EVENT_ITEM_MAX_BYTES) throw bad("event_too_large", `the event is ${bytes} bytes on the wire (max ${EVENT_ITEM_MAX_BYTES} without eligible)`);
+    this.#insert("emit", { ...body, scopeType });
   }
 
   #insert(kind: "emit" | "purge", body: EmitBody | PurgeBody): void {
@@ -292,12 +300,13 @@ export class EventOutbox {
           drop.push({ id: String(r.id), why: item.drop });
           continue;
         }
+        // no emit follows a purge in one batch (specs#33): a lost answer + retry never re-sends a purge ahead of a later event;
+        // consecutive purges may share a batch
+        if (item.kind === "emit" && batch.at(-1)?.item.kind === "purge") break;
         const size = Buffer.byteLength(JSON.stringify(item)) + 1;
         if (batch.length > 0 && bytes + size > BATCH_MAX_BYTES) break;
         bytes += size;
         batch.push({ id: String(r.id), item });
-        // a batch ENDS after a purge (specs#33): a lost answer + retry never re-sends a purge ahead of a later event
-        if (item.kind === "purge") break;
       }
       if (drop.length > 0) {
         const del = this.#db.prepare("DELETE FROM tb_event_outbox WHERE id = ?");
@@ -320,19 +329,24 @@ export class EventOutbox {
         this.#abort = null;
       }
       if (res.status === 413) {
+        this.#okStreak = 0;
         if (batch.length > 1) {
           // halve and retry at once, down to one item
           this.#limit = Math.max(1, Math.floor(batch.length / 2));
           this.#failures++;
           continue;
         }
-        // one item still too large: a permanent refusal, so one oversized row never blocks the outbox
-        await this.#settled();
         const one = batch[0] as (typeof batch)[number];
-        this.#log.warn("event refused by the bridge", { kind: one.item.kind, name: one.item.kind === "emit" ? one.item.name : null, key: one.item.key, code: "event_too_large" });
+        if (one.item.kind === "purge") {
+          // a purge is small: a 413 on it means a broken path; it is NEVER dropped (specs#33 round 2), retried with backoff
+          this.#fail("bridge answered 413 to a single purge item");
+          return;
+        }
+        // one emit still too large: a permanent refusal (one oversized row never blocks the outbox); NOT a successful send
+        await this.#settled();
+        this.#log.warn("event refused by the bridge", { kind: one.item.kind, name: one.item.name, key: one.item.key, code: "event_too_large" });
         this.#db.prepare("DELETE FROM tb_event_outbox WHERE id = ?").run(one.id);
-        this.#limit = Math.min(EVENT_BATCH_MAX, this.#limit * 2);
-        this.#failures = 0;
+        this.#failures++;
         continue;
       }
       const results = res.status === 200 && isObj(res.body) && Array.isArray(res.body.results) ? (res.body as unknown as EventIngestResult).results : null;
@@ -349,7 +363,11 @@ export class EventOutbox {
       this.#backoff = 0;
       this.#retryAt = 0;
       this.#failures = 0;
-      this.#limit = Math.min(EVENT_BATCH_MAX, this.#limit * 2);
+      // the batch size grows back only after REGROW_AFTER consecutive fully answered sends, doubling each time
+      if (this.#limit < EVENT_BATCH_MAX && ++this.#okStreak >= REGROW_AFTER) {
+        this.#limit = Math.min(EVENT_BATCH_MAX, this.#limit * 2);
+        this.#okStreak = 0;
+      }
       await this.#settled();
       const del = this.#db.prepare("DELETE FROM tb_event_outbox WHERE id = ?");
       batch.forEach((b, i) => {

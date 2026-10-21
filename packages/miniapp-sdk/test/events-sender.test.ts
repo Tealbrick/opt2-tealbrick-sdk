@@ -112,6 +112,70 @@ describe("outbox sender rules (specs#33)", T, () => {
     }
   });
 
+  test("consecutive purges share a batch; only purge → emit is a cut: [E1, P1, P2] then [E2]", T, async () => {
+    const h = harness();
+    try {
+      ping(h, 1, "cut-key-e1");
+      h.ob.purgeFn()("nb1");
+      h.ob.purgeFn()("nb2");
+      ping(h, 2, "cut-key-e2");
+      h.ob.start(h.deps);
+      await until(async () => h.left() === 0);
+      assert.deepEqual(
+        h.posts.map((p) => p.map((i) => (i.kind === "purge" ? `P:${String(i.instanceId)}` : String(i.key)))),
+        [["cut-key-e1", "P:nb1", "P:nb2"], ["cut-key-e2"]],
+      );
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  test("a proxy that answers 413 to everything: no purge is lost, each emit is dropped alone at most once, events_send_failing appears", T, async () => {
+    let failing = true;
+    const h = harness({ answer: (items) => (failing ? { status: 413, body: { error: { code: "payload_too_large" } } } : stored(items)) });
+    try {
+      ping(h, 1, "all413-key-e1");
+      h.ob.purgeFn()("nb1");
+      ping(h, 2, "all413-key-e2");
+      h.ob.purgeFn()("nb2");
+      h.ob.start(h.deps);
+      await until(async () => h.ob.attention()?.code === "events_send_failing");
+      const purgeRows = Number((h.db.prepare("SELECT COUNT(*) AS n FROM tb_event_outbox WHERE kind = 'purge'").get() as { n: number }).n);
+      assert.equal(purgeRows, 2, "no purge is ever dropped on a 413");
+      const aloneE1 = h.posts.filter((p) => p.length === 1 && p[0]?.key === "all413-key-e1").length;
+      assert.equal(aloneE1, 1, "the emit was tried alone once, then dropped");
+      assert.ok(!h.posts.flat().some((i) => i.key === "all413-key-e2"), "nothing after the stuck purge was sent ahead of it");
+      failing = false;
+      await until(async () => h.left() === 0);
+      const sent = h.posts.slice(-3).flat().map((i) => (i.kind === "purge" ? `P:${String(i.instanceId)}` : String(i.key)));
+      assert.deepEqual(sent, ["P:nb1", "all413-key-e2", "P:nb2"], "the purge goes first once the path works, then the rest in order");
+      assert.equal(h.ob.attention(), null);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  test("after a 413 the batch size grows back only after 10 fully answered sends, doubling each time", T, async () => {
+    let calls = 0;
+    const h = harness({
+      answer: (items) => {
+        calls++;
+        return items.length > 1 && calls <= 5 ? { status: 413, body: { error: { code: "payload_too_large" } } } : stored(items);
+      },
+    });
+    try {
+      for (let i = 0; i < 40; i++) ping(h, i, `regrow-key-${String(i).padStart(3, "0")}`);
+      h.ob.start(h.deps);
+      await until(async () => h.left() === 0);
+      const sizes = h.posts.map((p) => p.length);
+      assert.deepEqual(sizes.slice(0, 5), [40, 20, 10, 5, 2], "halved on each 413");
+      assert.deepEqual(sizes.slice(5, 15), Array(10).fill(1), "ten fully answered single-item sends before any regrowth");
+      assert.deepEqual(sizes.slice(15, 25), Array(10).fill(2), "then doubled to 2 for ten more");
+    } finally {
+      await h.cleanup();
+    }
+  });
+
   test("eligible lists only agents in the current verified slice, at most 500", T, async () => {
     const inSlice = new Set([agt(), agt()]);
     const stale = Array.from({ length: 600 }, () => agt());

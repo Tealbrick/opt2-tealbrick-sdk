@@ -116,6 +116,8 @@ export interface MiniFlags {
   events?: boolean;
   /** conformance 0.1.28: one §14 rule broken (B-EV sensitivity) */
   eventFaults?: EventLogFaults;
+  /** with `events`: waits this long before answering each ingest (a compliant but slow bridge: B-EV-8/11 run out of their budget) */
+  slowEventsMs?: number;
   /** without `events`: answers tealbrick/events/* with an empty result instead of -32601 (fails B-EV-18) */
   eventsMethodsAnswerEmpty?: boolean;
   /** spec 0.1.50 (C283 A1): declares owner_rows but never lists the ops an app's scope_summary names in admittedOps (fails B5.gate_scoped_above_grant) */
@@ -848,6 +850,7 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
       const app = cfg?.apps.find((a) => a.ins === ins);
       if (!app) return send(res, 503, { error: { code: "app_not_claimed", message: "app_not_claimed", requestId: "req_mini" } });
       await ensureManifests();
+      if (flags.slowEventsMs) await new Promise((r) => setTimeout(r, flags.slowEventsMs));
       const items = (JSON.parse(raw.toString() || "{}") as { items?: unknown }).items;
       if (!Array.isArray(items) || items.length < 1 || items.length > 100) return send(res, 400, { error: { code: "input_invalid", message: "items 1..100", requestId: "req_mini" } });
       return send(res, 200, evLog.ingest(ins as never, app.product, items));

@@ -14,7 +14,7 @@ const status = (r: Report, id: string) => r.checks.find((c) => c.id === id)?.sta
 /** `keyset`: runBridgeTarget's key-set options (default: test roots, as the CLI) */
 /** C91 group real_app: the workspace SDK source (no build needed: node strips the types outside node_modules) */
 const SDK_MODULE = new URL("../../../miniapp-sdk/src/server/index.ts", import.meta.url).href;
-const run = (flags: MiniFlags, groups: string[], state: MiniState = {}, keyset: { testRoots?: boolean; bootTimeoutMs?: number } = {}) =>
+const run = (flags: MiniFlags, groups: string[], state: MiniState = {}, keyset: { testRoots?: boolean; bootTimeoutMs?: number; eventVolumeBudgetMs?: number } = {}) =>
   runBridgeTarget({ start: (env) => startMiniBridge(env, flags, state), logs: () => (state.logs ?? []).join("\n"), groups, timeoutMs: 3000, bootTimeoutMs: 15_000, pauseLatencyMs: 4000, sdkModule: SDK_MODULE, ...keyset });
 const ADDRESS_IDS = ["B21.own_infra_allowed", "B21.internal_url_external", "B21.own_infra_flag_required", "B21.neighbour_url_refused"];
 const KEYSET_IDS = ["B20.kss_enrolled", "B20.portal_keys_ignored", "B20.kss_unknown_root", "B20.kss_rollback", "B20.kss_missing", "B20.kss_compromise", "B20.kss_reenrol_missing"];
@@ -48,6 +48,13 @@ describe("bridge target", () => {
     const empty = await run({ eventsMethodsAnswerEmpty: true }, ["events"]);
     assert.equal(status(empty, NO_CAP_ROW), "fail", `${NO_CAP_ROW} must fail a bridge that answers the events methods without the cap: ${asserted(empty, NO_CAP_ROW)}`);
     assert.match(asserted(r, "B-EV-1"), /does not declare the events capability.*never by version/);
+  });
+
+  it("CONFORMANCE v0.1.57 (B-EV): a compliant but SLOW bridge — the volume rows run out of their budget → B-EV-8/11 not_run and B-EV-17 not_run (never fail, never pass)", { timeout: 300_000 }, async () => {
+    const r = await run({ events: true, slowEventsMs: 150 }, ["events"], {}, { eventVolumeBudgetMs: 4000 });
+    for (const id of ["B-EV-8", "B-EV-11", "B-EV-17"]) assert.equal(status(r, id), "not_run", `${id}: ${asserted(r, id)}`);
+    for (const id of EVENT_IDS.filter((x) => !["B-EV-8", "B-EV-11", "B-EV-17"].includes(x))) assert.equal(status(r, id), "pass", `${id}: ${asserted(r, id)}`);
+    assert.match(asserted(r, "B-EV-17"), /only the volume rows did not run/);
   });
 
   it("fire-on-bad (B-EV): each broken §14 rule fails its row; a bridge that declares events without implementing it fails", { timeout: 900_000 }, async () => {

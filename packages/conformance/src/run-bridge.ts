@@ -58,6 +58,12 @@ export interface RunBridgeOptions {
   testRoots?: boolean;
   /** C91 group real_app: module specifier / URL of the SDK to start the real app with (default: the installed @opt2-tealbrick/miniapp-sdk) */
   sdkModule?: string;
+  /**
+   * conformance 0.1.28 (CONFORMANCE v0.1.57): time budget of the B-EV volume rows (retention / rate-limit flood, B-EV-8 and B-EV-11);
+   * default 300 000 ms. A flood that does not finish within it leaves those rows not_run, and B-EV-17 not_run when nothing else
+   * kept it from passing.
+   */
+  eventVolumeBudgetMs?: number;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -242,6 +248,7 @@ export async function runBridgeTarget(opts: RunBridgeOptions): Promise<Report> {
       pauseLatencyMs: opts.pauseLatencyMs ?? 60_000,
       groups: selected,
       ...(opts.sdkModule ? { sdkModule: opts.sdkModule } : {}),
+      ...(opts.eventVolumeBudgetMs !== undefined ? { eventVolumeBudgetMs: opts.eventVolumeBudgetMs } : {}),
     };
     const c = new BridgeCtx(harness, s);
     for (const [groups, fn] of RUNNERS) {

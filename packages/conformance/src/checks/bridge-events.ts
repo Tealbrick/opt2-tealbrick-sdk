@@ -18,6 +18,9 @@ import { BRIDGE_GROUPS } from "./bridge-ids.ts";
 export const EVENTS_CAP = "events";
 /** Retention per agent (BRIDGE §14.2): 10 000 rows (7 days is not observable in a run). */
 const RETENTION_ROWS = 10_000;
+/** CONFORMANCE v0.1.57: the rows that need volume (retention, rate limits) and get their own time budget */
+const VOLUME_ROWS = new Set(["B-EV-8", "B-EV-11"]);
+const VOLUME_BUDGET_MS = 300_000;
 
 type Ev = { id: string; origin: string; type: string; app: string; instanceId?: string; summary?: string; data: Record<string, unknown>; causedBy?: string };
 type Poll = { events: Ev[]; cursor: string | null; truncated: boolean; paused?: boolean } | { problem: string };
@@ -344,8 +347,10 @@ async function runRows(c: BridgeCtx, e: Env): Promise<void> {
   });
 
   // B-EV-8 and B-EV-11 share one flood: > 10 000 rows for the free agent from app b while one row of the paused app a is held
-  let flood: { problem: string } | { cursorBefore: string | null; heldN: number; first: Ev[]; truncatedAny: boolean; truncatedOld: boolean; ns: unknown[] } | null = null;
+  let flood: { problem: string; budget?: true } | { cursorBefore: string | null; heldN: number; first: Ev[]; truncatedAny: boolean; truncatedOld: boolean; ns: unknown[] } | null = null;
+  const budgetMs = c.h.eventVolumeBudgetMs ?? VOLUME_BUDGET_MS;
   const sendFlood = async (): Promise<NonNullable<typeof flood>> => {
+    const deadline = Date.now() + budgetMs;
     const cursorBefore = await head("free");
     c.w.portal.pause.instances.add(a.ins);
     try {
@@ -354,9 +359,10 @@ async function runRows(c: BridgeCtx, e: Env): Promise<void> {
       if (ph) return { problem: ph };
       const total = RETENTION_ROWS + 100;
       for (let i = 0; i < total; i += 100) {
+        if (Date.now() > deadline) return { problem: `the flood did not finish within its time budget of ${budgetMs} ms (${i} of ${total} events sent)`, budget: true };
         const batch = Array.from({ length: 100 }, (_, k) => item({ n: 100_000 + i + k }));
-        const r = await post(b, batch, 120_000);
-        if ("problem" in r) return { problem: `flood batch ${i / 100}: ${r.problem}` };
+        const r = await post(b, batch, Math.max(1000, deadline - Date.now()));
+        if ("problem" in r) return Date.now() > deadline ? { problem: `the flood did not finish within its time budget of ${budgetMs} ms: ${r.problem}`, budget: true } : { problem: `flood batch ${i / 100}: ${r.problem}` };
       }
       // the next poll, whatever the cursor, answers truncated for the removed held row
       const s = await sess("free");
@@ -377,7 +383,7 @@ async function runRows(c: BridgeCtx, e: Env): Promise<void> {
   };
   await run("B-EV-8", `app a paused; a emits one event (held); app b emits ${RETENTION_ROWS + 100} events to the free agent (retention 10 000 rows removes the oldest, the held one first) → the next poll answers truncated: true`, async () => {
     const f = await doFlood();
-    if ("problem" in f) return notRun(`the flood could not be sent: ${f.problem}`);
+    if ("problem" in f) return f.budget ? notRun(f.problem) : bad(`the flood could not be sent: ${f.problem}`);
     return verdict(f.truncatedAny, f.truncatedAny ? "truncated: true after the held row was removed" : "no truncated: true after retention removed the held row");
   });
 
@@ -423,7 +429,7 @@ async function runRows(c: BridgeCtx, e: Env): Promise<void> {
 
   await run("B-EV-11", "after the flood: a poll with the cursor from before it → truncated: true and the oldest KEPT rows follow in order (rows older than 7 days: not observable in a run)", async () => {
     const f = await doFlood();
-    if ("problem" in f) return notRun(`the flood could not be sent: ${f.problem}`);
+    if ("problem" in f) return f.budget ? notRun(f.problem) : bad(`the flood could not be sent: ${f.problem}`);
     const ns = f.ns.filter((x): x is number => typeof x === "number" && x >= 100_000);
     const ascending = ns.every((x, i) => i === 0 || x > (ns[i - 1] as number));
     return verdict(f.truncatedOld && ns.length > 0 && (ns[0] as number) > 100_000 && ascending, `truncated ${f.truncatedOld}; first kept flood event n=${ns[0] ?? "none"} (the first ${ns[0] === undefined ? "?" : (ns[0] as number) - 100_000} removed), ascending ${ascending}`);
@@ -515,7 +521,16 @@ async function runRows(c: BridgeCtx, e: Env): Promise<void> {
       .filter(([, o]) => !o || !(o.status === "pass" || (o.status === undefined && o.pass === true)))
       .map(([id, o]) => `${id} ${o?.status ?? (o?.pass === false ? "fail" : "missing")}`);
     if (missing > 0) return bad(`${missing} of ${acks.length} StatusReports of this run do not declare ${EVENTS_CAP} (a bridge declares it in EVERY report or never)`);
-    return notPassed.length ? bad(`the bridge declares ${EVENTS_CAP} but these rows did not pass: ${notPassed.join(", ")}`) : ok(`all ${acks.length} StatusReports declare ${EVENTS_CAP}; B-EV-1..16 all passed`);
+    if (notPassed.length === 0) return ok(`all ${acks.length} StatusReports declare ${EVENTS_CAP}; B-EV-1..16 all passed`);
+    // CONFORMANCE v0.1.57: when ONLY volume rows did not RUN within their budget, the certifying row is not_run (never a fail of a
+    // compliant but slow bridge, never a pass)
+    const onlyVolumeNotRun = ROWS.slice(0, -1).every(([id]) => {
+      const o = results.get(id);
+      const passed = !!o && (o.status === "pass" || (o.status === undefined && o.pass === true));
+      return passed || (VOLUME_ROWS.has(id) && o?.status === "not_run");
+    });
+    if (onlyVolumeNotRun) return notRun(`only the volume rows did not run within their time budget (${notPassed.join(", ")}): the cap is neither certified nor refused`);
+    return bad(`the bridge declares ${EVENTS_CAP} but these rows did not pass: ${notPassed.join(", ")}`);
   });
   await c.run("B-EV-18", EVENT_CHECK_TITLES["B-EV-18"] as string, "a bridge WITHOUT the cap answers tealbrick/events/* with -32601", () => na(`the bridge declares the ${EVENTS_CAP} capability: the no-cap row does not apply`));
 }

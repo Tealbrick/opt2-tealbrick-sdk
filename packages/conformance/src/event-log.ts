@@ -9,6 +9,7 @@ import {
   EVENT_DATA_MAX_BYTES,
   EVENT_ELIGIBLE_MAX,
   EVENT_INSTANCE_ID_MAX,
+  EVENT_ITEM_MAX_BYTES,
   EVENT_KEY_RE,
   EVENT_SUBJECT_ID_MAX,
   EVENT_SUBJECT_KIND_RE,
@@ -30,7 +31,6 @@ import type { Json } from "@opt2-tealbrick/spec/sdk";
 
 /** Retention per agent (C274d ruling 3): 7 days or 10 000 rows, whichever first. */
 export const EVENT_RETENTION_ROWS = 10_000;
-export const EVENT_ITEM_MAX_BYTES = 4096;
 const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 
@@ -144,7 +144,9 @@ export class EventLog {
     if (!isObj(s) || typeof s.kind !== "string" || !EVENT_SUBJECT_KIND_RE.test(s.kind) || typeof s.id !== "string" || s.id.length < 1 || s.id.length > EVENT_SUBJECT_ID_MAX) return refuse("event_payload_invalid");
     if (typeof it.at !== "string") return refuse("event_payload_invalid");
     if (it.summary !== undefined && (typeof it.summary !== "string" || it.summary.length > EVENT_SUMMARY_MAX)) return refuse(typeof it.summary === "string" ? "event_too_large" : "event_payload_invalid");
-    if (Buffer.byteLength(JSON.stringify(it)) > EVENT_ITEM_MAX_BYTES) return refuse("event_too_large");
+    // the item WITHOUT `eligible` (specs#33: eligible has its own limit, step 5)
+    const { eligible: _el, ...sized } = it;
+    if (Buffer.byteLength(JSON.stringify(sized)) > EVENT_ITEM_MAX_BYTES) return refuse("event_too_large");
     if (!this.faults.noPayloadCheck) {
       const p = validateEventPayload(decl, it.data);
       if (!p.ok) return refuse(p.code);

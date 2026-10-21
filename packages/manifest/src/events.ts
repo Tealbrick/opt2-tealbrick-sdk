@@ -20,6 +20,8 @@ export const EVENT_SUBJECT_ID_MAX = 256;
 export const EVENT_INSTANCE_ID_MAX = 256;
 /** `data` ≤ 2 KiB (JCS bytes) per event (C274d ruling 2). */
 export const EVENT_DATA_MAX_BYTES = 2048;
+/** BRIDGE §14.1 / SDK-API §20: one wire item WITHOUT `eligible` ≤ 4 KiB (UTF-8 bytes of its JSON); `eligible` has its own limit. */
+export const EVENT_ITEM_MAX_BYTES = 4096;
 /** `payloadSchema` ≤ 8 KiB (JCS bytes) (M-EV-2). */
 export const EVENT_SCHEMA_MAX_BYTES = 8192;
 export const EVENT_SUMMARY_MAX = 280;

@@ -66,7 +66,7 @@ const codeOf = (fn: () => void): string => {
 };
 
 describe("ctx.emit validation and the outbox row (SDK-API §20)", () => {
-  test("every refusal throws TbError 400 with its code and writes nothing", () => {
+  test("every refusal throws TbError 400 with its code and writes nothing (one valid emit at the end writes one row)", () => {
     const u = unit();
     try {
       const emit = u.ob.emitFn();
@@ -85,8 +85,13 @@ describe("ctx.emit validation and the outbox row (SDK-API §20)", () => {
       assert.equal(codeOf(() => emit("note.pinged", {}, { subject, to: Array.from({ length: 101 }, () => `agt_${ulid()}` as AgentId) })), "event_target_invalid");
       assert.equal(codeOf(() => emit("note.created", { noteId: "n" }, { subject, instanceId: "nb", to: [AGT] })), "event_target_invalid", "granted refuses to");
       assert.equal(codeOf(() => emit("note.pinged", {}, { subject: { kind: "Note", id: "n" }, to: [AGT] })), "event_payload_invalid");
+      // the whole wire item without eligible > 4 KiB (specs#33 round 2): 100 agents in `to`, a full summary and some data
+      const many = Array.from({ length: 100 }, () => `agt_${ulid()}` as AgentId);
+      assert.equal(codeOf(() => emit("note.pinged", { n: 1, pad: "p".repeat(600) }, { subject, to: many, summary: "s".repeat(280), key: "k".repeat(128) })), "event_too_large");
+      // the same event with a short to list fits
+      assert.equal(codeOf(() => emit("note.pinged", { n: 1, pad: "p".repeat(600) }, { subject, to: many.slice(0, 10), summary: "s".repeat(280), key: "k".repeat(128) })), "none");
       assert.equal(codeOf(() => emit("note.pinged", {}, { subject: { kind: "note", id: "" }, to: [AGT] })), "event_payload_invalid");
-      assert.equal(u.rows().length, 0);
+      assert.equal(u.rows().length, 1, "only the one that fits");
     } finally {
       u.cleanup();
     }
