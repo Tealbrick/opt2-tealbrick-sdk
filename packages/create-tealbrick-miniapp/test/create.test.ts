@@ -192,7 +192,7 @@ describe("createMiniapp", () => {
     const docker = read(dir, "Dockerfile");
     const froms = [...docker.matchAll(/^FROM (\S+)/gm)].map((m) => m[1]);
     assert.ok(froms.length > 0);
-    for (const f of froms) assert.match(f as string, /^node:24-slim@sha256:[0-9a-f]{64}$/);
+    for (const f of froms) assert.match(f as string, /^node:24\.22\.1-bookworm-slim@sha256:[0-9a-f]{64}$/);
     assert.match(docker, /^USER node$/m);
     assert.match(docker, /^CMD \["node", "dist\/main\.js"\]$/m);
     assert.match(docker, /^COPY tealbrick\.manifest\.json \/opt\/tb\/tealbrick\.manifest\.json$/m);

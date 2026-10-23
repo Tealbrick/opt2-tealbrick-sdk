@@ -1,7 +1,7 @@
-# __APP_NAME__ app image: the ONE opt2 app Dockerfile pattern (SDK-API §15, C53). Base pinned by digest: node:24-slim
+# __APP_NAME__ app image: the ONE opt2 app Dockerfile pattern (SDK-API §15, C53). Base pinned by digest: node:24.22.1-bookworm-slim
 # (multi-arch index digest). Bump the tag and the digest together; CI pins the built image by digest in the release record.
 
-FROM node:24-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS build
+FROM node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 AS build
 WORKDIR /app
 ENV CI=true COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable
@@ -14,7 +14,7 @@ COPY src ./src
 # build = `tb-gen kit` (op ids + I/O types from the manifest, to dist/kit) -> tsc (dist/) -> UI (dist/ui)
 RUN pnpm run build && pnpm prune --prod
 
-FROM node:24-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
+FROM node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205
 WORKDIR /app
 # TB_DATA_DIR/TB_BACKUP_DIR defaults match the deploy recipe: one data volume at /data, backups in /data/backup (C28).
 ENV NODE_ENV=production TB_DATA_DIR=/data TB_BACKUP_DIR=/data/backup
