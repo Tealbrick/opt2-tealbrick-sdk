@@ -7,7 +7,7 @@ import { createServer, type IncomingHttpHeaders, type IncomingMessage, request, 
 import type { ServiceBackup } from "@opt2-tealbrick/spec/manifest";
 import type { Logger } from "@opt2-tealbrick/spec/sdk";
 import { TbError } from "../server/errors.ts";
-import { MAX_BODY_BYTES, readRaw, requestId, sendError, sendJson } from "../server/http.ts";
+import { MAX_BODY_BYTES, pathOf, readRaw, requestId, sendError, sendJson } from "../server/http.ts";
 import type { AppAssertionVerifier } from "./verify.ts";
 
 export const HELPER_TIMEOUT_MS = 30_000;
@@ -97,7 +97,8 @@ export function startControlServer(o: ControlOptions): Promise<Server> {
   let busy = false;
   const server = createServer(async (req, res) => {
     const rid = requestId();
-    const path = new URL(req.url ?? "/", "http://control").pathname;
+    // an unparseable target (e.g. `//`) is an unknown route: `new URL` throwing here was an unhandled rejection that stopped the process
+    const path = pathOf(req.url, "http://control");
     const kind = path === CONTROL_PATHS.backup ? "backup" : path === CONTROL_PATHS.restore ? "restore" : null;
     try {
       if (!kind || req.method !== "POST") throw new TbError("not_found", "unknown control route", 404);

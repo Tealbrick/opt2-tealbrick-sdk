@@ -16,7 +16,7 @@ import type { Logger } from "@opt2-tealbrick/spec/sdk";
 import { BridgeClient, SDK_PROOF_CLAIMS } from "./bridge-client.ts";
 import type { SdkConfig } from "./env.ts";
 import { TbError } from "./errors.ts";
-import { requestId, sendError, sendJson } from "./http.ts";
+import { pathOf, requestId, sendError, sendJson } from "./http.ts";
 import { loadInstanceKey, type Sealer } from "./secrets.ts";
 import { metaGet, type SchemaVersion } from "./store.ts";
 import { type BootFailure, failureAttention, type PreUpdateSnapshot } from "./upgrade.ts";
@@ -86,7 +86,7 @@ export async function startFailedMode(f: FailedBoot): Promise<{ port: number; st
   const health = failedHealth(f);
   f.log.error("app failed to boot; serving failed mode (no ops, no UI)", { phase: f.failure.phase, code: f.failure.code, ...(f.failure.file ? { file: f.failure.file } : {}) });
   const server: Server = createServer((req, res) => {
-    const path = new URL(req.url ?? "/", "http://app.internal").pathname;
+    const path = pathOf(req.url, "http://app.internal");
     if (req.method === "GET" && path === "/tb/v1/health") return sendJson(res, 200, health);
     if (req.method === "GET" && path === "/tb/v1/manifest") return sendJson(res, 200, f.manifest);
     sendError(res, requestId(), new TbError("app_failed", `the app failed to boot (${f.failure.code}); only /tb/v1/health answers`, 503, { failure: f.failure }));
