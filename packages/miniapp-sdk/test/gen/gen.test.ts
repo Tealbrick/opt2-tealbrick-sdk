@@ -107,6 +107,30 @@ describe("kit", () => {
     assert.match(files.get(`${k}/README.md`) as string, /`itemCreate` \| `demo-items__item_create` \| write \| required/);
   });
 
+  test("C338: TOOLS lists every agent tool the bridge would list (name, schema, effect); person ops never; --package-name renames the package", (t) => {
+    const dir = temp(t);
+    writeRepo(dir, notesJson());
+    const m = loadManifest(join(dir, "tealbrick.manifest.json"));
+    const files = generate("kit", m, { packageName: "@tealbrick/notes" });
+    const k = kitDirName(m.manifest.id);
+    assert.equal(JSON.parse(files.get(`${k}/package.json`) as string).name, "@tealbrick/notes");
+    const src = files.get(`${k}/src/index.ts`) as string;
+    const json = src.slice(src.indexOf("export const TOOLS: readonly KitToolDef[] = ") + "export const TOOLS: readonly KitToolDef[] = ".length, src.indexOf("];", src.indexOf("export const TOOLS")) + 1);
+    const tools = JSON.parse(json) as { name: string; inputSchema: unknown; effect: string }[];
+    const agentStatic = m.manifest.operations.filter((o) => o.audience === "agent" && !o.dynamic);
+    for (const o of agentStatic) {
+      const def = tools.find((x) => x.name === `${m.manifest.id}__${o.id}`);
+      assert.ok(def, o.id);
+      assert.deepEqual(def.inputSchema, o.input ?? { type: "object" });
+      assert.equal(def.effect, o.effect);
+    }
+    for (const o of m.manifest.operations.filter((x) => x.audience === "person")) assert.ok(!tools.some((x) => x.name.endsWith(`__${o.id}`)), `person op ${o.id} is not a tool`);
+    assert.ok(tools.some((x) => x.name.endsWith("__tb_hold_status")), "hold status is listed");
+    assert.match(src, /export function toolAnnotations\(/u);
+    assert.throws(() => generate("kit", m, { packageName: "Not A Name" }), isGen("package_name_invalid"));
+    assert.equal(JSON.parse(generate("kit", m).get(`${k}/package.json`) as string).name, `@opt2-tealbrick/${m.manifest.id}-kit`, "default name unchanged");
+  });
+
   test("person-audience ops: PERSON_OPS, IDEMPOTENCY facts and the PersonOps io map (Connect request, BSA-08/12)", (t) => {
     const dir = temp(t);
     writeRepo(dir, notesJson());
@@ -401,7 +425,9 @@ describe("refusals and CLI", () => {
   });
 
   test("parseTbGenArgs and per-kind output dirs", (t) => {
-    assert.deepEqual(parseTbGenArgs(["railway", "--manifest", "m.json", "--out", "o", "--set", "a=b=c"]), { command: "railway", manifest: "m.json", repo: null, out: "o", build: false, settings: { a: "b=c" } });
+    assert.deepEqual(parseTbGenArgs(["railway", "--manifest", "m.json", "--out", "o", "--set", "a=b=c"]), { command: "railway", manifest: "m.json", repo: null, out: "o", build: false, settings: { a: "b=c" }, packageName: null });
+    assert.equal(parseTbGenArgs(["kit", "--package-name", "@tealbrick/notes"]).packageName, "@tealbrick/notes");
+    assert.throws(() => parseTbGenArgs(["openapi", "--package-name", "@tealbrick/notes"]), /unknown flag --package-name/u);
     assert.equal(parseTbGenArgs(["kit", "--build"]).build, true);
     assert.equal(parseTbGenArgs(["all", "--repo", "../.."]).repo, "../..");
     const dir = temp(t);
