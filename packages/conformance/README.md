@@ -3,6 +3,10 @@
 The Teal Brick opt2 conformance suite: checks, a fake bridge and a fake Portal, generated from `@opt2-tealbrick/spec`.
 Targets: `app`, `manifest`, `bridge`, `relay`, `core` (`tb-conformance --help`).
 
+## 0.1.29 (fix, no spec change): list checks follow `nextCursor`
+
+`tb.receipts_list` and `tb.holds_list` answer newest first, 50 rows a page, with `nextCursor`. Check `A4.mark_after_failed` read page 1 only. A manifest with a companion makes `A12` call every agent op first, which writes more than 50 newer receipts, so the receipt of `A4` was off page 1 and the check FAILED a correct app. The checks that look up one row now follow `nextCursor` (`src/list-pages.ts`, at most 20 pages, stop at the row): `A4.mark_after_failed`, `A4.receipt_digest`, `A4.holds_list`, the receipt rows read by `A12.*` and `A20` (`receiptRows`), the hold list of `A14` (`listHolds`) and the peer reads of group X (`X2`, `X5`). A page limit reached before the row is reported in the check line. Test: `test/app-suite.test.ts` runs the mini app with `listPageSize: 3` (paged, newest first).
+
 ## 0.1.28 (spec 0.1.57, C274c, C274d): app events
 
 Release order (MANIFEST §16.3, C215): spec 0.1.57 → `@opt2-tealbrick/manifest` 0.1.30 → `@opt2-tealbrick/miniapp-sdk` 0.1.38 → this package → bridge 0.2.7. The pins of manifest, miniapp-sdk and conformance move to spec 0.1.57.

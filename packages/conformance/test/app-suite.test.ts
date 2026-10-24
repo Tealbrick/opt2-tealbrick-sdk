@@ -54,6 +54,15 @@ describe("app target", () => {
     assert.equal(ok.checks.find((x) => x.id === "A12.grant_prd_first")?.status, "pass");
   });
 
+  // A12 calls every agent op, so the receipts A4.mark_after_failed looks for sit more than one page behind the newest rows
+  // (tb.receipts_list is newest first, 50 a page). A check that reads page 1 only fails here although the app is correct.
+  it("person lists are paged newest first: the checks follow nextCursor to their receipt and hold (a correct app still passes)", async () => {
+    const r = await run({ listPageSize: 3 });
+    assert.deepEqual(failing(r), [], renderMarkdown(r));
+    for (const id of ["A4.mark_after_failed", "A4.receipt_digest", "A4.holds_list"]) assert.equal(r.checks.find((c) => c.id === id)?.status, "pass", id);
+    assert.match(r.checks.find((c) => c.id === "A4.mark_after_failed")?.asserted ?? "", /after_failed/);
+  });
+
   const cases: [string, MiniAppFaults, string[], number?][] = [
     ["skips call-proof verification", { skipProofVerify: true }, ["A2.no_proof", "B8.tampered_input", "A2.proof_op", "C5.proof_unannounced_kid", "C2.proof_aud_foreign", "C3.grant_as_proof", "B13.bridge_op_proof_at_op"]],
     ["skips grant verification", { skipGrantVerify: true }, ["C5.grant_unannounced_kid", "C5.grant_expired", "C2.grant_aud_foreign", "C2.grant_aud_array", "A2.grant_revoked", "A2.grant_cnf"]],
