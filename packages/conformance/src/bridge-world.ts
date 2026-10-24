@@ -119,6 +119,35 @@ export function eventManifest(base: Manifest, product: string, events: boolean):
 }
 
 /**
+ * conformance 0.1.30 (spec 0.1.66, BRIDGE §7.5, CONFORMANCE B29): the lazy-tools app. Product `tbconf-lazy`, the base's
+ * person ops, and five agent ops: one listed (`hot`) and four `listing: "lazy"` — `find` (read, a distinctive word in its
+ * description), `make` (create, idempotency required, a required `title`), `send` (outward, held by the fake app) and `drop`
+ * (destructive: above the free grant, so never visible to the free agent). A before hook on `make` (B29.lazy_call_same_route:
+ * the envelope names the op). Null while the suite's validator refuses `lazy` (it pins a spec before 0.1.66).
+ */
+export const LAZY_OPS = { hot: "conf_lazy_hot", find: "conf_lazy_find", make: "conf_lazy_make", send: "conf_lazy_send", drop: "conf_lazy_drop" } as const;
+export const LAZY_FIND_WORD = "zebrafinch";
+export const LAZY_HOOK_ID = "conf_lazy_hook";
+export function lazyManifest(base: Manifest): Manifest | null {
+  const m = eventManifest(base, "tbconf-lazy", false) as (Manifest & Record<string, unknown>) | null;
+  if (!m) return null;
+  m.name = "Conformance lazy tools";
+  const obj = { type: "object" } as const;
+  const op = (id: string, extra: Record<string, unknown>): Operation =>
+    ({ id, title: id, description: `Conformance lazy op ${id}`, input: obj, output: obj, crud: ["read"], effect: "read", idempotency: "none", receipt: false, audience: "agent", ...extra }) as unknown as Operation;
+  m.operations = [
+    ...m.operations.filter((o) => o.audience === "person"),
+    op(LAZY_OPS.hot, {}),
+    op(LAZY_OPS.find, { listing: "lazy", description: `Find a ${LAZY_FIND_WORD} record (conformance lazy read)` }),
+    op(LAZY_OPS.make, { listing: "lazy", crud: ["create"], effect: "write", idempotency: "required", receipt: true, input: { type: "object", additionalProperties: false, required: ["title"], properties: { title: { type: "string" } } } }),
+    op(LAZY_OPS.send, { listing: "lazy", crud: ["update"], effect: "outward", holdFamily: "outward", idempotency: "supported", receipt: true }),
+    op(LAZY_OPS.drop, { listing: "lazy", crud: ["delete"], effect: "destructive", holdFamily: "destructive", idempotency: "supported", receipt: true }),
+  ];
+  m.hooks = [{ id: LAZY_HOOK_ID, title: "Conformance lazy hook", phase: "before", order: 50, match: { products: [m.id], operations: [LAZY_OPS.make] } }] as Manifest["hooks"];
+  return validateManifest(m).ok ? m : null;
+}
+
+/**
  * Peer app derived from `base.companions[0]`: id = the companion product, one agent op per companion op, a plain read
  * op outside the companion workflow, two person ops, a list-mode and a search-mode dynamic op, hooks in all three
  * phases (matching every product) and a companion edge back to a read op of `base`. Null when `base` has no companion.
@@ -283,6 +312,9 @@ export class BridgeWorld {
    */
   eventApps: { a: FakeApp; b: FakeApp; tb: FakeApp } | null = null;
   eventAppsListed = false;
+  /** conformance 0.1.30 (B29, BRIDGE §7.5): the lazy-tools app, listed only for group `lazy` once the bridge declares `lazy_tools` */
+  lazyApp: FakeApp | null = null;
+  lazyAppListed = false;
 
   private constructor(portal: FakePortal, stranger: Ed25519KeyPair) {
     this.portal = portal;
@@ -318,6 +350,8 @@ export class BridgeWorld {
     const mb = eventManifest(manifests[0] as Manifest, "tbconf-events-b", true);
     const mt = eventManifest(manifests[0] as Manifest, "tb", false);
     if (ma && mb && mt) w.eventApps = { a: await FakeApp.create(ma, adapter), b: await FakeApp.create(mb, adapter), tb: await FakeApp.create(mt, adapter) };
+    const ml = lazyManifest(manifests[0] as Manifest);
+    if (ml) w.lazyApp = await FakeApp.create(ml, adapter);
     await w.#agents();
     return w;
   }
@@ -437,13 +471,14 @@ export class BridgeWorld {
 
   /** Origins of the fake apps (they run on the suite's own host: own infrastructure, BRIDGE §5.7). */
   ownInfraOrigins(): string[] {
-    const ev = this.eventApps ? [this.eventApps.a, this.eventApps.b, this.eventApps.tb] : [];
+    const ev = [...(this.eventApps ? [this.eventApps.a, this.eventApps.b, this.eventApps.tb] : []), ...(this.lazyApp ? [this.lazyApp] : [])];
     return [...[...this.apps, ...ev].map((a) => new URL(a.url).origin), ...(this.realAppPort ? [`http://127.0.0.1:${this.realAppPort}`] : [])];
   }
 
-  /** The event apps when listed (config apps[], instanceKeys, hooks), else []. */
-  listedEventApps(): FakeApp[] {
-    return this.eventApps && this.eventAppsListed ? [this.eventApps.a, this.eventApps.b, this.eventApps.tb] : [];
+  /** The group-only apps that are listed now (config apps[], instanceKeys, hooks): the event apps, the lazy-tools app. */
+  listedGroupApps(): FakeApp[] {
+    const ev = this.eventApps && this.eventAppsListed ? [this.eventApps.a, this.eventApps.b, this.eventApps.tb] : [];
+    return [...ev, ...(this.lazyApp && this.lazyAppListed ? [this.lazyApp] : [])];
   }
 
   /** The current config grant JWS for (role, app). */
@@ -464,7 +499,7 @@ export class BridgeWorld {
       if (state === "absent") return;
       out.push({ id, ins, product: product as HookEntry["product"], hookId: h.id, phase: h.phase, order: h.order, timeoutMs: h.timeoutMs ?? 2000, match: h.match, enabled: this.hooksOn && state !== "disabled" });
     };
-    for (const a of [...this.apps, ...this.listedEventApps()]) for (const h of a.manifest.hooks ?? []) add(a.ins, a.product, h);
+    for (const a of [...this.apps, ...this.listedGroupApps()]) for (const h of a.manifest.hooks ?? []) add(a.ins, a.product, h);
     // the listed real SDK app's hooks (B25.real_hook_hold: a REAL before hook answering a hold verdict)
     const real = this.realApp?.listed ? this.realApp : null;
     if (real) for (const h of real.manifest.hooks ?? []) add(real.ins, real.manifest.id, h);
@@ -553,7 +588,7 @@ export class BridgeWorld {
     const pause = { workspace: p.pause.workspace, agents: [...p.pause.agents], instances: [...p.pause.instances] };
     const revoked = { jtis: p.revoked.map((r) => ({ jti: r.jti, exp: r.exp })) };
     const apps: AppEntry[] = [];
-    const entries: { ins: InstanceId; product: string; manifest: Manifest; digest: string; url: string }[] = [...this.apps, ...this.listedEventApps(), ...(real ? [{ ...real, product: real.manifest.id }] : [])];
+    const entries: { ins: InstanceId; product: string; manifest: Manifest; digest: string; url: string }[] = [...this.apps, ...this.listedGroupApps(), ...(real ? [{ ...real, product: real.manifest.id }] : [])];
     for (const a of entries) {
       const slice = await signSlice(
         {
@@ -602,7 +637,7 @@ export class BridgeWorld {
       bridge: { id: p.bridgeId, publicUrl: this.advertisedUrl },
       portalKeys,
       ...(portalKeySet ? { portalKeySet } : {}),
-      instanceKeys: [...[...this.apps, ...this.listedEventApps()].map((a) => ({ ins: a.ins, jwk: a.key.publicJwk })), ...(this.realApp?.jwk ? [{ ins: this.realApp.ins, jwk: this.realApp.jwk }] : [])],
+      instanceKeys: [...[...this.apps, ...this.listedGroupApps()].map((a) => ({ ins: a.ins, jwk: a.key.publicJwk })), ...(this.realApp?.jwk ? [{ ins: this.realApp.ins, jwk: this.realApp.jwk }] : [])],
       grants: [...this.grants.values()],
       apps,
       hooks: this.hookEntries(),
@@ -681,7 +716,7 @@ export class BridgeWorld {
   }
 
   async close(): Promise<void> {
-    await Promise.all([...this.apps, ...(this.eventApps ? [this.eventApps.a, this.eventApps.b, this.eventApps.tb] : [])].map((a) => a.close()));
+    await Promise.all([...this.apps, ...(this.eventApps ? [this.eventApps.a, this.eventApps.b, this.eventApps.tb] : []), ...(this.lazyApp ? [this.lazyApp] : [])].map((a) => a.close()));
     await this.portal.close();
   }
 }

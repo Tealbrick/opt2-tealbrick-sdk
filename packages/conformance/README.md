@@ -3,6 +3,11 @@
 The Teal Brick opt2 conformance suite: checks, a fake bridge and a fake Portal, generated from `@opt2-tealbrick/spec`.
 Targets: `app`, `manifest`, `bridge`, `relay`, `core` (`tb-conformance --help`).
 
+## 0.1.30 (spec 0.1.66, C330(1), M4b): lazy tools
+
+- **Bridge target: group `lazy`, `B29.lazy_hidden`, `B29.lazy_search`, `B29.lazy_grant`, `B29.lazy_call_same_route`, `B29.lazy_unknown`, `B29.lazy_hot_and_direct`** (BRIDGE §7.5, CONFORMANCE B29), decided by the `lazy_tools` capability of the latest StatusReport (never by version): without it every row is not_applicable. With the cap the suite lists one extra fake app for this group only (`tbconf-lazy`, `lazyManifest` in `bridge-world.ts`: one listed op, four `listing: "lazy"` ops — read, create with a required `title`, outward (the fake app holds it), destructive (above the free grant) — and a before hook on the create op). Free agent read/create/update; bound agent every action with `wf` = the listed op. A suite whose validator still refuses `lazy` (it pins a spec before 0.1.66) reports the rows not_run.
+- The pair names come from `TOOL_NAME_RULE.moreSearchOp` / `moreCallOp` when the pinned spec has them, else the spec 0.1.66 values (`tb_more_search`, `tb_more_call`); the fallback goes with the pin bump.
+
 ## 0.1.28 (spec 0.1.57, C274c, C274d): app events
 
 Release order (MANIFEST §16.3, C215): spec 0.1.57 → `@opt2-tealbrick/manifest` 0.1.30 → `@opt2-tealbrick/miniapp-sdk` 0.1.38 → this package → bridge 0.2.7. The pins of manifest, miniapp-sdk and conformance move to spec 0.1.57.

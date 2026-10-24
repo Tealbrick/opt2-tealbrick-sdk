@@ -17,6 +17,7 @@ import { BridgeCtx, type BridgeHarness } from "./checks/bridge-ctx.ts";
 import { eventChecks } from "./checks/bridge-events.ts";
 import { addressChecks, configChecks, keyChecks, keySetChecks, keysOriginChecks, listChangedChecks, oauthChecks, pauseChecks, portalDownChecks, reenrolChecks, scanChecks, standaloneChecks } from "./checks/bridge-flows.ts";
 import { BRIDGE_CRED_CASES, BRIDGE_GROUP_ORDER, BRIDGE_GROUPS } from "./checks/bridge-ids.ts";
+import { lazyChecks } from "./checks/bridge-lazy.ts";
 import { realAppChecks } from "./checks/bridge-real.ts";
 import { spine013Checks } from "./checks/bridge-spine013.ts";
 import { spawnCommand } from "./command.ts";
@@ -155,6 +156,7 @@ const RUNNERS: [string[], Group][] = [
   [["c117"], c117Checks],
   [["real_app"], realAppChecks],
   [["events"], eventChecks],
+  [["lazy"], lazyChecks],
   [["claim"], claimChecks],
   [["keys"], keyChecks],
   [["keys_origin"], keysOriginChecks],

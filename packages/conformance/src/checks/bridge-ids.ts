@@ -163,6 +163,15 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
     "B-EV-17": "\"events\" in every StatusReport of a bridge that passes all of these, never otherwise",
     "B-EV-18": "a bridge without the events capability answers tealbrick/events/* with JSON-RPC -32601 (method not found)",
   }),
+  // conformance 0.1.30 (spec 0.1.66, BRIDGE §7.5): lazy tools; gated by the reported `lazy_tools` cap, never by version
+  lazy: ids({
+    "B29.lazy_hidden": "tools/list has the hot op and <product>__tb_more_search + tb_more_call, none of the lazy ops",
+    "B29.lazy_search": "tb_more_search \"*\" returns exactly the visible lazy ops with schema, effect and total; a word ranks its op first; no app request",
+    "B29.lazy_grant": "a lazy op above the grant (or outside a Bound wf) is not found and not callable (pair or name) → unknown_tool",
+    "B29.lazy_call_same_route": "tb_more_call = the direct call: op proof, input = arguments, hook envelope, equal derived key, held handle, input_invalid",
+    "B29.lazy_unknown": "tb_more_call with an unknown op, another product's op, a standard op or the pair → unknown_tool",
+    "B29.lazy_hot_and_direct": "a listed op via tb_more_call is allowed; a lazy op by its own name is allowed",
+  }),
   claim: ids({
     "C1.K6": "claim with a one-time enrolment code",
     "C6.claim_replay": "enrolment code reused → code_invalid",
