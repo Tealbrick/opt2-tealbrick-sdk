@@ -449,6 +449,21 @@ describe("POST /tb/v1/person-op (K14, SDK-API §21)", () => {
     assert.equal(b.effects.item_decide, before + 1);
   });
 
+  test("S-PO-11b (core#65 QA INFO-1/2): two valid K14 with the SAME idk and DIFFERENT bodies on a write op → the second is 409 idempotency_conflict; the handler ran once", async () => {
+    const before = b.effects.item_decide ?? 0;
+    const idk = `idk_${ulid()}`;
+    const bodyA = JSON.stringify({ id: "itm_11b", answer: "approve" });
+    const bodyB = JSON.stringify({ id: "itm_11b", answer: "deny" });
+    // each K14 is valid on its own: its own jti, and bd over its own body
+    const first = await relay(b, await k14(b.w, "item_decide", bodyA, { idk }), bodyA);
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    assert.equal(first.body.output.answer, "approve");
+    const second = await relay(b, await k14(b.w, "item_decide", bodyB, { idk }), bodyB);
+    assert.equal(second.status, 409, JSON.stringify(second.body));
+    assert.equal(code(second), "idempotency_conflict");
+    assert.equal(b.effects.item_decide, before + 1, "the handler ran once");
+  });
+
   test("the browser person route is unchanged: no via, no K14 accepted there", async () => {
     const r = await fetch(`${b.base}/a/${PRODUCT}/tb/v1/ops/items_list`, { method: "POST", headers: { "content-type": "application/json", [PERSON_OP_HEADER]: await k14(b.w, "items_list", "{}") }, body: JSON.stringify({ input: {} }) });
     assert.equal(r.status, 401);
