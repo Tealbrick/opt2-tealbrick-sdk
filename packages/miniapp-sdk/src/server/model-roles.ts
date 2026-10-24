@@ -3,6 +3,7 @@
 // and auth of a key fetch). Bindings are cached until `keysRev` changes (one revision for keys and bindings). Values carry a
 // key: they are never logged, never returned in an op result.
 
+import type { ModelFetchHandle } from "@opt2-tealbrick/manifest";
 import {
   activeModelRoles,
   DATA_POLICIES,
@@ -19,10 +20,13 @@ import type { BridgeClient } from "./bridge-client.ts";
 import { errorFrom } from "./bridge-client.ts";
 import { TbError } from "./errors.ts";
 import type { SecretRegistry } from "./log.ts";
+import { type GuardDeps, guardedFetch } from "./model-fetch.ts";
 import type { Attention } from "./status.ts";
 
 export interface ModelRolesInternals {
   modelRole(role: ModelRole): Promise<ResolvedModelRole | null>;
+  /** spec follow-up #49: the binding plus a `fetch` bound to its canonical origin with the connect-time guard (./model-fetch.ts); null as `modelRole` */
+  modelFetch(role: ModelRole): Promise<ModelFetchHandle | null>;
   /** slice shows a pause: drop cached bindings and what readiness knew */
   dropCache(): void;
   /** resolve every required role in force, so readiness knows (a failure counts as unresolved) */
@@ -48,6 +52,8 @@ export function createModelRoles(opts: {
   rev: () => number;
   /** what readiness knows about the roles changed: push a status */
   changed?: () => void;
+  /** tests: the DNS lookup and own-infra origins of the connect-time guard of `modelFetch` */
+  guard?: GuardDeps;
 }): ModelRolesInternals {
   const { manifest } = opts;
   const declared = new Map<string, ModelRoleRequirement>(declaredModelRoles(manifest).filter((r) => r.usedBy.includes("app")).map((r) => [r.role, r]));
@@ -125,6 +131,10 @@ export function createModelRoles(opts: {
       if (!inForce().some((x) => x.role === role)) return null;
       const v = await resolve(role);
       return v ? { ...v } : null;
+    },
+    async modelFetch(role) {
+      const binding = await this.modelRole(role);
+      return binding ? { binding, fetch: guardedFetch(binding, opts.guard) } : null;
     },
     dropCache() {
       cache.clear();

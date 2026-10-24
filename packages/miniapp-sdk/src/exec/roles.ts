@@ -7,6 +7,7 @@ import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Logger } from "@opt2-tealbrick/spec/sdk";
 import { TbError } from "../server/errors.ts";
 import type { SecretRegistry } from "../server/log.ts";
+import { checkBaseText, type GuardDeps, guardEndpoint } from "../server/model-fetch.ts";
 import type { ServiceBridge } from "./bridge.ts";
 import { retryable } from "./identity.ts";
 import { sleep } from "./util.ts";
@@ -54,13 +55,31 @@ export interface FetchedRoles {
   rev: number;
 }
 
-export async function fetchRoles(roles: readonly ExecRole[], bridge: ServiceBridge, secrets: SecretRegistry, log: Logger, signal: AbortSignal): Promise<FetchedRoles> {
+/**
+ * The connect-time check of a resolved binding (BRIDGE §15.3, spec follow-up #49), at start and on every `keysRev` change: a `local`
+ * binding's host is resolved and every address must be allowed; any other binding with a base URL gets the text check (never-local
+ * host). Throws `model_endpoint_refused`; the caller then fills nothing for the role. The engine resolves names itself afterwards (stated limit).
+ */
+async function checkEndpoint(b: { baseUrl: string | null; dataPolicy: "local" | "zdr" | "standard" }, deps: GuardDeps): Promise<void> {
+  if (b.dataPolicy === "local") await guardEndpoint(b, deps);
+  else if (b.baseUrl !== null) checkBaseText(b.baseUrl);
+}
+
+export async function fetchRoles(roles: readonly ExecRole[], bridge: ServiceBridge, secrets: SecretRegistry, log: Logger, signal: AbortSignal, deps: GuardDeps = {}): Promise<FetchedRoles> {
   const out: FetchedRoles = { values: new Map(), parts: [], missing: [], blocking: [], rev: 0 };
   for (const r of roles) {
     let delay = 1000;
     for (;;) {
       try {
-        const b = await bridge.fetchModelRole(r.role, signal);
+        let b = await bridge.fetchModelRole(r.role, signal);
+        if (b) {
+          try {
+            await checkEndpoint(b, deps);
+          } catch (e) {
+            log.warn("model role endpoint refused", { role: r.role, code: e instanceof TbError ? e.code : "model_endpoint_refused" });
+            b = null;
+          }
+        }
         if (!b) {
           out.missing.push(r.role);
           if (r.blocking) out.blocking.push(r.role);

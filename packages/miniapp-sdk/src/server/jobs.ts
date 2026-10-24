@@ -9,7 +9,7 @@
 // - handler jobs: `defineApp({ jobs: { <kind>: handler } })`, ticks that resume from the last `ctx.checkpoint(state)`;
 // - scheduled ops (`ctx.schedule({ op, input }, { at | cron })`): fire-time `authorize()` with the stored caller
 //   (ops.ts `fireScheduledOp`), so a paused, removed or revoked caller is refused when the op would run (CON-01).
-import { CronError, digest, type ModelRole, nextCronTime, parseCron, type ResolvedModelRole, ulid, validateInput } from "@opt2-tealbrick/manifest";
+import { CronError, digest, type ModelFetchHandle, type ModelRole, nextCronTime, parseCron, type ResolvedModelRole, ulid, validateInput } from "@opt2-tealbrick/manifest";
 import type { Caller, Db, Json, OperationView } from "@opt2-tealbrick/spec/sdk";
 import type { AppSecrets } from "./app-secrets.ts";
 import type { SdkEventContext } from "./context.ts";
@@ -102,6 +102,8 @@ export interface JobContext extends SdkEventContext, JobsView {
   getKey(name: string): Promise<string | null>;
   /** v0.1.63: the binding of a model role the manifest declares for `app` (SDK-API "v0.1.63 additions") */
   modelRole(role: ModelRole): Promise<ResolvedModelRole | null>;
+  /** spec follow-up #49: the binding plus a guarded `fetch` (SDK-API "modelFetch") */
+  modelFetch(role: ModelRole): Promise<ModelFetchHandle | null>;
   callServiceHelper<O = Json>(serviceId: string, path: string, body: Json): Promise<O>;
 }
 // biome-ignore lint/suspicious/noConfusingVoidType: a tick that returns nothing is done (handlers may omit the return)
@@ -1075,6 +1077,7 @@ function jobContext(rt: Runtime, runner: JobRunner, job: ClaimedJob, signal: Abo
     secrets: rt.secretsStore,
     getKey: (n) => rt.keys.getKey(n),
     modelRole: (r) => rt.keys.modelRole(r),
+    modelFetch: (r) => rt.keys.modelFetch(r),
     callServiceHelper: (s, p, b) => rt.callServiceHelper(s, p, b),
   };
 }

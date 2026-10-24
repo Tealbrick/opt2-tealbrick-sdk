@@ -10,6 +10,7 @@ import type { Logger } from "@opt2-tealbrick/spec/sdk";
 import { identityRefused, logMountAtBoot, reclaimCode } from "../server/claim-guard.ts";
 import { TbError } from "../server/errors.ts";
 import { createLogger, type LogSink, SecretRegistry } from "../server/log.ts";
+import type { GuardDeps, LookupAll } from "../server/model-fetch.ts";
 import { dropPrivileges, type PrivilegeProc } from "../server/privilege.ts";
 import { TB_EXEC_CONTROL_PORT } from "../server/service-helper.ts";
 import { parseArgs } from "./args.ts";
@@ -35,6 +36,8 @@ export interface TbExecOptions {
   /** default 7077; tests override */
   controlPort?: number;
   logSink?: LogSink;
+  /** tests only: the DNS lookup of the endpoint check of `local` role bindings (default `dns.lookup`) */
+  lookup?: LookupAll;
   /** tests only: mountinfo file for the first-claim mount check of TB_DATA_DIR (default /proc/self/mountinfo) */
   mountinfoPath?: string;
 }
@@ -87,7 +90,7 @@ export function keysInForce(
   });
 }
 
-async function fetchKeys(rec: ClaimRecord, roles: readonly ExecRole[], bridge: ServiceBridge, secrets: SecretRegistry, log: Logger, signal: AbortSignal): Promise<FetchedKeys> {
+async function fetchKeys(rec: ClaimRecord, roles: readonly ExecRole[], guard: GuardDeps, bridge: ServiceBridge, secrets: SecretRegistry, log: Logger, signal: AbortSignal): Promise<FetchedKeys> {
   const values = new Map<string, string>();
   const missing: string[] = [];
   let rev = 0;
@@ -116,7 +119,7 @@ async function fetchKeys(rec: ClaimRecord, roles: readonly ExecRole[], bridge: S
       }
     }
   }
-  const fromRoles = await fetchRoles(roles, bridge, secrets, log, signal);
+  const fromRoles = await fetchRoles(roles, bridge, secrets, log, signal, guard);
   for (const [name, v] of fromRoles.values) values.set(name, v);
   for (const part of fromRoles.parts) fp.update(part);
   return { values, missing, missingRoles: fromRoles.missing, blockingRoles: fromRoles.blocking, rev: Math.max(rev, fromRoles.rev), fingerprint: fp.digest("hex") };
@@ -168,7 +171,8 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
     const roles = rolesInForce(cfg.manifest, cfg.service.id, o.env);
     // a role-bound service never inherits proxy variables: a proxy would resolve the name itself and skip the endpoint check
     const envOpts = { stripProxy: roles.length > 0 };
-    let keys = await fetchKeys(rec, roles, bridge, secrets, log, startup.signal);
+    const guard: GuardDeps = { ...(o.lookup ? { lookup: o.lookup } : {}) };
+    let keys = await fetchKeys(rec, roles, guard, bridge, secrets, log, startup.signal);
     // Required keys block the upstream (Knowledge S2): it waits in needs_keys and keys are re-pulled with backoff.
     const required = new Set((cfg.manifest.settings?.keys ?? []).filter((k) => k.required && k.usedBy.includes(cfg.service.id)).map((k) => k.name));
     const blocking = (k: FetchedKeys): string[] => [...k.missing.filter((n) => required.has(n)), ...k.blockingRoles.map((r) => `role:${r}`)];
@@ -239,7 +243,7 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
       refused = false;
       appVerify = appAssertionVerifier(rec);
       sliceRevision = 0;
-      const next = await fetchKeys(rec, roles, bridge, secrets, log, polling.signal);
+      const next = await fetchKeys(rec, roles, guard, bridge, secrets, log, polling.signal);
       const restart = next.fingerprint !== keys.fingerprint;
       keys = next;
       if (!polling.signal.aborted) await applyKeys(restart);
@@ -270,7 +274,7 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
           const changed = r.sliceRevision !== sliceRevision || r.keysRev !== keys.rev;
           sliceRevision = r.sliceRevision;
           if (r.keysRev !== keys.rev) {
-            const next = await fetchKeys(rec, roles, bridge, secrets, log, polling.signal);
+            const next = await fetchKeys(rec, roles, guard, bridge, secrets, log, polling.signal);
             next.rev = Math.max(next.rev, r.keysRev);
             const restart = next.fingerprint !== keys.fingerprint;
             keys = next;
@@ -301,7 +305,7 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
           break;
         }
         delay = Math.min(delay * 2, 60_000);
-        const next = await fetchKeys(rec, roles, bridge, secrets, log, polling.signal).catch(() => null);
+        const next = await fetchKeys(rec, roles, guard, bridge, secrets, log, polling.signal).catch(() => null);
         if (!next || polling.signal.aborted) continue;
         next.rev = Math.max(next.rev, keys.rev);
         const restart = next.fingerprint !== keys.fingerprint;

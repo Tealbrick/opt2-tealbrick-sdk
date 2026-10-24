@@ -121,6 +121,7 @@ export function createKeys(opts: {
       return k.source === "account_default" ? fetchDefault(name) : null;
     },
     modelRole: (role) => roles.modelRole(role),
+    modelFetch: (role) => roles.modelFetch(role),
     rolesMissing: roles.missing,
     rolesAttention: roles.attention,
     onKeysChanged(cb) {
