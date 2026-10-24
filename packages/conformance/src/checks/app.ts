@@ -34,6 +34,7 @@ import type { FakeBridge } from "../fake-bridge.ts";
 import { SDK_EXPORTS } from "../generated/sdk-exports.ts";
 import { errorCode } from "../http.ts";
 import { applyLevelCrud, LEVEL_CRUD_ENV, type LevelCrudChange } from "../level-crud.ts";
+import { listPersonPages } from "../list-pages.ts";
 import type { AppDriver } from "../multi-app.ts";
 import type { PayloadScan } from "../report.ts";
 import { sampleInput } from "../sample.ts";
@@ -988,18 +989,17 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   });
   await s.run("A4.holds_list", "one table: holds are receipt rows", "person tb.holds_list contains the hold with status held", async () => {
     if (!hold || !sess) return noHold("no hold/session");
-    const r = await c().personOp(sess, "tb.holds_list", {});
-    const items = isObj(r.output) && Array.isArray(r.output.items) ? r.output.items : [];
-    const row = items.find((x) => isObj(x) && x.id === holdIdOf((hold as { answer: OpAnswer }).answer));
-    return verdict(isObj(row) && row.status === "held", row ? `row status ${String((row as Record<string, unknown>).status)}` : `${show(r)}, ${items.length} items, hold missing`);
+    const holdId = holdIdOf((hold as { answer: OpAnswer }).answer);
+    const r = await listPersonPages(c(), sess, "tb.holds_list", (xs) => xs.some((x) => x.id === holdId));
+    const row = r.items.find((x) => x.id === holdId);
+    return verdict(!!row && row.status === "held", row ? `row status ${String(row.status)}` : `${r.failed ?? "ok"}, ${r.items.length} items in ${r.pages} page(s)${r.truncated ? " (page limit reached)" : ""}, hold missing`);
   });
   await s.run("A4.receipt_digest", "receipt stores input digest, never raw input", "receipt row: inputDigest = sha256(JCS input); the canonical input is not in the receipt list", async () => {
     if (!hold || !sess) return noHold("no hold/session");
-    const r = await c().personOp(sess, "tb.receipts_list", {});
-    const items = isObj(r.output) && Array.isArray(r.output.items) ? r.output.items : [];
     const h = hold as { input: Json; answer: OpAnswer };
-    const row = items.find((x) => isObj(x) && x.id === holdIdOf(h.answer)) as Record<string, unknown> | undefined;
-    if (!row) return bad(`${show(r)}; hold row missing`);
+    const r = await listPersonPages(c(), sess, "tb.receipts_list", (xs) => xs.some((x) => x.id === holdIdOf(h.answer)));
+    const row = r.items.find((x) => x.id === holdIdOf(h.answer));
+    if (!row) return bad(`${r.failed ?? "ok"}, ${r.items.length} items in ${r.pages} page(s)${r.truncated ? " (page limit reached)" : ""}; hold row missing`);
     const raw = JSON.stringify(h.input);
     const leaked = raw.length > 12 && r.text.includes(raw.slice(1, -1));
     const forbidden = ["input", "body", "arguments"].filter((k) => k in row);
@@ -1124,10 +1124,10 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   };
   /** The receipt row id of an answer: receiptId (ran) or holdId (held; holds are receipt rows). */
   const rowIdOf = (a: OpAnswer) => (isHeld(a) ? holdIdOf(a) : isOk(a) && isObj(a.body) && typeof a.body.receiptId === "string" ? a.body.receiptId : null);
-  const receiptRows = async (): Promise<Record<string, unknown>[]> => {
+  const receiptRows = async (want?: readonly string[]): Promise<Record<string, unknown>[]> => {
     if (!sess) return [];
-    const r = await c().personOp(sess, "tb.receipts_list", {});
-    return (isObj(r.output) && Array.isArray(r.output.items) ? r.output.items : []).filter(isObj);
+    // newest first, 50 a page: follow nextCursor until every wanted row is in (the whole list when none are named)
+    return (await listPersonPages(c(), sess, "tb.receipts_list", want && ((xs) => want.every((id) => xs.some((x) => x.id === id))))).items;
   };
   await s.run("A12.caller_name", "an app caller is named from slice companionCallers; an unlisted one by its instance id (C102)", "a caller listed in companionCallers {product, ins, name} calls a receipt op (companion grant sub tb:ins:<ins>) → its tb.receipts_list row has caller.name = that name; an unlisted caller's row has caller.name = its instance id", async () => {
     const op = byRank(agentOps.filter((o) => o.receipt)).sort((x, y) => Number(x.effect === "money") - Number(y.effect === "money"))[0];
@@ -1145,7 +1145,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
       const authLike = [one.answer, two.answer].some((a) => AUTH_CODES.has(a.code ?? "") || a.code === "audience_not_agent");
       return authLike ? bad(shown) : notRun(`${shown} — no receipt row to read; supply an inputs fixture an app caller can run`);
     }
-    const items = await receiptRows();
+    const items = await receiptRows([id1, id2]);
     const nameOf = (id: string) => {
       const row = items.find((x) => x.id === id);
       return row && isObj(row.caller) ? row.caller.name : undefined;
@@ -1171,7 +1171,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
       const authLike = AUTH_CODES.has(one.answer.code ?? "") || one.answer.code === "audience_not_agent";
       return authLike ? bad(shown) : notRun(`${shown} — no receipt row to read; supply an inputs fixture an app caller can run`);
     }
-    const row = (await receiptRows()).find((x) => x.id === id);
+    const row = (await receiptRows([id])).find((x) => x.id === id);
     const caller = row && isObj(row.caller) ? row.caller : undefined;
     const got = `caller.product ${JSON.stringify(caller?.product)}, caller.name ${JSON.stringify(caller?.name)}`;
     if (caller?.product === "tbconf-observer") return bad(`${shown}; ${got}: the product was taken from the caller NAME (the decoy "tbconf-observer" has the same name), not from the entry of the grant's caller instance`);
@@ -1191,7 +1191,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     const one = await appCall(appCaller, op, { held: [], ...(prd !== undefined ? { prd } : {}) });
     const shown = `${op.id}: ${show(one.answer)} (${one.how})`;
     const id = rowIdOf(one.answer);
-    const row = id ? (await receiptRows()).find((x) => x.id === id) : undefined;
+    const row = id ? (await receiptRows([id])).find((x) => x.id === id) : undefined;
     const caller = row && isObj(row.caller) ? row.caller : undefined;
     return { one, shown, id, product: caller?.product, hasRow: !!row };
   };
@@ -1222,7 +1222,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     if (good.product !== "tbconf-slice") return bad(`${shown}; a grant whose prd equals the slice product must run with caller.product "tbconf-slice", got ${JSON.stringify(good.product)}`);
     if (isOk(bad1.answer) || isHeld(bad1.answer)) {
       const id = rowIdOf(bad1.answer);
-      const row = id ? (await receiptRows()).find((x) => x.id === id) : undefined;
+      const row = id ? (await receiptRows([id])).find((x) => x.id === id) : undefined;
       const got = row && isObj(row.caller) ? JSON.stringify(row.caller.product) : "no row";
       return bad(`${shown}; the app ran/held a call whose grant prd (tbconf-grant) differs from the slice product (tbconf-slice); it took caller.product ${got} instead of refusing`);
     }
@@ -1789,7 +1789,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
       if (a.code === "scope_denied") return bad(`${shown} — the owner-set row must be primary, also above the Portal grant`);
       if (!(isOk(a) || isHeld(a))) return notRun(`${shown} — the call neither ran nor was held; supply an inputs fixture`);
       const id = rowIdOf(a);
-      const row = id ? (await receiptRows()).find((x) => x.id === id) : undefined;
+      const row = id ? (await receiptRows([id])).find((x) => x.id === id) : undefined;
       if (!row) return ok(`${shown} (no receipt row to read admittedBy)`);
       return verdict(row.admittedBy === "app_owner_row", `${shown}; receipt admittedBy ${JSON.stringify(row.admittedBy)} (expected "app_owner_row")`);
     },
@@ -2412,13 +2412,13 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
       const a = await c().callBridgeOp("mark", { call: t.call, mark: "after_failed" });
       if (a.status !== 200) return bad(`mark (${t.kind}) ${show(a)}`);
     }
-    const r = await c().personOp(sess, "tb.receipts_list", {});
-    const items = isObj(r.output) && Array.isArray(r.output.items) ? r.output.items : [];
+    // A12 ran every agent op first: the receipt can be more than one page behind the newest rows
+    const r = await listPersonPages(c(), sess, "tb.receipts_list", (xs) => targets.every((t) => xs.some((x) => x.id === t.rid)));
     let pass = true;
     for (const t of targets) {
-      const row = items.find((x) => isObj(x) && x.id === t.rid) as Record<string, unknown> | undefined;
+      const row = r.items.find((x) => x.id === t.rid);
       pass &&= row?.status === "after_failed";
-      seen.push(`${t.kind} ${t.rid}: ${String(row?.status ?? "missing")}`);
+      seen.push(`${t.kind} ${t.rid}: ${String(row?.status ?? (r.truncated ? `missing in ${r.pages} pages (page limit reached)` : "missing"))}`);
     }
     return verdict(pass, seen.join("; "));
   });
@@ -2434,8 +2434,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   const hvCall = (input: Json, reason: string, opts: CallOptions = {}) => c().callOp((hvOp as Operation).id, input, { hv: hvClaim(reason), idempotencyKey: idemKey(hvOp), ...opts });
   const listHolds = async (): Promise<Record<string, unknown>[]> => {
     if (!sess) return [];
-    const r = await c().personOp(sess, "tb.holds_list", {});
-    return (isObj(r.output) && Array.isArray(r.output.items) ? r.output.items : []).filter(isObj);
+    return (await listPersonPages(c(), sess, "tb.holds_list")).items;
   };
   const openHolds = async () => (await listHolds()).filter((x) => x.status === "held").length;
   let hvHold: { op: Operation; input: Json; id: string } | null = null;

@@ -184,6 +184,8 @@ export interface MiniAppFaults {
   ownerWidensUnscoped?: boolean;
   /** spec 0.1.50: an owner row revives a paused agent (fails A20.paused_agent_owner_row) */
   ownerRevivesPaused?: boolean;
+  /** like the real SDK: tb.holds_list / tb.receipts_list answer newest first, this many rows a page, with an offset `nextCursor` (default: one page with everything, oldest first) */
+  listPageSize?: number;
   /** spec 0.1.50: scope rows carry no `authority` member in tb.agents_list (fails A20.owner_row_above_grant) */
   noAuthorityField?: boolean;
   /** spec 0.1.50: receipts of scoped calls carry no `admittedBy` (fails A20.owner_row_above_grant) */
@@ -825,6 +827,16 @@ export async function startMiniApp(released: Manifest, env: Record<string, strin
     return s;
   }
 
+  /** one page of a person list op: everything at once, or (faults.listPageSize) newest first with an offset cursor */
+  function listPage(rows: Receipt[], cursor: unknown): Json {
+    const size = faults.listPageSize;
+    if (!size) return { items: rows as unknown as Json, nextCursor: null };
+    const newest = [...rows].reverse();
+    const from = typeof cursor === "string" ? Number(cursor) : 0;
+    if (!Number.isSafeInteger(from) || from < 0) throw new E(400, "cursor_invalid");
+    return { items: newest.slice(from, from + size) as unknown as Json, nextCursor: from + size < newest.length ? String(from + size) : null };
+  }
+
   async function personOp(req: IncomingMessage, res: ServerResponse, opId: string, raw: string): Promise<void> {
     const s = session(req);
     if (!faults.noCsrf && req.headers["tb-csrf"] !== s.csrf) throw new E(403, "csrf_invalid");
@@ -835,10 +847,10 @@ export async function startMiniApp(released: Manifest, env: Record<string, strin
     let out: Json;
     switch (opId) {
       case "tb.holds_list":
-        out = { items: st.receipts.filter((x) => ["held", "approved", "denied"].includes(x.status)) as unknown as Json, nextCursor: null };
+        out = listPage(st.receipts.filter((x) => ["held", "approved", "denied"].includes(x.status)), input.cursor);
         break;
       case "tb.receipts_list":
-        out = { items: st.receipts as unknown as Json, nextCursor: null };
+        out = listPage(st.receipts, input.cursor);
         break;
       case "tb.holds_decide": {
         const h = st.receipts.find((x) => x.id === input.holdId && x.status === "held");
