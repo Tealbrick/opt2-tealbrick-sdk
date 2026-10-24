@@ -165,12 +165,13 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
   }),
   // conformance 0.1.30 (spec 0.1.66, BRIDGE §7.5): lazy tools; gated by the reported `lazy_tools` cap, never by version
   lazy: ids({
-    "B29.lazy_hidden": "tools/list has the hot op and <product>__tb_more_search + tb_more_call, none of the lazy ops",
-    "B29.lazy_search": "tb_more_search \"*\" returns exactly the visible lazy ops with schema, effect and total; a word ranks its op first; no app request",
-    "B29.lazy_grant": "a lazy op above the grant (or outside a Bound wf) is not found and not callable (pair or name) → unknown_tool",
-    "B29.lazy_call_same_route": "tb_more_call = the direct call: op proof, input = arguments, hook envelope, equal derived key, held handle, input_invalid",
-    "B29.lazy_unknown": "tb_more_call with an unknown op, another product's op, a standard op or the pair → unknown_tool",
-    "B29.lazy_hot_and_direct": "a listed op via tb_more_call is allowed; a lazy op by its own name is allowed",
+    "B30.lazy_hidden": "tools/list has the hot op and <product>__tb_more_search + tb_more_call, none of the lazy ops",
+    "B30.lazy_annotations": "tb_more_call annotations = the widest over the ops this agent reaches through it (lazy and listed); tb_more_search is read-only",
+    "B30.lazy_search": "tb_more_search \"*\" returns exactly the visible lazy ops with schema, effect and total; a word ranks its op first; no app request",
+    "B30.lazy_grant": "a lazy op above the grant (or outside a Bound wf) is not found and not callable (pair or name) → unknown_tool",
+    "B30.lazy_call_same_route": "tb_more_call = the direct call: op proof, input = arguments, hook envelope, equal derived key, held handle, input_invalid",
+    "B30.lazy_unknown": "tb_more_call with an unknown op, another product's op, a standard op or the pair → unknown_tool",
+    "B30.lazy_hot_and_direct": "a listed op via tb_more_call is allowed; a lazy op by its own name is allowed",
   }),
   claim: ids({
     "C1.K6": "claim with a one-time enrolment code",

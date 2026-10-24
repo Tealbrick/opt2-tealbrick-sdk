@@ -1,8 +1,8 @@
-// B29 (conformance 0.1.30, spec 0.1.66, BRIDGE §7.5, MANIFEST §5.5): lazy tools on a bridge that DECLARES `lazy_tools`. Gated by
+// B30 (conformance 0.1.30, spec 0.1.66, BRIDGE §7.5, MANIFEST §5.5): lazy tools on a bridge that DECLARES `lazy_tools`. Gated by
 // the capability in the bridge's StatusReport (`bridge.caps`), never by version (C292): without it every row is not_applicable.
 // The suite lists its lazy-tools app (bridge-world.ts `lazyManifest`) only for this group: a bridge without the cap refuses a
 // manifest with `listing: "lazy"` at claim. Grants: the free agent read/create/update (Free), the bound agent every action but
-// wf = [hot] (Bound), the none agent nothing.
+// wf = [hot, find] (Bound), the none agent nothing.
 import { TOOL_NAME_RULE } from "@opt2-tealbrick/spec/bridge";
 import { LAZY_FIND_WORD, LAZY_HOOK_ID, LAZY_OPS } from "../bridge-world.ts";
 import type { FakeApp } from "../fake-app.ts";
@@ -40,7 +40,7 @@ export async function lazyChecks(c: BridgeCtx): Promise<void> {
   c.w.lazyAppListed = true;
   c.w.grantSpecs.push(
     { role: "free", app, crud: ["read", "create", "update"], mode: "free", wf: [] },
-    { role: "bound", app, crud: ["read", "create", "update", "delete"], mode: "bound", wf: [LAZY_OPS.hot] },
+    { role: "bound", app, crud: ["read", "create", "update", "delete"], mode: "bound", wf: [LAZY_OPS.hot, LAZY_OPS.find] },
   );
   // the fake app holds `send` (202 held) and answers every other op ok
   const prevOnOp = app.onOp;
@@ -74,7 +74,7 @@ async function rows(c: BridgeCtx, app: FakeApp): Promise<void> {
   const title = (id: string) => ROWS.find(([x]) => x === id)?.[1] ?? id;
   const ops = (seq: number, op?: string) => c.since(app, seq, "op").filter((r) => op === undefined || r.name === op);
 
-  await c.run("B29.lazy_hidden", title("B29.lazy_hidden"), "free agent tools/list: the hot op and the pair, none of the lazy ops", async () => {
+  await c.run("B30.lazy_hidden", title("B30.lazy_hidden"), "free agent tools/list: the hot op and the pair, none of the lazy ops", async () => {
     const names = await (await c.session("free")).listTools();
     if (!names) return bad("tools/list answered no tool array");
     const mine = names.filter((n) => n.startsWith(`${p}${TOOL_NAME_RULE.separator}`));
@@ -83,7 +83,25 @@ async function rows(c: BridgeCtx, app: FakeApp): Promise<void> {
     return verdict(missing.length === 0 && leaked.length === 0, `listed ${JSON.stringify(mine)}; missing ${JSON.stringify(missing)}; lazy ops listed ${JSON.stringify(leaked)}`);
   });
 
-  await c.run("B29.lazy_search", title("B29.lazy_search"), `"*" → exactly the visible lazy ops {tool, title, description, inputSchema, effect} + total; "${LAZY_FIND_WORD}" ranks ${LAZY_OPS.find} first; the app receives nothing`, async () => {
+  await c.run("B30.lazy_annotations", title("B30.lazy_annotations"), `${MORE_CALL_OP} = the widest over the ops THIS agent reaches through it, lazy and listed: bound (hot outward + find read) and free → readOnlyHint false, destructiveHint false, openWorldHint true; ${MORE_SEARCH_OP} readOnlyHint true`, async () => {
+    const want = { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
+    const out: string[] = [];
+    let pass = true;
+    for (const slot of ["bound", "free"] as const) {
+      const { message } = await (await c.session(slot)).rpc("tools/list");
+      const tools = isObj(message?.result) && Array.isArray(message.result.tools) ? (message.result.tools as { name?: unknown; annotations?: Record<string, unknown> }[]) : [];
+      const a = tools.find((t) => t.name === CALL)?.annotations ?? null;
+      const sa = tools.find((t) => t.name === SEARCH)?.annotations ?? null;
+      const got = a ? { readOnlyHint: a.readOnlyHint === true, destructiveHint: a.destructiveHint === true, openWorldHint: a.openWorldHint === true } : null;
+      const okCall = got !== null && JSON.stringify(got) === JSON.stringify(want);
+      const okSearch = sa?.readOnlyHint === true;
+      pass &&= okCall && okSearch;
+      out.push(`${slot}: ${CALL} ${JSON.stringify(a)}, ${SEARCH} ${JSON.stringify(sa)}`);
+    }
+    return verdict(pass, `${out.join("; ")} (expected ${JSON.stringify(want)}; lazy ops alone would give the bound agent readOnlyHint true)`);
+  });
+
+  await c.run("B30.lazy_search", title("B30.lazy_search"), `"*" → exactly the visible lazy ops {tool, title, description, inputSchema, effect} + total; "${LAZY_FIND_WORD}" ranks ${LAZY_OPS.find} first; the app receives nothing`, async () => {
     const seq = c.w.seqNow();
     const all = await c.callTool("free", SEARCH, { query: "*" });
     const h = hits(all);
@@ -101,24 +119,24 @@ async function rows(c: BridgeCtx, app: FakeApp): Promise<void> {
     return ok(`"*" → ${got.join(", ")} (total ${visibleLazy.length}); "${LAZY_FIND_WORD}" → ${String(first)}; no app request`);
   });
 
-  await c.run("B29.lazy_grant", title("B29.lazy_grant"), `free agent: ${LAZY_OPS.drop} (delete, above the grant) via ${MORE_CALL_OP} and by name → unknown_tool; bound agent (wf = [hot]): no pair; the app sees nothing`, async () => {
+  await c.run("B30.lazy_grant", title("B30.lazy_grant"), `free agent: ${LAZY_OPS.drop} (delete, above the grant) via ${MORE_CALL_OP} and by name → unknown_tool; bound agent (wf = [hot, find]): "*" → only ${LAZY_OPS.find}, ${LAZY_OPS.make} via ${MORE_CALL_OP} → unknown_tool; the app sees nothing`, async () => {
     const seq = c.w.seqNow();
     const viaCall = await c.callTool("free", CALL, { tool: name(LAZY_OPS.drop), arguments: {} });
     const direct = await c.callTool("free", name(LAZY_OPS.drop), {});
     const r1 = toolRefused(viaCall, ["unknown_tool"]);
     const r2 = toolRefused(direct, ["unknown_tool"]);
-    const bound = await (await c.session("bound")).listTools();
-    const pair = (bound ?? []).filter((n) => n === SEARCH || n === CALL);
-    const boundCall = await c.callTool("bound", CALL, { tool: name(LAZY_OPS.find), arguments: {} });
+    const boundAll = hits(await c.callTool("bound", SEARCH, { query: "*" }))?.map((h) => String(h.tool)) ?? null;
+    const boundOk = JSON.stringify(boundAll) === JSON.stringify([name(LAZY_OPS.find)]);
+    const boundCall = await c.callTool("bound", CALL, { tool: name(LAZY_OPS.make), arguments: { title: "x" } });
     const r3 = toolRefused(boundCall, ["unknown_tool"]);
     const reached = ops(seq);
     return verdict(
-      !!r1.pass && !!r2.pass && !!r3.pass && bound !== null && pair.length === 0 && reached.length === 0,
-      `via call ${r1.asserted}; by name ${r2.asserted}; bound list pair ${JSON.stringify(pair)}; bound via call ${r3.asserted}; ops at the app ${reached.length}`,
+      !!r1.pass && !!r2.pass && !!r3.pass && boundOk && reached.length === 0,
+      `free via call ${r1.asserted}; free by name ${r2.asserted}; bound "*" ${JSON.stringify(boundAll)}; bound ${LAZY_OPS.make} via call ${r3.asserted}; ops at the app ${reached.length}`,
     );
   });
 
-  await c.run("B29.lazy_call_same_route", title("B29.lazy_call_same_route"), `${LAZY_OPS.make} via ${MORE_CALL_OP} = direct: verified op proof for the op, input = arguments, the hook names the op, equal derived keys; ${LAZY_OPS.send} → held handle; invalid arguments → input_invalid`, async () => {
+  await c.run("B30.lazy_call_same_route", title("B30.lazy_call_same_route"), `${LAZY_OPS.make} via ${MORE_CALL_OP} = direct: verified op proof for the op, input = arguments, the hook names the op, equal derived keys; ${LAZY_OPS.send} → held handle; invalid arguments → input_invalid`, async () => {
     const seq = c.w.seqNow();
     const args = { title: "conformance lazy" };
     const via = await c.callTool("free", CALL, { tool: name(LAZY_OPS.make), arguments: args });
@@ -142,7 +160,7 @@ async function rows(c: BridgeCtx, app: FakeApp): Promise<void> {
     return ok(`2 verified ${LAZY_OPS.make} calls, equal keys, hook envelopes name the op; held → checkWith ${String(s.checkWith)}; invalid → ${r.asserted}`);
   });
 
-  await c.run("B29.lazy_unknown", title("B29.lazy_unknown"), `${MORE_CALL_OP} with an unknown op, another product's op, a standard op, the pair itself → unknown_tool; the app sees nothing`, async () => {
+  await c.run("B30.lazy_unknown", title("B30.lazy_unknown"), `${MORE_CALL_OP} with an unknown op, another product's op, a standard op, the pair itself → unknown_tool; the app sees nothing`, async () => {
     const seq = c.w.seqNow();
     const other = c.readOp(c.primary);
     const names = ["conf_lazy_nope", name("conf_lazy_nope"), ...(other ? [c.tool(c.primary, other.id)] : []), TOOL_NAME_RULE.holdStatusOp, name(TOOL_NAME_RULE.holdStatusOp), SEARCH, CALL];
@@ -157,7 +175,7 @@ async function rows(c: BridgeCtx, app: FakeApp): Promise<void> {
     return verdict(pass && reached === 0, `${out.join("; ")}; ops at apps ${reached}`);
   });
 
-  await c.run("B29.lazy_hot_and_direct", title("B29.lazy_hot_and_direct"), `the listed ${LAZY_OPS.hot} via ${MORE_CALL_OP} → ok (decision: allowed); ${LAZY_OPS.find} by its own name → ok`, async (): Promise<Outcome> => {
+  await c.run("B30.lazy_hot_and_direct", title("B30.lazy_hot_and_direct"), `the listed ${LAZY_OPS.hot} via ${MORE_CALL_OP} → ok (decision: allowed); ${LAZY_OPS.find} by its own name → ok`, async (): Promise<Outcome> => {
     const seq = c.w.seqNow();
     const hot = await c.callTool("free", CALL, { tool: LAZY_OPS.hot, arguments: {} });
     const direct = await c.callTool("free", name(LAZY_OPS.find), {});

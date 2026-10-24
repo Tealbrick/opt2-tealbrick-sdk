@@ -14,6 +14,7 @@ import {
   generateKeyPair,
   keySetFrom,
   keySetFromPortalKeys,
+  LAZY_LISTING_MIN_BRIDGE,
   opaqueDigest,
   opaqueValue,
   resolveSettings,
@@ -119,10 +120,10 @@ export function eventManifest(base: Manifest, product: string, events: boolean):
 }
 
 /**
- * conformance 0.1.30 (spec 0.1.66, BRIDGE §7.5, CONFORMANCE B29): the lazy-tools app. Product `tbconf-lazy`, the base's
- * person ops, and five agent ops: one listed (`hot`) and four `listing: "lazy"` — `find` (read, a distinctive word in its
+ * conformance 0.1.30 (spec 0.1.66, BRIDGE §7.5, CONFORMANCE B30): the lazy-tools app. Product `tbconf-lazy`, the base's
+ * person ops, and five agent ops: one listed (`hot`, outward: wider than any lazy op the bound agent sees) and four `listing: "lazy"` — `find` (read, a distinctive word in its
  * description), `make` (create, idempotency required, a required `title`), `send` (outward, held by the fake app) and `drop`
- * (destructive: above the free grant, so never visible to the free agent). A before hook on `make` (B29.lazy_call_same_route:
+ * (destructive: above the free grant, so never visible to the free agent). A before hook on `make` (B30.lazy_call_same_route:
  * the envelope names the op). Null while the suite's validator refuses `lazy` (it pins a spec before 0.1.66).
  */
 export const LAZY_OPS = { hot: "conf_lazy_hot", find: "conf_lazy_find", make: "conf_lazy_make", send: "conf_lazy_send", drop: "conf_lazy_drop" } as const;
@@ -137,12 +138,16 @@ export function lazyManifest(base: Manifest): Manifest | null {
     ({ id, title: id, description: `Conformance lazy op ${id}`, input: obj, output: obj, crud: ["read"], effect: "read", idempotency: "none", receipt: false, audience: "agent", ...extra }) as unknown as Operation;
   m.operations = [
     ...m.operations.filter((o) => o.audience === "person"),
-    op(LAZY_OPS.hot, {}),
+    // QA-SDK47-1: the listed op is WIDER than the bound agent's only lazy op (find, read), so tb_more_call's annotations must
+    // come from every op it reaches, not from the lazy ops alone (B30.lazy_annotations)
+    op(LAZY_OPS.hot, { crud: ["update"], effect: "outward", holdFamily: "outward", idempotency: "supported", receipt: true }),
     op(LAZY_OPS.find, { listing: "lazy", description: `Find a ${LAZY_FIND_WORD} record (conformance lazy read)` }),
     op(LAZY_OPS.make, { listing: "lazy", crud: ["create"], effect: "write", idempotency: "required", receipt: true, input: { type: "object", additionalProperties: false, required: ["title"], properties: { title: { type: "string" } } } }),
     op(LAZY_OPS.send, { listing: "lazy", crud: ["update"], effect: "outward", holdFamily: "outward", idempotency: "supported", receipt: true }),
     op(LAZY_OPS.drop, { listing: "lazy", crud: ["delete"], effect: "destructive", holdFamily: "destructive", idempotency: "supported", receipt: true }),
   ];
+  // M-OP-13 (manifest >= 0.1.31): a manifest with lazy ops states the first bridge with lazy_tools
+  m.requires = { bridge: LAZY_LISTING_MIN_BRIDGE };
   m.hooks = [{ id: LAZY_HOOK_ID, title: "Conformance lazy hook", phase: "before", order: 50, match: { products: [m.id], operations: [LAZY_OPS.make] } }] as Manifest["hooks"];
   return validateManifest(m).ok ? m : null;
 }
@@ -312,7 +317,7 @@ export class BridgeWorld {
    */
   eventApps: { a: FakeApp; b: FakeApp; tb: FakeApp } | null = null;
   eventAppsListed = false;
-  /** conformance 0.1.30 (B29, BRIDGE §7.5): the lazy-tools app, listed only for group `lazy` once the bridge declares `lazy_tools` */
+  /** conformance 0.1.30 (B30, BRIDGE §7.5): the lazy-tools app, listed only for group `lazy` once the bridge declares `lazy_tools` */
   lazyApp: FakeApp | null = null;
   lazyAppListed = false;
 
