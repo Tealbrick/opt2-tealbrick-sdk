@@ -160,3 +160,51 @@ export function tagsMatch(memoryTags: { anyOf?: readonly string[]; noneOf?: read
   if (memoryTags.anyOf !== undefined && !memoryTags.anyOf.map(normalizeTag).some((t) => have.has(t))) return false;
   return !(memoryTags.noneOf ?? []).map(normalizeTag).some((t) => have.has(t));
 }
+
+/** spec 0.1.68 (C336 RQ-2, SDK-API §18.5 rule 1): limits of a `deepDatasets` narrowing — each list ≤ 64 ids of 1–128 chars. */
+export const DEEP_DATASETS_MAX_IDS = 64;
+export const DEEP_DATASET_ID_MAX_CHARS = 128;
+
+/** spec 0.1.68 (C336 RQ-2): `RulesNarrowingV2.deepDatasets` (local until the spec pin carries `RulesNarrowingV2`). */
+export interface DeepDatasets {
+  anyOf?: readonly string[];
+  noneOf?: readonly string[];
+}
+
+/**
+ * spec 0.1.68 (C336 RQ-2, SDK-API §18.5 rule 1): is `value` a well-formed `deepDatasets`? An object with at least one of
+ * `anyOf` / `noneOf` (no other keys), each an array of 0–64 strings of 1–128 characters. A reader refuses anything else
+ * (`{}`, `null`, a non-array, a non-string item, an over-long list or id) with `narrowing_unsupported`.
+ */
+export function deepDatasetsValid(value: unknown): value is DeepDatasets {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  if (keys.length === 0 || keys.some((k) => k !== "anyOf" && k !== "noneOf")) return false;
+  return keys.every((k) => {
+    const list = (value as Record<string, unknown>)[k];
+    return (
+      Array.isArray(list) &&
+      list.length <= DEEP_DATASETS_MAX_IDS &&
+      list.every((id) => typeof id === "string" && id.length >= 1 && id.length <= DEEP_DATASET_ID_MAX_CHARS)
+    );
+  });
+}
+
+/**
+ * spec 0.1.68 (C336 RQ-2, SDK-API §18.5 rule 3): THE `rules.narrowing.deepDatasets` comparison. `ids` = the CANONICAL
+ * dataset ids a data read names or would read (the app resolves names first, rule 2). Exact, case-sensitive: no trimming,
+ * no case folding, no Unicode normalisation. Absent narrowing → pass. Otherwise `ids` must be non-empty (an empty list means
+ * "every dataset", rule 4: the op restricts itself or refuses `narrowing_unsupported`), then `anyOf` present → every id is in
+ * it (`anyOf: []` passes nothing) and `noneOf` present → no id is in it. A malformed narrowing (see `deepDatasetsValid`) never
+ * passes (fail closed; the reader answers `narrowing_unsupported`).
+ */
+export function datasetsMatch(deepDatasets: DeepDatasets | undefined, ids: readonly string[]): boolean {
+  if (deepDatasets === undefined) return true;
+  if (!deepDatasetsValid(deepDatasets) || ids.length === 0) return false;
+  if (deepDatasets.anyOf !== undefined) {
+    const allow = new Set(deepDatasets.anyOf);
+    if (!ids.every((id) => allow.has(id))) return false;
+  }
+  const deny = new Set(deepDatasets.noneOf ?? []);
+  return !ids.some((id) => deny.has(id));
+}

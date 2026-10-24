@@ -46,3 +46,10 @@ test("C232 (LA-2): an outward op may declare public_link; a typo stays refused; 
   assert.ok((m.KNOWN_HOLD_FAMILIES as readonly string[]).includes("public_link"));
   assert.ok((m.HOOK_HOLD_FAMILIES as readonly string[]).includes("public_link"));
 });
+
+test("requiredBridgeVersion (spec 0.1.68, C336 RQ-3): a secretOutput op → bridge 0.2.8; secretOutput absent → no row", () => {
+  const r = requiredBridgeVersion({ operations: [{}, { secretOutput: true }] });
+  assert.equal(r.bridge, "0.2.8");
+  assert.deepEqual(r.reasons, ["0.2.8: secretOutput ops (C336 RQ-3, cap secret_output)"]);
+  assert.equal(requiredBridgeVersion({ operations: [{ secretOutput: undefined }] }).bridge, null);
+});

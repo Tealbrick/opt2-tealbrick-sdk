@@ -15,6 +15,7 @@ import type { AppSecrets } from "./app-secrets.ts";
 import type { SdkEventContext } from "./context.ts";
 import { TbError } from "./errors.ts";
 import type { Runtime } from "./runtime.ts";
+import { isSecretOutput, secretOutputNotSchedulable } from "./secret-output.ts";
 import { metaGet, metaSet, type RawDb, type Row, tx } from "./store.ts";
 import { resolveCallerProduct } from "./trust.ts";
 
@@ -785,10 +786,13 @@ export class JobRunner {
       return;
     }
     switch (first.kind) {
-      case "done":
-        if (job.cron) this.store.done(job.id, job.token, now, nextOccurrence(job.cron, now), first.result, undefined);
-        else this.store.finish(job.id, job.token, now, "done", null, first.result);
+      case "done": {
+        // spec 0.1.68 (SDK-API v0.1.68 rule 2): the job runner never stores the result of a secretOutput op
+        const result = job.op && isSecretOutput(this.#rt.ops.get(job.op)) ? undefined : first.result;
+        if (job.cron) this.store.done(job.id, job.token, now, nextOccurrence(job.cron, now), result, undefined);
+        else this.store.finish(job.id, job.token, now, "done", null, result);
         return;
+      }
       case "refused":
         this.store.finish(job.id, job.token, now, "refused", first.reason);
         this.#rt.log.info("scheduled op refused", { job: job.id, op: job.op, reason: first.reason });
@@ -976,6 +980,8 @@ export function jobsView(rt: Runtime, runner: JobRunner, who: JobCaller | null):
     if (!who) throw new TbError("schedule_caller_required", "a scheduled op runs as a caller: schedule it from an op handler (or a job it started)", 400);
     const op: OperationView | undefined = rt.ops.get(opId);
     if (!op || op.standard || op.dynamic) throw new TbError("unknown_tool", `not a schedulable operation: ${opId}`, 404);
+    // spec 0.1.68 (SDK-API v0.1.68 rule 2): a secret output has no caller to go to at fire time
+    if (isSecretOutput(op)) throw secretOutputNotSchedulable();
     const audience = who.caller.type === "person" ? "person" : "agent";
     if (op.audience !== audience) throw new TbError(audience === "person" ? "audience_not_person" : "audience_not_agent", `a ${who.caller.type} caller cannot schedule ${opId}`, 403);
     const v = validateInput(op, input);

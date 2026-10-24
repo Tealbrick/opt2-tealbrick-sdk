@@ -41,12 +41,15 @@ export const BRIDGE_FEATURES = [
   // v0.1.30 (spec 0.1.57, MANIFEST §16.3): a manifest with `events` (also an empty list: an older validator refuses the key) needs
   // a bridge that pins manifest >= 0.1.30 and declares the `events` cap; bridge 0.2.7 is the first
   { feature: "events", minBridge: "0.2.7", why: "app events (C274)" },
+  // v0.1.31 (spec 0.1.68, C336 RQ-3, MANIFEST M-OP-12, BRIDGE v0.1.68): an op with `secretOutput: true` needs the first bridge
+  // with the `secret_output` cap (not listed for agents, agent calls refused, no after hook, nothing logged); bridge 0.2.8
+  { feature: "secret_output", minBridge: "0.2.8", why: "secretOutput ops (C336 RQ-3, cap secret_output)" },
   // C111a: op-limited Free grants (wf + caps) need the Free-wf gate (bridge 0.1.19 = manifest 0.1.12). A grant property, not a
   // manifest feature: Core checks it per workspace bridge before minting such grants (MIN_BRIDGE_FREE_WF).
 ] as const;
 
 type ManifestLike = {
-  operations?: readonly { dynamic?: unknown }[];
+  operations?: readonly { dynamic?: unknown; secretOutput?: unknown }[];
   companions?: readonly { product: string; operations: readonly string[] }[];
   requires?: { bridge?: string };
   events?: readonly unknown[];
@@ -64,6 +67,7 @@ export function requiredBridgeVersion(m: ManifestLike): { bridge: string | null;
     if (c.operations.includes("tb.holds_pending")) used.add("holds_pending_companion");
   }
   if (m.events !== undefined) used.add("events");
+  if ((m.operations ?? []).some((o) => o.secretOutput === true)) used.add("secret_output");
   let bridge: string | null = null;
   const reasons: string[] = [];
   const bump = (v: string, why: string) => {

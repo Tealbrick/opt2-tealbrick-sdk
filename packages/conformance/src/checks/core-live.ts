@@ -251,7 +251,7 @@ const STATUS_TABLE: [number[], string[]][] = [
   [[403], ["forbidden"]],
   [[404], ["not_found"]],
   [[405], ["method_not_allowed"]],
-  [[409], ["conflict", "revision_conflict", "idempotency_conflict", "licence_already_assigned", "licence_not_active", "workspace_paused", "workspace_standalone", "workspace_not_empty", "bridge_not_ready", "destination_in_use", "deploy_in_progress", "instance_exists", "draft_state"]],
+  [[409], ["conflict", "revision_conflict", "idempotency_conflict", "licence_already_assigned", "licence_not_active", "workspace_paused", "workspace_standalone", "workspace_not_empty", "bridge_not_ready", "destination_in_use", "deploy_in_progress", "instance_exists", "draft_state", "bridge_cap_missing"]],
   [[413], ["payload_too_large"]],
   [[429], ["rate_limited"]],
   [[422], ["manifest_invalid", "release_not_deployable", "offer_unavailable"]],
@@ -261,6 +261,8 @@ const STATUS_TABLE: [number[], string[]][] = [
   [[500], ["internal"]],
 ];
 const STATUS_OF: Record<string, number[]> = Object.fromEntries(STATUS_TABLE.flatMap(([st, codes]) => codes.map((code) => [code, st])));
+/** The HTTP statuses PORTAL-API §1.4 allows for a Core error code (undefined = not in the table). spec 0.1.68 adds `bridge_cap_missing` (409). */
+export const coreErrorStatus = (code: string): readonly number[] | undefined => STATUS_OF[code];
 
 const STACK_RE = /\bat [\w$.<>]+ \(|\.(?:ts|js|mjs|cjs):\d+:\d+|node_modules[\\/]|Traceback \(most recent|\bException:|\bTypeError:|\bReferenceError:/;
 const INTERNAL_HOST_RE = /\.railway\.internal\b|\.svc\.cluster\.local\b|\blocalhost:\d+|\b127\.0\.0\.1\b|\b10\.\d{1,3}\.\d{1,3}\.\d{1,3}\b|\b192\.168\.\d{1,3}\.\d{1,3}\b/;

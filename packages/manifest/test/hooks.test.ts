@@ -89,3 +89,57 @@ test("normalizeTag / tagsMatch (G5): trim + lower case on both sides; anyOf at l
   assert.equal(tagsMatch({ noneOf: ["secret"] }, []), true);
   assert.equal(tagsMatch({ anyOf: ["work"], noneOf: ["secret"] }, ["work", "Secret"]), false);
 });
+
+test("datasetsMatch (spec 0.1.68, C336 RQ-2, SDK-API §18.5 rule 3): exact, case-sensitive; key present → ids non-empty, anyOf all in it, noneOf none", async () => {
+  const { datasetsMatch } = await import("../src/index.ts");
+  assert.equal(datasetsMatch(undefined, ["public.orders"]), true, "absent narrowing = pass");
+  assert.equal(datasetsMatch(undefined, []), true);
+  assert.equal(datasetsMatch({ anyOf: ["public.orders"] }, ["public.orders"]), true);
+  assert.equal(datasetsMatch({ anyOf: ["public.orders", "public.items"] }, ["public.orders", "public.items"]), true);
+  assert.equal(datasetsMatch({ anyOf: ["public.orders"] }, ["public.orders", "public.customers"]), false, "EVERY id must be in anyOf");
+  assert.equal(datasetsMatch({ anyOf: ["public.orders"] }, []), false, "anyOf: a read that names no dataset does not pass");
+  assert.equal(datasetsMatch({ anyOf: [] }, ["public.orders"]), false, "anyOf: [] passes nothing");
+  assert.equal(datasetsMatch({ anyOf: [] }, []), false);
+  // exact: no case folding, no trimming, no Unicode normalisation
+  assert.equal(datasetsMatch({ anyOf: ["public.orders"] }, ["Public.Orders"]), false, "case variant");
+  assert.equal(datasetsMatch({ anyOf: ["public.orders"] }, [" public.orders"]), false, "space variant");
+  assert.equal(datasetsMatch({ anyOf: ["café"] }, ["cafe\u0301"]), false, "NFD variant");
+  assert.equal(datasetsMatch({ anyOf: ["public.orders"] }, ["public.\u200borders"]), false, "zero-width variant");
+  assert.equal(datasetsMatch({ noneOf: ["hr.salaries"] }, ["HR.Salaries"]), true, "noneOf is exact too (canonical ids never differ only by case)");
+  assert.equal(datasetsMatch({ noneOf: ["hr.salaries"] }, ["public.orders", "hr.salaries"]), false, "any one denied id fails");
+  assert.equal(datasetsMatch({ noneOf: ["hr.salaries"] }, ["public.orders"]), true);
+  assert.equal(datasetsMatch({ noneOf: ["hr.salaries"] }, []), false, "spec bd00164: key present + empty id list fails under noneOf too (empty = every dataset)");
+  assert.equal(datasetsMatch({ noneOf: [] }, []), false, "even with an empty noneOf");
+  assert.equal(datasetsMatch({ noneOf: [] }, ["public.orders"]), true);
+  assert.equal(datasetsMatch({ anyOf: ["public.orders", "hr.salaries"], noneOf: ["hr.salaries"] }, ["hr.salaries"]), false, "noneOf wins over anyOf");
+  assert.equal(datasetsMatch({ anyOf: ["public.orders", "hr.salaries"], noneOf: ["hr.salaries"] }, ["public.orders"]), true);
+  // malformed never passes (fail closed)
+  assert.equal(datasetsMatch({} as never, ["public.orders"]), false, "{} is malformed");
+  assert.equal(datasetsMatch(null as never, ["public.orders"]), false, "null is malformed");
+  assert.equal(datasetsMatch({ noneOf: "hr.salaries" } as never, ["public.orders"]), false, "a non-array is malformed");
+});
+
+test("deepDatasetsValid (spec 0.1.68, SDK-API §18.5 rule 1): an object with anyOf and/or noneOf, each ≤ 64 strings of 1–128 chars", async () => {
+  const { deepDatasetsValid, DEEP_DATASETS_MAX_IDS, DEEP_DATASET_ID_MAX_CHARS } = await import("../src/index.ts");
+  assert.equal(DEEP_DATASETS_MAX_IDS, 64);
+  assert.equal(DEEP_DATASET_ID_MAX_CHARS, 128);
+  for (const ok of [{ anyOf: [] }, { noneOf: [] }, { anyOf: ["a"], noneOf: ["b"] }, { anyOf: Array.from({ length: 64 }, (_, i) => `d${i}`) }, { noneOf: ["x".repeat(128)] }]) {
+    assert.equal(deepDatasetsValid(ok), true, JSON.stringify(ok).slice(0, 80));
+  }
+  for (const bad of [
+    {},
+    null,
+    undefined,
+    [],
+    "public.orders",
+    { anyOf: "public.orders" },
+    { anyOf: null },
+    { anyOf: [1] },
+    { anyOf: [""] },
+    { noneOf: ["x".repeat(129)] },
+    { anyOf: Array.from({ length: 65 }, (_, i) => `d${i}`) },
+    { anyOf: ["a"], extra: [] },
+  ]) {
+    assert.equal(deepDatasetsValid(bad), false, JSON.stringify(bad)?.slice(0, 80));
+  }
+});

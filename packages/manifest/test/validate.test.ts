@@ -639,3 +639,53 @@ describe("v0.1.21 (spec 0.1.43): viewer routes (M-PR-2) and listing (M-OP-11)", 
     expectIssue(mutate((m) => (m.contracts = { produces: ["messages/9"] })), "schema", "schema_invalid");
   });
 });
+
+describe("spec 0.1.68 (C336 RQ-3, S-8): secretOutput (M-OP-12)", () => {
+  const secretRaw = (extra: object) => ({
+    id: "credential_issue",
+    title: "Issue credential",
+    description: "Returns a short-lived credential.",
+    crud: ["read"],
+    effect: "read",
+    idempotency: "none",
+    receipt: true,
+    audience: "agent",
+    secretOutput: true,
+    input: { type: "object", additionalProperties: false, properties: {} },
+    output: { type: "object", properties: { token: { type: "string" } } },
+    ...extra,
+  });
+  const secret = (extra: object) => JSON.parse(JSON.stringify(secretRaw(extra))); // drops keys set to undefined
+  test("a valid secretOutput op passes (schema accepts the field)", () => {
+    const r = mutate((m) => m.operations.push(secret({})));
+    assert.equal(r.ok, true, JSON.stringify(!r.ok && r.errors));
+  });
+  test("a secretOutput op keeps its own effect (a write lease passes)", () => {
+    const r = mutate((m) => m.operations.push(secret({ crud: ["update"], effect: "write" })));
+    assert.equal(r.ok, true, JSON.stringify(!r.ok && r.errors));
+  });
+  test("secretOutput: false → schema_invalid (const true)", refuses("schema", "schema_invalid", (m) => m.operations.push(secret({ secretOutput: false }))));
+  for (const [name, extra] of [
+    ["receipt false", { receipt: false }],
+    ["idempotency supported", { idempotency: "supported" }],
+    ["idempotency required", { idempotency: "required" }],
+    ["audience person", { audience: "person" }],
+    ["dynamic", { dynamic: { mode: "search", crudCeiling: ["read"], effectCeiling: "read" }, input: undefined, output: undefined }],
+  ] as const) {
+    test(`M-OP-12 secretOutput with ${name} → secret_output_invalid`, () => {
+      const m = base();
+      m.operations.push(secret(extra));
+      const r = validateManifest(m);
+      expectIssue(r, "M-OP-12", "secret_output_invalid");
+      if (!r.ok) {
+        const at = `/operations/${m.operations.length - 1}`;
+        assert.ok(r.errors.filter((e) => e.code === "secret_output_invalid").every((e) => e.path.startsWith(at)), JSON.stringify(r.errors));
+      }
+    });
+  }
+  test("M-OP-11 (listing_invalid) keeps its own rule id and code", refuses("M-OP-11", "listing_invalid", (m) => (m.operations.find((o: any) => o.audience === "person").listing = "workflow")));
+  test("an op without secretOutput is untouched by M-OP-12 (receipt false, idempotency supported)", () => {
+    const r = mutate((m) => m.operations.push(secret({ idempotency: "supported", receipt: false, secretOutput: undefined })));
+    assert.equal(r.ok, true, JSON.stringify(!r.ok && r.errors));
+  });
+});
