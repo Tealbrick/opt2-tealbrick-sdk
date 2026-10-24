@@ -561,7 +561,7 @@ export async function startMiniApp(released: Manifest, env: Record<string, strin
   const fail = (res: ServerResponse, e: E) => json(res, e.status, { error: { code: e.code, message: e.code, requestId: `req_${randomBytes(6).toString("hex")}` } });
   const pausedFor = (agent: string | null) => {
     if (faults.ignorePause || !slice) return { workspace: false, instance: false, agent: false };
-    return { workspace: slice.pause.workspace, instance: slice.pause.instances.includes(ins), agent: agent !== null && slice.pause.agents.includes(agent as never) };
+    return { workspace: slice.pause.workspace, instance: slice.pause.instances.includes(ins), agent: agent !== null && (slice.pause.agents.includes(agent as never) || slice.agents.some((a) => a.id === agent && a.status === "paused")) };
   };
   const levelCrud = (type: string, level: string) => manifest.scopes?.find((s) => s.type === type)?.access.find((a) => a.id === level)?.crud ?? [];
   type ScopeRow = State["scopes"][number];
