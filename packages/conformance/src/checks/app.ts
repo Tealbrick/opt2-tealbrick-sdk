@@ -988,14 +988,14 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   });
   await s.run("A4.holds_list", "one table: holds are receipt rows", "person tb.holds_list contains the hold with status held", async () => {
     if (!hold || !sess) return noHold("no hold/session");
-    const r = await c().personOp(sess, "tb.holds_list", {});
+    const r = await c().personList(sess, "tb.holds_list");
     const items = isObj(r.output) && Array.isArray(r.output.items) ? r.output.items : [];
     const row = items.find((x) => isObj(x) && x.id === holdIdOf((hold as { answer: OpAnswer }).answer));
     return verdict(isObj(row) && row.status === "held", row ? `row status ${String((row as Record<string, unknown>).status)}` : `${show(r)}, ${items.length} items, hold missing`);
   });
   await s.run("A4.receipt_digest", "receipt stores input digest, never raw input", "receipt row: inputDigest = sha256(JCS input); the canonical input is not in the receipt list", async () => {
     if (!hold || !sess) return noHold("no hold/session");
-    const r = await c().personOp(sess, "tb.receipts_list", {});
+    const r = await c().personList(sess, "tb.receipts_list");
     const items = isObj(r.output) && Array.isArray(r.output.items) ? r.output.items : [];
     const h = hold as { input: Json; answer: OpAnswer };
     const row = items.find((x) => isObj(x) && x.id === holdIdOf(h.answer)) as Record<string, unknown> | undefined;
@@ -1126,7 +1126,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   const rowIdOf = (a: OpAnswer) => (isHeld(a) ? holdIdOf(a) : isOk(a) && isObj(a.body) && typeof a.body.receiptId === "string" ? a.body.receiptId : null);
   const receiptRows = async (): Promise<Record<string, unknown>[]> => {
     if (!sess) return [];
-    const r = await c().personOp(sess, "tb.receipts_list", {});
+    const r = await c().personList(sess, "tb.receipts_list");
     return (isObj(r.output) && Array.isArray(r.output.items) ? r.output.items : []).filter(isObj);
   };
   await s.run("A12.caller_name", "an app caller is named from slice companionCallers; an unlisted one by its instance id (C102)", "a caller listed in companionCallers {product, ins, name} calls a receipt op (companion grant sub tb:ins:<ins>) → its tb.receipts_list row has caller.name = that name; an unlisted caller's row has caller.name = its instance id", async () => {
@@ -2412,7 +2412,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
       const a = await c().callBridgeOp("mark", { call: t.call, mark: "after_failed" });
       if (a.status !== 200) return bad(`mark (${t.kind}) ${show(a)}`);
     }
-    const r = await c().personOp(sess, "tb.receipts_list", {});
+    const r = await c().personList(sess, "tb.receipts_list");
     const items = isObj(r.output) && Array.isArray(r.output.items) ? r.output.items : [];
     let pass = true;
     for (const t of targets) {
@@ -2434,7 +2434,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   const hvCall = (input: Json, reason: string, opts: CallOptions = {}) => c().callOp((hvOp as Operation).id, input, { hv: hvClaim(reason), idempotencyKey: idemKey(hvOp), ...opts });
   const listHolds = async (): Promise<Record<string, unknown>[]> => {
     if (!sess) return [];
-    const r = await c().personOp(sess, "tb.holds_list", {});
+    const r = await c().personList(sess, "tb.holds_list");
     return (isObj(r.output) && Array.isArray(r.output.items) ? r.output.items : []).filter(isObj);
   };
   const openHolds = async () => (await listHolds()).filter((x) => x.status === "held").length;

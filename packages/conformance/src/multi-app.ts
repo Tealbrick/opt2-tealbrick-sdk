@@ -326,7 +326,7 @@ class World {
   async #receiptRow(peer: Peer, rowIdValue: string): Promise<Record<string, unknown> | null> {
     const sess = await this.#session(peer);
     if (!sess) return null;
-    const r = await peer.bridge.client(peer.url()).personOp(sess, "tb.receipts_list", {});
+    const r = await peer.bridge.client(peer.url()).personList(sess, "tb.receipts_list");
     const items = isObj(r.output) && Array.isArray(r.output.items) ? r.output.items.filter(isObj) : [];
     return items.find((x) => x.id === rowIdValue) ?? null;
   }
@@ -470,7 +470,7 @@ class World {
         if (!isHeldBody(first)) return bad(`first call answered ${answerOf(first)}, expected 202 held${errorCode(first.body) === "scope_denied" ? " (the op is scoped and the app caller holds no scope instance on the peer)" : ""}`);
         const holdId = String((first.body as { holdId: string }).holdId);
         const client = peer.bridge.client(peer.url());
-        const listed = await client.personOp(sess, "tb.holds_list", {});
+        const listed = await client.personList(sess, "tb.holds_list");
         if (!JSON.stringify(listed.output ?? null).includes(holdId)) return bad(`hold ${holdId} is not listed by the peer's tb.holds_list (${listed.status})`);
         const d = await client.personOp(sess, "tb.holds_decide", { holdId, decision: "approve" });
         if (d.status !== 200) return bad(`approve ${holdId} → ${d.status}${d.code ? ` ${d.code}` : ""}`);

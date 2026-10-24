@@ -410,6 +410,24 @@ export class AppClient {
     return { ...a, code: errorCode(a.body), output };
   }
 
+  /**
+   * A paged person list op (tb.receipts_list, tb.holds_list): follows `nextCursor` (at most `maxPages` pages) and answers
+   * like `personOp` with every row in `output.items`. A check that looks for one row must not depend on the default page
+   * size: an app with many receipt ops (or a companion sweep, A12) writes more rows than one page holds.
+   */
+  async personList(sess: PersonSession, op: string, input: Record<string, Json> = {}, maxPages = 50): Promise<HttpAnswer & { code: string | null; output: unknown }> {
+    let a = await this.personOp(sess, op, input);
+    const items: unknown[] = [];
+    for (let page = 1; ; page++) {
+      const out = isObj(a.output) ? a.output : null;
+      if (!out || !Array.isArray(out.items)) return a;
+      items.push(...out.items);
+      const next = typeof out.nextCursor === "string" && out.nextCursor !== "" ? out.nextCursor : null;
+      if (next === null || page >= maxPages) return { ...a, output: { ...out, items, nextCursor: next } };
+      a = await this.personOp(sess, op, { ...input, cursor: next });
+    }
+  }
+
   logout(sess: PersonSession): Promise<HttpAnswer> {
     return this.#send("POST", `${this.personBase}/tb/v1/logout`, { "content-type": "application/json", cookie: `tb_session=${sess.cookie}`, "tb-csrf": sess.csrf, origin: this.url }, "{}");
   }
