@@ -3,6 +3,7 @@
 // (serviceKeys in the claim answer) and the SDK incl. tb-exec — Coordinator request after the live probe (keys whose
 // `when` is false are not needed).
 import type { Condition, ConditionValue, KeyRequirement, Manifest, SettingField } from "@opt2-tealbrick/spec/manifest";
+import { declaredModelRoles, type ModelRoleRequirement } from "./model-roles.ts";
 
 export type SettingValues = Record<string, ConditionValue | undefined>;
 
@@ -71,4 +72,13 @@ export function activeKeyRequirements(manifest: Manifest, settings: SettingValue
   return (manifest.settings?.keys ?? []).filter(
     (k) => (usedBy === undefined || k.usedBy.includes(usedBy)) && conditionHolds(k.when, settings) && (k.step === undefined || conditionHolds(stepWhen.get(k.step), settings)),
   );
+}
+
+/**
+ * Model roles in force for these settings (v0.1.63, MANIFEST §7.1), optionally only those a consumer (`"app"` or a service id)
+ * uses. Same `when` evaluation as `activeKeyRequirements`; roles have no `step`. One function for Core's
+ * `modelRoleRequirements`, the GUI, the bridge, the SDK readiness check and tb-exec.
+ */
+export function activeModelRoles(manifest: Manifest, settings: SettingValues, usedBy?: string): ModelRoleRequirement[] {
+  return declaredModelRoles(manifest).filter((r) => (usedBy === undefined || r.usedBy.includes(usedBy)) && conditionHolds(r.when, settings));
 }

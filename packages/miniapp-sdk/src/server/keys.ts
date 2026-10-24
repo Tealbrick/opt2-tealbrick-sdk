@@ -1,6 +1,7 @@
 // Keys (SDK-API §8, CORE §10, C2): app-own value (tb_keys, sealed under TB_KEK) wins over the workspace default
 // fetched from the bridge (`GET /tb/v1/keys/<name>` with TB-Assert). Defaults are cached in memory until `keysRev`
 // changes or the slice shows a pause. Values are never logged, returned to persons, or compared in clear.
+// v0.1.63: the model-role bindings ride on the same revision (`modelRole`, ./model-roles.ts); `keysRev` is one number for both.
 
 import { conditionHolds, settingsFromEnv } from "@opt2-tealbrick/manifest";
 import { BRIDGE_INTERNAL_PATHS, type KeyFetchResponse } from "@opt2-tealbrick/spec/bridge";
@@ -10,6 +11,7 @@ import type { BridgeClient } from "./bridge-client.ts";
 import { errorFrom } from "./bridge-client.ts";
 import { TbError } from "./errors.ts";
 import type { SecretRegistry } from "./log.ts";
+import { createModelRoles, type ModelRolesInternals } from "./model-roles.ts";
 import type { Sealer } from "./secrets.ts";
 import type { RawDb, Row } from "./store.ts";
 
@@ -25,6 +27,10 @@ export function keyConditionHolds(when: Condition | undefined, manifest: Manifes
 }
 
 export interface KeysInternals extends KeyApi {
+  /** v0.1.63: required model roles in force that do not resolve (readiness `needs_keys`) */
+  rolesMissing: ModelRolesInternals["missing"];
+  /** v0.1.63: `model_role_missing` attention while `rolesMissing()` is not empty */
+  rolesAttention: ModelRolesInternals["attention"];
   set(principal: PersonPrincipal, name: string, value: string): Promise<void>;
   remove(principal: PersonPrincipal, name: string): Promise<void>;
   /** status long-poll returned a new keysRev */
@@ -47,12 +53,15 @@ export function createKeys(opts: {
   log: Logger;
   bridge: () => BridgeClient | null;
   emit: (names: string[]) => Promise<void>;
+  /** v0.1.63: what readiness knows about the model roles changed: push a status */
+  rolesChanged?: () => void;
 }): KeysInternals {
   const { db, manifest, sealer, secrets } = opts;
   const declared = new Map<string, KeyRequirement>((manifest.settings?.keys ?? []).filter((k) => k.usedBy.includes("app")).map((k) => [k.name, k]));
   const cache = new Map<string, string | null>();
   const listeners = new Set<(names: string[]) => void>();
   let rev = 0;
+  const roles = createModelRoles({ manifest, env: opts.env, secrets, log: opts.log, bridge: opts.bridge, rev: () => rev, changed: opts.rolesChanged });
 
   const req = (name: string): KeyRequirement => {
     const k = declared.get(name);
@@ -111,6 +120,9 @@ export function createKeys(opts: {
       }
       return k.source === "account_default" ? fetchDefault(name) : null;
     },
+    modelRole: (role) => roles.modelRole(role),
+    rolesMissing: roles.missing,
+    rolesAttention: roles.attention,
     onKeysChanged(cb) {
       listeners.add(cb);
       return () => listeners.delete(cb);
@@ -143,10 +155,12 @@ export function createKeys(opts: {
       rev = next;
       cache.clear();
       await this.refresh();
+      // the callbacks below may call modelRole(): the role cache is keyed by `rev`, so they already read fresh bindings
       await notify([...declared.values()].filter((k) => k.source === "account_default").map((k) => k.name));
     },
     dropCache() {
       cache.clear();
+      roles.dropCache();
     },
     async refresh() {
       for (const k of declared.values()) {
@@ -157,6 +171,7 @@ export function createKeys(opts: {
           opts.log.debug("key prefetch failed", { name: k.name, code: e instanceof TbError ? e.code : "error" });
         }
       }
+      await roles.refresh();
     },
     needsKeys() {
       return [...declared.values()].some((k) => k.required && keyConditionHolds(k.when, manifest, opts.env) && !present(k).present);

@@ -59,6 +59,87 @@ function trustFor(b: FakeBridge, slice: InstanceSlice): TrustContext {
   };
 }
 
+describe("fake bridge: model roles (v0.1.63, BRIDGE §15.4)", () => {
+  const withRoles = {
+    ...manifest,
+    settings: {
+      ...manifest.settings,
+      modelRoles: [
+        { role: "reasoning", required: true, minPolicy: "zdr", usedBy: ["app"] },
+        { role: "embeddings", required: false, usedBy: ["app"] },
+        { role: "transcribe", required: false, usedBy: ["worker"] },
+      ],
+    },
+  } as unknown as Manifest;
+  let b: FakeBridge;
+  let key: Ed25519KeyPair;
+  const binding = (over: Record<string, unknown> = {}) => ({ provider: "openai", model: "gpt-5", baseUrl: "https://api.openai.com/v1", key: "sk-fake-role-value-1234567890", dataPolicy: "zdr" as const, dims: null, ...over });
+  before(async () => {
+    b = await createFakeBridge({ manifest: withRoles, maxWaitS: 1 });
+    key = await generateKeyPair();
+    const r = await post(`${b.url}/tb/v1/claim`, claimBody(b, key, { manifestDigest: manifestDigest(withRoles) }));
+    assert.equal(r.status, 200);
+  });
+  after(() => b.close());
+
+  it("an undeclared role, a role not in MODEL_ROLES and a role declared for another caller → 403 role_not_declared; nothing is recorded", async () => {
+    for (const role of ["rerank", "chat", "transcribe"]) {
+      const r = await signed(b, key, "GET", `/tb/v1/model-roles/${role}`);
+      assert.deepEqual([r.status, r.body.error.code], [403, "role_not_declared"], role);
+    }
+    assert.equal(b.roleFetches.length, 0);
+  });
+
+  it("declared but unset → 404 role_not_set; set → the binding with keysRev and no-store; delete → 404 again; each change bumps keysRev", async () => {
+    assert.equal((await signed(b, key, "GET", "/tb/v1/model-roles/embeddings")).body.error.code, "role_not_set");
+    const before = b.control.keysRev;
+    b.control.setRole("embeddings", binding({ provider: "voyage", model: "voyage-3", baseUrl: null, dataPolicy: "standard", dims: 1024 }));
+    assert.equal(b.control.keysRev, before + 1);
+    const ok = await signed(b, key, "GET", "/tb/v1/model-roles/embeddings");
+    assert.equal(ok.status, 200);
+    assert.deepEqual(ok.body, { role: "embeddings", provider: "voyage", model: "voyage-3", baseUrl: null, key: "sk-fake-role-value-1234567890", dataPolicy: "standard", dims: 1024, keysRev: before + 1 });
+    const raw = await fetch(`${b.url}/tb/v1/model-roles/embeddings`, { headers: { "TB-Assert": await signInstanceAssertion({ key, ins: b.ids.ins, bridge: b.ids.bridge, method: "GET", pathAndQuery: "/tb/v1/model-roles/embeddings", now: now() }) } });
+    assert.equal(raw.headers.get("cache-control"), "no-store");
+    b.control.deleteRole("embeddings");
+    assert.equal(b.control.keysRev, before + 2);
+    assert.equal((await signed(b, key, "GET", "/tb/v1/model-roles/embeddings")).status, 404);
+    assert.deepEqual(b.roleFetches.map((f) => f.role).slice(0, 2), ["embeddings", "embeddings"]);
+  });
+
+  it("a binding below the declared minPolicy → 403 role_policy_too_low with no binding field; a stricter one passes; an unset bound key → 404", async () => {
+    b.control.setRole("reasoning", binding({ dataPolicy: "standard" }));
+    const low = await signed(b, key, "GET", "/tb/v1/model-roles/reasoning");
+    assert.deepEqual([low.status, low.body.error.code], [403, "role_policy_too_low"]);
+    assert.ok(!JSON.stringify(low.body).includes("openai"), "nothing of the binding is sent");
+    b.control.setRole("reasoning", binding({ dataPolicy: "local", baseUrl: "http://llama.railway.internal:8080" }));
+    assert.equal((await signed(b, key, "GET", "/tb/v1/model-roles/reasoning")).status, 200);
+    b.control.setRole("reasoning", { ...binding(), keyUnset: true });
+    assert.equal((await signed(b, key, "GET", "/tb/v1/model-roles/reasoning")).body.error.code, "role_not_set");
+  });
+
+  it("declares cap model_roles in the slice while it serves the route; without the route: no cap, 404 not_found (RM-17)", async () => {
+    const caps = async () => (peek(b.slice as string) as unknown as InstanceSlice).bridge.caps;
+    await b.control.publishKeySet();
+    assert.deepEqual(await caps(), ["model_roles"]);
+    await b.control.setModelRoutes(false);
+    assert.equal(await caps(), undefined);
+    const gone = await signed(b, key, "GET", "/tb/v1/model-roles/reasoning");
+    assert.deepEqual([gone.status, gone.body.error.code], [404, "not_found"]);
+    await b.control.setModelRoutes(true);
+    assert.deepEqual(await caps(), ["model_roles"]);
+    await b.control.setBridgeCaps(["owner_rows"]);
+    assert.deepEqual(await caps(), ["owner_rows"], "an explicit list wins");
+    await b.control.setBridgeCaps(undefined);
+  });
+
+  it("assertion required; paused instance → 403 paused", async () => {
+    assert.equal((await fetch(`${b.url}/tb/v1/model-roles/reasoning`)).status, 401);
+    await b.control.pauseInstance(true);
+    assert.equal((await signed(b, key, "GET", "/tb/v1/model-roles/reasoning")).body.error.code, "paused");
+    await b.control.pauseInstance(false);
+  });
+});
+
 describe("fake bridge: claim", () => {
   let b: FakeBridge;
   let key: Ed25519KeyPair;

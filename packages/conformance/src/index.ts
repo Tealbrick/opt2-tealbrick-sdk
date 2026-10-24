@@ -20,6 +20,7 @@ export {
   FakeBridgeControl,
   type FakeBridgeIds,
   type FakeBridgeOptions,
+  type FakeRoleBinding,
 } from "./fake-bridge.ts";
 export { createFakePortal, FAKE_PORTAL_ROUTES, FakePortal, FakePortalControl, type FakePortalOptions } from "./fake-portal.ts";
 export { FakeUpstream, type UpstreamRequest } from "./fake-upstream.ts";

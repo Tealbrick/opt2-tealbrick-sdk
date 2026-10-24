@@ -35,8 +35,8 @@ test("childEnv strips every TB_* name and adds the keys", () => {
   assert.deepEqual(env, { PATH: "/bin", HOME: "/h", ENGINE_KEY: "v" });
 });
 
-function run(w: ExecWorld, extra: string[] = [], controlPort?: number): TbExecHandle {
-  return startTbExec({ argv: [...extra, "--manifest", w.manifestPath, "--", process.execPath, UPSTREAM, w.outFile], env: w.env, host: "127.0.0.1", controlPort, logSink: w.sink });
+function run(w: ExecWorld, extra: string[] = [], controlPort?: number, env: Record<string, string> = {}): TbExecHandle {
+  return startTbExec({ argv: [...extra, "--manifest", w.manifestPath, "--", process.execPath, UPSTREAM, w.outFile], env: { ...w.env, ...env }, host: "127.0.0.1", controlPort, logSink: w.sink });
 }
 
 describe("tb-exec with helper and backup", () => {
@@ -403,4 +403,193 @@ describe("tb-exec claim guard (v0.1.12, spine S1)", () => {
       await w.cleanup();
     }
   });
+});
+
+// v0.1.39 (spec 0.1.63, BRIDGE §15.4, MANIFEST §7.1): model roles → env of a service started by tb-exec.
+describe("tb-exec model roles (BRIDGE §15.4)", () => {
+  const ENV = { provider: "ROLE_PROVIDER", model: "ROLE_MODEL", baseUrl: "ROLE_URL", key: "ROLE_KEY", dims: "ROLE_DIMS" };
+  const ROLE_KEY = "role-key-fixture-not-a-secret";
+  const emb = (over: Record<string, unknown> = {}) => ({
+    status: 200,
+    body: { role: "embeddings", provider: "openai", model: "text-embedding-3-large", baseUrl: "https://api.openai.com/v1", key: ROLE_KEY, dataPolicy: "zdr", dims: 3072, ...over },
+  });
+  const refusal = (status: number, code: string) => ({ status, body: { error: { code, message: code, requestId: "req_test" } } });
+  const stop = async (h: TbExecHandle) => {
+    h.signal("SIGTERM");
+    await h.exited;
+  };
+
+  test("a role listing the service with env: provider, model, baseUrl, key, dims (as a string) reach the child; the key is never logged", { timeout: 30_000 }, async () => {
+    const w = await execWorld({ helper: false, backup: false, modelRoles: [{ role: "embeddings", required: false, usedBy: [SERVICE], env: ENV }] });
+    w.bridge.setRole("embeddings", emb());
+    try {
+      const h = run(w);
+      await until(() => w.starts().length === 1);
+      assert.deepEqual(w.starts()[0]?.roleEnv, { ROLE_PROVIDER: "openai", ROLE_MODEL: "text-embedding-3-large", ROLE_URL: "https://api.openai.com/v1", ROLE_KEY: ROLE_KEY, ROLE_DIMS: "3072" });
+      assert.deepEqual(w.starts()[0]?.tbNames, []);
+      assert.deepEqual(w.bridge.roleFetches.slice(0, 1), ["embeddings"]);
+      assert.deepEqual(w.bridge.refused, [], "fetched with a valid service assertion");
+      assert.ok(!w.logs.some((l) => l.includes(ROLE_KEY)), "role key must never be logged");
+      await stop(h);
+    } finally {
+      await w.cleanup();
+    }
+  });
+
+  test("a binding without key or dims sets only the env names that have a value", { timeout: 30_000 }, async () => {
+    const w = await execWorld({ helper: false, backup: false, modelRoles: [{ role: "embeddings", required: false, usedBy: [SERVICE], env: ENV }] });
+    w.bridge.setRole("embeddings", emb({ provider: "ollama", model: "nomic-embed-text", baseUrl: "http://ollama.railway.internal:11434/v1", key: null, dims: null, dataPolicy: "local" }));
+    try {
+      const h = run(w);
+      await until(() => w.starts().length === 1);
+      assert.deepEqual(w.starts()[0]?.roleEnv, { ROLE_PROVIDER: "ollama", ROLE_MODEL: "nomic-embed-text", ROLE_URL: "http://ollama.railway.internal:11434/v1" });
+      await stop(h);
+    } finally {
+      await w.cleanup();
+    }
+  });
+
+  test("an unset optional role sets nothing and starts the upstream; a later binding restarts it with the env; an unchanged keysRev bump does not", { timeout: 40_000 }, async () => {
+    const w = await execWorld({ helper: false, backup: false, modelRoles: [{ role: "embeddings", required: false, usedBy: [SERVICE], env: ENV }] });
+    try {
+      const h = run(w);
+      await until(() => w.starts().length === 1);
+      assert.deepEqual(w.starts()[0]?.roleEnv, {});
+      assert.equal(w.starts()[0]?.key, KEY_VALUE, "keys still arrive");
+      w.bridge.setRole("embeddings", emb());
+      await until(() => w.starts().length === 2, 15_000);
+      assert.equal(w.starts()[1]?.roleEnv.ROLE_MODEL, "text-embedding-3-large");
+      assert.equal(w.starts()[1]?.roleEnv.ROLE_DIMS, "3072");
+      // the model changes → restart with the new model
+      w.bridge.setRole("embeddings", emb({ model: "text-embedding-3-small", dims: 1536 }));
+      await until(() => w.starts().length === 3, 15_000);
+      assert.equal(w.starts()[2]?.roleEnv.ROLE_MODEL, "text-embedding-3-small");
+      assert.equal(w.starts()[2]?.roleEnv.ROLE_DIMS, "1536");
+      // same binding again: keysRev moves, values do not → no restart
+      w.bridge.setRole("embeddings", emb({ model: "text-embedding-3-small", dims: 1536 }));
+      const rev = w.bridge.keysRev;
+      await until(() => w.bridge.statusBodies.some((b) => b.keysRev === rev));
+      assert.equal(w.starts().length, 3);
+      // unset again → restart without the env names
+      w.bridge.setRole("embeddings", null);
+      await until(() => w.starts().length === 4, 15_000);
+      assert.deepEqual(w.starts()[3]?.roleEnv, {});
+      await stop(h);
+    } finally {
+      await w.cleanup();
+    }
+  });
+
+  test("below the policy (403 role_policy_too_low) and a refused role (403 role_not_declared) set nothing; the optional upstream still starts", { timeout: 30_000 }, async () => {
+    const w = await execWorld({
+      helper: false,
+      backup: false,
+      modelRoles: [
+        { role: "embeddings", required: false, usedBy: [SERVICE], env: { model: "ROLE_MODEL" } },
+        { role: "rerank", required: false, usedBy: [SERVICE], env: { model: "ROLE_RERANK" } },
+      ],
+    });
+    w.bridge.setRole("embeddings", refusal(403, "role_policy_too_low"));
+    w.bridge.setRole("rerank", refusal(403, "role_not_declared"));
+    try {
+      const h = run(w);
+      await until(() => w.starts().length === 1);
+      assert.deepEqual(w.starts()[0]?.roleEnv, {});
+      assert.ok(w.logs.some((l) => l.includes("model role not delivered") && l.includes("role_not_declared")));
+      await stop(h);
+    } finally {
+      await w.cleanup();
+    }
+  });
+
+  test("RM-20: a role-bound service never sees HTTP_PROXY, HTTPS_PROXY, ALL_PROXY or NO_PROXY (any case); a service without roles keeps them", { timeout: 40_000 }, async () => {
+    const proxies = { HTTP_PROXY: "http://proxy:3128", https_proxy: "http://proxy:3128", All_Proxy: "socks5://proxy:1080", NO_PROXY: "localhost", no_proxy: "localhost" };
+    const bound = await execWorld({ helper: false, backup: false, modelRoles: [{ role: "embeddings", required: false, usedBy: [SERVICE], env: ENV }] });
+    const plain = await execWorld({ helper: false, backup: false });
+    try {
+      const h1 = run(bound, [], undefined, proxies);
+      const h2 = run(plain, [], undefined, proxies);
+      await until(() => bound.starts().length === 1 && plain.starts().length === 1);
+      assert.deepEqual(bound.starts()[0]?.proxyEnv, [], "stripped for a role-bound service");
+      assert.deepEqual(plain.starts()[0]?.proxyEnv, ["All_Proxy", "HTTP_PROXY", "NO_PROXY", "https_proxy", "no_proxy"].sort());
+      await stop(h1);
+      await stop(h2);
+    } finally {
+      await bound.cleanup();
+      await plain.cleanup();
+    }
+  });
+
+  test("a required role that is unset: the upstream waits, status needs_keys + attention model_role_missing; it starts when the role is set", { timeout: 30_000 }, async () => {
+    const w = await execWorld({ helper: false, backup: false, modelRoles: [{ role: "reasoning", required: true, usedBy: [SERVICE], env: { model: "ROLE_MODEL", key: "ROLE_KEY" } }] });
+    try {
+      const h = run(w);
+      await until(() => w.bridge.statusBodies.length > 0, 10_000);
+      assert.equal(w.starts().length, 0, "upstream must not start without the required role");
+      const st = w.bridge.statusBodies.at(-1);
+      assert.equal(st?.readiness, "needs_keys");
+      assert.equal(st?.attention?.code, "model_role_missing");
+      assert.match(st?.attention?.reason ?? "", /reasoning/);
+      w.bridge.setRole("reasoning", emb({ role: "reasoning", model: "gpt-5", dims: null }));
+      await until(() => w.starts().length === 1, 15_000);
+      assert.deepEqual(w.starts()[0]?.roleEnv, { ROLE_MODEL: "gpt-5", ROLE_KEY: ROLE_KEY });
+      await until(() => w.bridge.statusBodies.at(-1)?.readiness === "ready", 10_000);
+      assert.equal(w.bridge.statusBodies.at(-1)?.attention, undefined);
+      await stop(h);
+    } finally {
+      await w.cleanup();
+    }
+  });
+
+  test("a role whose `when` is false for the settings the service carries is not asked for; a role without env, or for another service, is ignored", { timeout: 30_000 }, async () => {
+    const w = await execWorld({
+      helper: false,
+      backup: false,
+      settings: { steps: [{ id: "extras", title: "Extras", fields: [{ key: "vision", type: "boolean", label: "Vision", default: false }] }] },
+      runtimeEnv: [{ name: "JOTTER_VISION", setting: "vision" }],
+      modelRoles: [
+        { role: "vision", required: true, usedBy: [SERVICE], env: { model: "ROLE_VISION" }, when: { vision: true } },
+        { role: "utility", required: false, usedBy: [SERVICE] },
+        { role: "summarize", required: false, usedBy: ["app"] },
+      ],
+    });
+    w.bridge.setRole("vision", emb({ role: "vision", model: "gpt-vision" }));
+    try {
+      const h = startTbExec({ argv: ["--manifest", w.manifestPath, "--", process.execPath, UPSTREAM, w.outFile], env: { ...w.env, JOTTER_VISION: "false" }, host: "127.0.0.1", logSink: w.sink });
+      await until(() => w.starts().length === 1);
+      assert.deepEqual(w.starts()[0]?.roleEnv, {});
+      assert.deepEqual(w.bridge.roleFetches, [], "no role is fetched");
+      await stop(h);
+    } finally {
+      await w.cleanup();
+    }
+  });
+});
+
+test("rolesInForce: the roles tb-exec resolves for a service; a `when` on a setting the env does not carry is asked for but never blocks", async () => {
+  const { rolesInForce } = await import("../../src/exec/roles.ts");
+  const manifest = {
+    runtime: { env: [{ name: "MODE", setting: "mode" }] },
+    settings: {
+      steps: [{ id: "s", title: "S", fields: [{ key: "mode", type: "enum", label: "M", default: "a", choices: [] }, { key: "other", type: "enum", label: "O", choices: [] }] }],
+      modelRoles: [
+        { role: "embeddings", required: true, usedBy: ["engine"], env: { model: "EMB" }, when: { mode: "a" } },
+        { role: "rerank", required: true, usedBy: ["engine"], env: { model: "RR" }, when: { mode: "b" } },
+        { role: "vision", required: true, usedBy: ["engine"], env: { model: "VIS" }, when: { other: "x" } },
+        { role: "utility", required: false, usedBy: ["engine"] },
+        { role: "summarize", required: true, usedBy: ["app"], env: { model: "SUM" } },
+      ],
+    },
+  } as never;
+  assert.deepEqual(
+    rolesInForce(manifest, "engine", { MODE: "a" }).map((r) => [r.role, r.blocking]),
+    [
+      ["embeddings", true],
+      ["vision", false],
+    ],
+  );
+  assert.deepEqual(
+    rolesInForce(manifest, "engine", { MODE: "b" }).map((r) => r.role),
+    ["rerank", "vision"],
+  );
 });

@@ -39,8 +39,14 @@ export const SDK_COVERAGE: Readonly<Record<string, readonly string[]>> = {
   // @opt2-tealbrick/miniapp-sdk (server)
   CSRF_HEADER: ["A6.csrf"],
   decideHold: ["A4.decide_person_only", "A10"],
+  // v0.1.64 (C332a(4), person-op relay lane): declared by spec 0.1.64, not implemented in this repo yet; the nearest row keeps A11 green and
+  // the lane that implements it replaces the mapping
+  familyAllowedFor: ["A4.decide_person_only"],
   defineApp: ["A1.manifest_served", "M4.openapi", "A1.no_claim_route", "A17.pending_count"], // gitleaks:allow (check ids, not secrets)
   getKey: ["C8.keys_via_bridge"],
+  // v0.1.63: `modelRole` (the bridge route and its declared-role rule are exercised by the same check as keys; the role resolve itself
+  // by test/model-roles-real-sdk.test.ts). A dedicated A-row is a later conformance release.
+  modelRole: ["C8.keys_via_bridge"],
   onKeysChanged: ["C8.keys_via_bridge"],
   SESSION_COOKIE: ["A6"],
   startApp: ["A1", "A1.health", "A7.restart", "A16.call_outside_handler", "A17.status_changed"],

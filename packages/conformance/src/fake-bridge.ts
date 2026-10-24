@@ -1,18 +1,25 @@
 // Fake bridge (CONFORMANCE §3): the bridge internal surface an app talks to — `/tb/v1/claim`, `/tb/v1/status`
-// (long-poll), `/tb/v1/keys/<name>`, `/tb/v1/call` — exactly per BRIDGE §8.3, §9.4, §10, plus a programmatic control
+// (long-poll), `/tb/v1/keys/<name>`, `/tb/v1/model-roles/<role>` (v0.1.63, §15.4), `/tb/v1/call` — exactly per BRIDGE §8.3, §9.4, §10, plus a programmatic control
 // API and a client that drives an app the way the bridge does (CORE §8). It holds a fake Portal key set and a bridge
 // key, issues enrolment codes and signs slices / grants / proofs / tickets with the @opt2-tealbrick/manifest signers.
 // Unknown routes → 404 (default deny). Every request and answer is captured for the payload scans (C4, C8).
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import {
   assertPublicJwk,
+  DATA_POLICY_RANK,
   DEFAULT_HELD_FAMILIES,
+  declaredModelRoles,
   digestEqual,
   type Ed25519KeyPair,
   gate,
   generateKeyPair,
   keySetFrom,
   keySetFromPortalKeys,
+  MODEL_ROLES,
+  MODEL_ROLES_CAP,
+  MODEL_ROLES_PATH,
+  type ModelRole,
+  type ModelRoleFetchResponse,
   manifestDigest,
   memoryReplayGuard,
   opaqueDigest,
@@ -150,6 +157,12 @@ export interface FakeBridgeIds {
   peers: Record<string, InstanceId>;
 }
 
+/**
+ * conformance 0.1.30 (v0.1.63, BRIDGE §15.1): a role binding as the owner set it (the workspace default; the fake has no
+ * per-app override). `keyUnset: true` = the bound key is not set on the key page (the role then answers `role_not_set`).
+ */
+export type FakeRoleBinding = Omit<ModelRoleFetchResponse, "role" | "keysRev"> & { keyUnset?: boolean };
+
 export class FakeBridge {
   readonly ids: FakeBridgeIds;
   readonly manifest: Manifest;
@@ -159,6 +172,10 @@ export class FakeBridge {
   readonly claims: ClaimSeen[] = [];
   readonly statuses: StatusSeen[] = [];
   readonly keyFetches: { name: string; ins: InstanceId; at: number }[] = [];
+  /** v0.1.63 (BRIDGE §15.4): every model-role fetch that passed the assertion and the declaration check */
+  readonly roleFetches: { role: string; ins: InstanceId; svc?: string; at: number }[] = [];
+  /** v0.1.63: role → binding (see `control.setRole`); `keysRev` is one revision for keys and bindings */
+  readonly roleBindings = new Map<ModelRole, FakeRoleBinding>();
   readonly violations: Violation[] = [];
   readonly companionCalls: { envelope: CallEnvelope; caller: InstanceId; answer: number; at: number; grant: string }[] = [];
   /** CONF-MULTIAPP: companion targets that are REAL apps (product → target); every other target keeps the `companionResponder` fake */
@@ -205,6 +222,12 @@ export class FakeBridge {
    * any array is carried as given (the A22 rows publish known and unknown entries; `unknown[]` so a test can publish a malformed list).
    */
   bridgeCaps: unknown[] | undefined = undefined;
+  /**
+   * v0.1.63 (BRIDGE §15, cap `model_roles`): true = this fake serves `GET /tb/v1/model-roles/<role>` and, when `bridgeCaps` is not set
+   * and the manifest declares model roles, declares `model_roles` in the slices it signs. false = a bridge without the cap: no route
+   * (404 `not_found`, no refuse code; RM-17) and no cap.
+   */
+  modelRoutes = true;
   bridgeKeys: Ed25519KeyPair[];
   stranger: Ed25519KeyPair;
   readonly sdkMajors: number[];
@@ -418,7 +441,7 @@ export class FakeBridge {
       product: this.manifest.id,
       portalKeys: [...this.portalKeys.map((k) => ({ jwk: k.key.publicJwk, status: k.status })), ...(over?.extraPortalKeys ?? [])],
       ...(portalKeySet ? { portalKeySet } : {}),
-      bridge: { id: this.ids.bridge, keys: this.bridgeKeys.slice(0, 4).map((k) => k.publicJwk), ...(this.bridgeCaps !== undefined ? { caps: [...this.bridgeCaps] as string[] } : {}) },
+      bridge: { id: this.ids.bridge, keys: this.bridgeKeys.slice(0, 4).map((k) => k.publicJwk), ...(this.#sliceCaps() !== undefined ? { caps: this.#sliceCaps() as string[] } : {}) },
       pause: { workspace: this.pause.workspace, agents: [...this.pause.agents], instances: [...this.pause.instances] },
       revoked: { jtis: this.revoked.map((r) => ({ jti: r.jti, exp: r.exp })) },
       personNbf: this.personNbf,
@@ -437,6 +460,12 @@ export class FakeBridge {
     this.sliceRev = rev;
     this.wake();
     return rev;
+  }
+
+  /** `bridge.caps` of the next slice: the explicit list when a test set one, else `model_roles` while this fake serves the route for a manifest that declares roles. */
+  #sliceCaps(): unknown[] | undefined {
+    if (this.bridgeCaps !== undefined) return [...this.bridgeCaps];
+    return this.modelRoutes && declaredModelRoles(this.manifest).length > 0 ? [MODEL_ROLES_CAP] : undefined;
   }
 
   wake(): void {
@@ -493,6 +522,7 @@ export class FakeBridge {
       if (req.method === "POST" && path === BRIDGE_INTERNAL_PATHS.claim) return await this.#claim(raw, res);
       if (req.method === "POST" && path === BRIDGE_INTERNAL_PATHS.status) return await this.#status(req, pathAndQuery, raw, res);
       if (req.method === "GET" && path.startsWith("/tb/v1/keys/")) return this.#keys(req, pathAndQuery, path, res);
+      if (req.method === "GET" && path.startsWith(MODEL_ROLES_PATH.replace("{role}", ""))) return this.#modelRole(req, pathAndQuery, path, res);
       if (req.method === "POST" && path === BRIDGE_INTERNAL_PATHS.call) return await this.#call(req, pathAndQuery, raw, res);
       if (req.method === "POST" && path === BRIDGE_INTERNAL_PATHS.events) return this.#ingest(req, pathAndQuery, raw, res);
       if (path === "/mcp") return this.#mcp(req, raw, res);
@@ -649,6 +679,23 @@ export class FakeBridge {
     const value = this.keyValues.get(name);
     if (value === undefined) throw new HttpError(404, "key_not_set", "key not set on the key page");
     const body: KeyFetchResponse = { name, value, keysRev: this.keysRev };
+    sendJson(res, 200, body, { "cache-control": "no-store" });
+  }
+
+  /** v0.1.63, BRIDGE §15.4: declared for the caller → set → meets `minPolicy` → bound key set; `Cache-Control: no-store`. */
+  #modelRole(req: IncomingMessage, pathAndQuery: string, path: string, res: ServerResponse): void {
+    if (!this.modelRoutes) throw new HttpError(404, "not_found", "no such route");
+    const who = this.#verifyInstance(req, pathAndQuery, Buffer.alloc(0));
+    const role = decodeURIComponent(path.slice(MODEL_ROLES_PATH.replace("{role}", "").length));
+    if (this.pause.workspace || this.pause.instances.has(who.ins)) throw new HttpError(403, "paused", "workspace or instance paused");
+    const decl = (MODEL_ROLES as readonly string[]).includes(role) ? declaredModelRoles(this.manifest).find((r) => r.role === role && r.usedBy.includes(who.svc ?? "app")) : undefined;
+    if (!decl) throw new HttpError(403, "role_not_declared", "model role not declared for this caller");
+    this.roleFetches.push({ role, ins: who.ins, ...(who.svc ? { svc: who.svc } : {}), at: Date.now() });
+    const b = this.roleBindings.get(decl.role);
+    if (!b) throw new HttpError(404, "role_not_set", "no binding for this role");
+    if (DATA_POLICY_RANK[b.dataPolicy] < DATA_POLICY_RANK[decl.minPolicy ?? "standard"]) throw new HttpError(403, "role_policy_too_low", "the binding is below the declared minPolicy");
+    if (b.keyUnset) throw new HttpError(404, "role_not_set", "the bound key is not set");
+    const body: ModelRoleFetchResponse = { role: decl.role, provider: b.provider, model: b.model, baseUrl: b.baseUrl, key: b.key, dataPolicy: b.dataPolicy, dims: b.dims, keysRev: this.keysRev };
     sendJson(res, 200, body, { "cache-control": "no-store" });
   }
 
@@ -874,6 +921,22 @@ export class FakeBridgeControl {
     this.#b.keyValues.delete(name);
     this.#b.keysRev++;
     this.#b.wake();
+  }
+  /** v0.1.63 (BRIDGE §15.1): the owner sets a role binding: `keysRev` bumped, long-polls woken. */
+  setRole(role: ModelRole, binding: FakeRoleBinding): void {
+    this.#b.roleBindings.set(role, { ...binding });
+    this.#b.keysRev++;
+    this.#b.wake();
+  }
+  deleteRole(role: ModelRole): void {
+    this.#b.roleBindings.delete(role);
+    this.#b.keysRev++;
+    this.#b.wake();
+  }
+  /** v0.1.63 (RM-17): false = a bridge without cap `model_roles` (no route, no cap in the slices after the next publish); true = serves it. */
+  setModelRoutes(on: boolean): Promise<number> {
+    this.#b.modelRoutes = on;
+    return this.#b.rebuildSlice();
   }
   setConfigExpired(on: boolean): void {
     this.#b.configExpired = on;

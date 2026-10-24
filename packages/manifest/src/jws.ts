@@ -21,6 +21,7 @@ import { AGENT_MODES, CRUD_ACTIONS, HOOK_HOLD_FAMILIES, HOOK_PHASES } from "@opt
 import type { Ed25519KeyPair, JwsExpect, KeySet, Refusal } from "@opt2-tealbrick/spec/sdk";
 import { sha256Bytes } from "./jcs.ts";
 import { findKey, publicKeyObject } from "./keys.ts";
+import { DATA_POLICIES, MODEL_ID_PATTERN, MODEL_ROLE_HINTS_MAX, MODEL_ROLES, PROVIDER_ID_PATTERN } from "./model-roles.ts";
 import { ULID_RE, ulid } from "./random.ts";
 
 export type { JwsExpect, Refusal };
@@ -32,8 +33,10 @@ export const MAX_DOCUMENT_JWS_BYTES = 4 * 1024 * 1024;
 const DOCUMENT_TYPS: ReadonlySet<string> = new Set([TYP.config, TYP.slice]);
 /** v0.1.11 (C62/C63): the key-set statement has its own signer/verifier (keyset.ts: no exp/sub/jti, root keys). */
 export const KEYSET_TYP = "tb-keyset+jws";
-type ClaimTyp = Exclude<Typ, typeof KEYSET_TYP>;
-const ALL_TYPS: ReadonlySet<string> = new Set(Object.values(TYP as Record<string, string>).filter((t) => t !== KEYSET_TYP));
+/** Spec 0.1.58..0.1.64 added token types this package has no signer or verifier for (host agent: `tb-host-assert+jwt`, `tb-host-plan+jws`; person op: `tb-person-op+jwt`; other lanes), so they are unknown types here. */
+const UNSUPPORTED_TYPS: readonly string[] = [TYP.hostAssertion, TYP.hostPlan, TYP.personOp];
+type ClaimTyp = Exclude<Typ, typeof KEYSET_TYP | typeof TYP.hostAssertion | typeof TYP.hostPlan | typeof TYP.personOp>;
+const ALL_TYPS: ReadonlySet<string> = new Set(Object.values(TYP as Record<string, string>).filter((t) => t !== KEYSET_TYP && !UNSUPPORTED_TYPS.includes(t)));
 
 // ── claim checks (step 5: closed claim set + types) ──────────────────────────
 type Check = (v: unknown) => boolean;
@@ -90,6 +93,27 @@ const httpsUrlC: Check = (v) => {
   }
 };
 
+/**
+ * v0.1.31 (spec 0.1.63, K11 `roles`, BRIDGE §15.2): the keys ticket's display pre-fill: at most MODEL_ROLE_HINTS_MAX items, each a closed
+ * object `{role ∈ MODEL_ROLES, provider? ^[a-z][a-z0-9-]{1,31}$, model? MODEL_ID_PATTERN, dataPolicy? ∈ DATA_POLICIES}`. Launch tickets stay without it.
+ */
+const PROVIDER_ID_RE = new RegExp(PROVIDER_ID_PATTERN);
+const MODEL_ID_RE = new RegExp(MODEL_ID_PATTERN);
+const roleHintsC: Check = (v) =>
+  Array.isArray(v) &&
+  v.length <= MODEL_ROLE_HINTS_MAX &&
+  v.every((h) => {
+    if (!h || typeof h !== "object" || Array.isArray(h)) return false;
+    const o = h as Record<string, unknown>;
+    return (
+      Object.keys(o).every((k) => k === "role" || k === "provider" || k === "model" || k === "dataPolicy") &&
+      oneOf(MODEL_ROLES)(o.role) &&
+      (!has(o, "provider") || (typeof o.provider === "string" && PROVIDER_ID_RE.test(o.provider))) &&
+      (!has(o, "model") || (typeof o.model === "string" && MODEL_ID_RE.test(o.model))) &&
+      (!has(o, "dataPolicy") || oneOf(DATA_POLICIES)(o.dataPolicy))
+    );
+  });
+
 interface ClaimSpec {
   iss: Check;
   sub: Check;
@@ -145,9 +169,9 @@ const CLAIM_SPECS: Record<ClaimTyp, ClaimSpec> = {
     sub: PER,
     aud: re(refRe("ins", "brg")),
     required: { ws: wsC, pur: oneOf(["launch", "keys"]) },
-    optional: { path: htuC, req: strArr(64, 128) },
+    optional: { path: htuC, req: strArr(64, 128), roles: roleHintsC },
     cross: (c) => {
-      if (c.pur === "launch") return INS(c.aud) && !has(c, "req") ? null : "launch ticket shape";
+      if (c.pur === "launch") return INS(c.aud) && !has(c, "req") && !has(c, "roles") ? null : "launch ticket shape";
       return BRG(c.aud) && !has(c, "path") ? null : "keys ticket shape";
     },
   },
