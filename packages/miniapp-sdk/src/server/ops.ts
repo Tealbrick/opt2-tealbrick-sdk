@@ -831,6 +831,9 @@ export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: Abor
   const now = Date.now();
   const op = job.op ? rt.ops.get(job.op) : undefined;
   if (!op || op.standard || op.dynamic) return { kind: "refused", reason: "unknown_tool" };
+  // spec 0.1.68 (SDK-API v0.1.68 rule 2.6, C354): a schedule created before the op had `secretOutput` (or by an older release)
+  // is refused when it runs; the handler never runs from a job (ctx.schedule refuses new ones)
+  if (isSecretOutput(op)) return { kind: "refused", reason: "secret_output_not_schedulable" };
   const who = job.caller;
   if (!who) return { kind: "refused", reason: "schedule_caller_required" };
   if (!rt.cfg.standalone && rt.trust.stale(now)) return { kind: "defer", reason: "slice_stale" };
@@ -848,8 +851,7 @@ export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: Abor
     const rh = receiptHelpers();
     const ctx = buildContext(rt, op, caller, null, rt.scopes.view(null, null), null, job.key, {}, rh.helpers, signal);
     const output = await runHandler(rt, op, input, ctx, null);
-    // spec 0.1.68: a scheduled run has no caller to hand a secret to; the job keeps no result
-    return { kind: "done", result: isSecretOutput(op) ? null : output };
+    return { kind: "done", result: output };
   }
 
   const callerId = who.id as AgentId | InstanceId;
@@ -924,7 +926,6 @@ export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: Abor
   const rh = receiptHelpers();
   const ctx = buildContext(rt, op, caller, g, rt.scopes.view(callerId, viewAccess), null, job.key, {}, rh.helpers, signal);
   const writeReceipt = approved !== null || op.receipt;
-  const secret = isSecretOutput(op);
   const h = startHandler(rt, op, input, ctx, null);
   // the slot ends with the handler itself (a run past its timeout still counts when it completes)
   h.actual.then(
@@ -939,19 +940,16 @@ export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: Abor
   try {
     output = await h.raced;
   } catch (e) {
-    const err = toTbError(e, rt, secret);
-    const meta = secret ? ({ secretOutput: true, error: err.code } as Json) : (rh.meta ?? null);
+    const err = toTbError(e, rt);
+    const meta = rh.meta ?? null;
     if (approved) rt.receipts.finish(approved.id, "failed", { meta, ...admit });
-    else if (writeReceipt && secret) rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "failed", summary: secretSummary(spec, op, input), meta }); // never scheduled (ctx.schedule refuses); defence in depth
     else if (writeReceipt) rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "failed", summary: rh.summary ?? clampSummary(op.title), meta: { ...(isObj(meta) ? meta : {}), error: err.code } });
     return { kind: "failed", error: err.code };
   }
-  const summary = secret ? secretSummary(spec, op, input) : (rh.summary ?? clampSummary(spec?.redact ? spec.redact(input, output) : op.title));
-  const runMeta = secret ? SECRET_OUTPUT_META : (rh.meta ?? null);
-  if (approved) rt.receipts.finish(approved.id, "run", { summary, meta: runMeta, ...admit });
-  else if (writeReceipt) rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "run", summary, meta: runMeta });
-  // spec 0.1.68: a scheduled run has no caller to hand a secret to; the job keeps no result
-  return { kind: "done", result: secret ? null : output };
+  const summary = rh.summary ?? clampSummary(spec?.redact ? spec.redact(input, output) : op.title);
+  if (approved) rt.receipts.finish(approved.id, "run", { summary, meta: rh.meta ?? null, ...admit });
+  else if (writeReceipt) rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "run", summary, meta: rh.meta ?? null });
+  return { kind: "done", result: output };
 }
 
 /** spec 0.1.68: the receipt summary of a secretOutput op — from the input only (`redact(input)`), else the op title. */

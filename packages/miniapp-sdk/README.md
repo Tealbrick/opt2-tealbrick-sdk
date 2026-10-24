@@ -15,15 +15,15 @@ Next release adds (C53):
 
 ## 0.1.39 (C336 RQ-3): `secretOutput` ops (spec 0.1.68, S-8)
 
-Needs `@opt2-tealbrick/manifest` 0.1.31 (validator accepts `secretOutput`, rule M-OP-12). The spec pin stays 0.1.57 until spec 0.1.68 is released; the SDK reads `op.secretOutput` structurally (`src/server/secret-output.ts`). For an op with `secretOutput: true` (SDK-API v0.1.68):
+Needs `@opt2-tealbrick/manifest` 0.1.31 (validator accepts `secretOutput` and `requires.bridgeCaps`, rule M-OP-12). The manifest lists `requires.bridgeCaps: ["secret_output"]`. The spec pin stays 0.1.57 until spec 0.1.68 is released; the SDK reads `op.secretOutput` structurally (`src/server/secret-output.ts`). For an op with `secretOutput: true` (SDK-API v0.1.68):
 
 - **App callers only.** An agent caller is refused 403 `secret_output_app_only` before anything runs (no key, no cap slot, no handler).
-- **Not schedulable.** `ctx.schedule` of the op throws `secret_output_not_schedulable` (403); the job runner never stores the result of such an op.
+- **Not schedulable.** `ctx.schedule` of the op throws `secret_output_not_schedulable` (403). A job stored before the op had `secretOutput` (or by an older release) is refused `secret_output_not_schedulable` when it runs; the handler never runs from a job, and the job runner never stores the result of such an op.
 - **No idempotency row.** The key is ignored (`ctx.idempotencyKey` is null); a replay with the same key runs the handler again (a new credential).
 - **Receipt without output.** The receipt (`receipt: true`) keeps the input digest, meta `{secretOutput: true}` and the summary `redact(input)` (else the op title); `ctx.receipt.summary`/`meta` and `redact(input, output)` are not stored. A `failed` receipt has meta `{secretOutput: true, error: <code>}`, no message.
 - **Errors.** A handler error answers its code with the fixed message `operation failed` and no details (also `output_invalid`, without the schema errors); the SDK logs the failure without the handler's message.
 
-Test: `test/secret-output.test.ts` (C-SO-1..5: a canary output string is in no table of the app DB, no error envelope and no SDK log line).
+Test: `test/secret-output.test.ts` (C-SO-1..5 and the run-time refusal of an old schedule; a canary output string is in no table of the app DB, no error envelope and no SDK log line).
 
 ## 0.1.38 (C274c, C274d): app events — `ctx.emit` and the outbox (spec 0.1.57)
 

@@ -13,6 +13,9 @@ import type { InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { HookHoldFamily, Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json, PersonPrincipal, RunningApp } from "@opt2-tealbrick/spec/sdk";
 import { decideHold, defineApp, type SdkOpContext, startApp, TbError } from "../src/server/index.ts";
+import type { ClaimedJob } from "../src/server/jobs.ts";
+import { fireScheduledOp } from "../src/server/ops.ts";
+import type { Runtime } from "../src/server/runtime.ts";
 import { fixtureManifest } from "./fixtures/manifest.ts";
 import { callProof, FakeBridge, freePort, grant, migrationsDir, nowS, slice, tempDir, testRoots, until, type World, world } from "./helpers.ts";
 
@@ -52,6 +55,8 @@ function manifest(port: number): Manifest {
     // spec 0.1.68: not in the pinned Operation type yet
     secretOutput: true,
   } as Manifest["operations"][number]);
+  // C354: the manifest names the bridge capability it needs (spec 0.1.68 `requires.bridgeCaps`, not in the pinned type yet)
+  (m as { requires?: Record<string, unknown> }).requires = { ...(m.requires ?? {}), bridgeCaps: ["secret_output"] };
   return m;
 }
 
@@ -311,4 +316,36 @@ describe("spec 0.1.68 secretOutput (S-8, C-SO-1..5)", () => {
       [],
     );
   });
+});
+
+describe("spec 0.1.68 SDK-API v0.1.68 rule 2.6 (C354, QA-SDK51-1): a schedule created before the op had secretOutput", () => {
+  for (const caller of [
+    { type: "person", id: "per_01JAAAAAAAAAAAAAAAAAAAAAAA", name: "Owner" },
+    { type: "agent", id: "agt_01JAAAAAAAAAAAAAAAAAAAAAAA", name: "Agent" },
+    { type: "app", id: "ins_01JAAAAAAAAAAAAAAAAAAAAAAA", name: "Vault client" },
+  ] as const) {
+    test(`a stored job of a ${caller.type} caller is refused secret_output_not_schedulable when it runs; the handler never runs and nothing else is touched`, async () => {
+      let ran = 0;
+      const touched: string[] = [];
+      const op = { id: OP, title: "Issue credential", standard: false, crud: ["read"], effect: "read", audience: "agent", idempotency: "none", receipt: true, secretOutput: true };
+      const known: Record<string, unknown> = {
+        ops: new Map([[OP, op]]),
+        def: { handlers: { [OP]: async () => { ran += 1; return { token: CANARY }; } } },
+      };
+      // every other member of the runtime records the access: the refusal must come before the slice, grants, receipts or the handler
+      const rt = new Proxy(known, {
+        get(target, key) {
+          if (typeof key === "string" && key in target) return target[key];
+          touched.push(String(key));
+          return new Proxy(() => {}, { get: () => () => undefined, apply: () => undefined });
+        },
+      }) as unknown as Runtime;
+      // the job as an older release stored it (before the op had secretOutput): op, input, caller, sealed grant
+      const job = { id: "job_1", kind: "tb.op", op: OP, input: { purpose: "old" }, key: "k_old_schedule", caller, callerMode: caller.type === "agent" ? "free" : null, grantSealed: caller.type === "person" ? null : "sealed", holdId: null } as unknown as ClaimedJob;
+      const outcome = await fireScheduledOp(rt, job, new AbortController().signal);
+      assert.deepEqual(outcome, { kind: "refused", reason: "secret_output_not_schedulable" });
+      assert.equal(ran, 0, "the handler never runs from a job");
+      assert.deepEqual(touched, [], "nothing but the op table is read");
+    });
+  }
 });

@@ -656,15 +656,20 @@ describe("spec 0.1.68 (C336 RQ-3, S-8): secretOutput (M-OP-12)", () => {
     ...extra,
   });
   const secret = (extra: object) => JSON.parse(JSON.stringify(secretRaw(extra))); // drops keys set to undefined
+  /** C354: a manifest with a secretOutput op lists the cap it needs */
+  const withCaps = (m: any, caps: string[] = ["secret_output"]) => {
+    m.requires = { ...(m.requires ?? {}), bridgeCaps: caps };
+    return m;
+  };
   test("a valid secretOutput op passes (schema accepts the field)", () => {
-    const r = mutate((m) => m.operations.push(secret({})));
+    const r = mutate((m) => withCaps(m).operations.push(secret({})));
     assert.equal(r.ok, true, JSON.stringify(!r.ok && r.errors));
   });
   test("a secretOutput op keeps its own effect (a write lease passes)", () => {
-    const r = mutate((m) => m.operations.push(secret({ crud: ["update"], effect: "write" })));
+    const r = mutate((m) => withCaps(m).operations.push(secret({ crud: ["update"], effect: "write" })));
     assert.equal(r.ok, true, JSON.stringify(!r.ok && r.errors));
   });
-  test("secretOutput: false → schema_invalid (const true)", refuses("schema", "schema_invalid", (m) => m.operations.push(secret({ secretOutput: false }))));
+  test("secretOutput: false → schema_invalid (const true)", refuses("schema", "schema_invalid", (m) => withCaps(m).operations.push(secret({ secretOutput: false }))));
   for (const [name, extra] of [
     ["receipt false", { receipt: false }],
     ["idempotency supported", { idempotency: "supported" }],
@@ -674,7 +679,7 @@ describe("spec 0.1.68 (C336 RQ-3, S-8): secretOutput (M-OP-12)", () => {
   ] as const) {
     test(`M-OP-12 secretOutput with ${name} → secret_output_invalid`, () => {
       const m = base();
-      m.operations.push(secret(extra));
+      withCaps(m).operations.push(secret(extra));
       const r = validateManifest(m);
       expectIssue(r, "M-OP-12", "secret_output_invalid");
       if (!r.ok) {
@@ -684,8 +689,15 @@ describe("spec 0.1.68 (C336 RQ-3, S-8): secretOutput (M-OP-12)", () => {
     });
   }
   test("M-OP-11 (listing_invalid) keeps its own rule id and code", refuses("M-OP-11", "listing_invalid", (m) => (m.operations.find((o: any) => o.audience === "person").listing = "workflow")));
+  test("C354: a secretOutput op without requires.bridgeCaps → secret_output_invalid", refuses("M-OP-12", "secret_output_invalid", (m) => m.operations.push(secret({}))));
+  test("C354: requires.bridgeCaps without secret_output → secret_output_invalid", refuses("M-OP-12", "secret_output_invalid", (m) => withCaps(m, ["hook_tool"]).operations.push(secret({}))));
+  test("C354: requires.bridgeCaps is accepted without a secretOutput op; a malformed cap → schema_invalid", () => {
+    assert.equal(mutate((m) => withCaps(m, ["hook_tool", "lazy_tools"])).ok, true);
+    expectIssue(mutate((m) => withCaps(m, ["Bad-Cap"])), "schema", "schema_invalid");
+    expectIssue(mutate((m) => withCaps(m, ["hook_tool", "hook_tool"])), "schema", "schema_invalid");
+  });
   test("an op without secretOutput is untouched by M-OP-12 (receipt false, idempotency supported)", () => {
-    const r = mutate((m) => m.operations.push(secret({ idempotency: "supported", receipt: false, secretOutput: undefined })));
+    const r = mutate((m) => withCaps(m).operations.push(secret({ idempotency: "supported", receipt: false, secretOutput: undefined })));
     assert.equal(r.ok, true, JSON.stringify(!r.ok && r.errors));
   });
 });

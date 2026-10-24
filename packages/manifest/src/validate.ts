@@ -70,20 +70,35 @@ const SECRET_OUTPUT_THEN = {
   not: { required: ["dynamic"] },
 };
 
+/** spec 0.1.68 (C354, MANIFEST v0.1.15 additions): `requires.bridgeCaps`, as the spec 0.1.68 schema states it. */
+const REQUIRES_BRIDGE_CAPS_SCHEMA = {
+  type: "array",
+  uniqueItems: true,
+  maxItems: 16,
+  items: { type: "string", pattern: "^[a-z][a-z0-9_]{1,31}$" },
+  description: "v0.1.68 (C354): bridge capabilities the release needs; Core refuses a bridge without each (bridge_cap_missing). Never inferred from a version.",
+};
+
 /**
- * spec 0.1.68: the pinned schema predates `secretOutput`; add the property and the M-OP-12 if/then (to a copy, the import stays
- * untouched) until the pin carries them. A no-op once the pinned schema declares the property — then this helper goes with
- * the pin bump.
+ * spec 0.1.68: the pinned schema predates `operations[].secretOutput` (+ the M-OP-12 if/then) and `requires.bridgeCaps`; add
+ * each one that is missing (to a copy, the import stays untouched) until the pin carries them. A no-op once the pinned schema
+ * declares them — then this helper goes with the pin bump.
  */
-function schemaWithSecretOutput(schema: typeof manifestSchema): object {
-  const op = (schema as { $defs?: { operation?: { properties?: Record<string, unknown>; if?: unknown } } }).$defs?.operation;
-  if (!op?.properties || "secretOutput" in op.properties) return schema;
-  if (op.if !== undefined) throw new Error("manifest schema: operation already has an if/then; merge the spec 0.1.68 secretOutput rule by hand");
-  const copy = structuredClone(schema) as { $defs: { operation: Record<string, unknown> & { properties: Record<string, unknown> } } };
-  copy.$defs.operation.properties.secretOutput = SECRET_OUTPUT_SCHEMA;
-  copy.$defs.operation.if = SECRET_OUTPUT_IF;
-  // biome-ignore lint/suspicious/noThenProperty: `then` is the JSON Schema keyword of the spec's if/then
-  copy.$defs.operation.then = SECRET_OUTPUT_THEN;
+function schemaWithSpec068(schema: typeof manifestSchema): object {
+  type S = { $defs: { operation: Record<string, unknown> & { properties: Record<string, unknown> } }; properties: { requires: { properties: Record<string, unknown> } } };
+  const src = schema as unknown as Partial<S>;
+  const needOp = !!src.$defs?.operation?.properties && !("secretOutput" in src.$defs.operation.properties);
+  const needCaps = !!src.properties?.requires?.properties && !("bridgeCaps" in src.properties.requires.properties);
+  if (!needOp && !needCaps) return schema;
+  const copy = structuredClone(schema) as unknown as S;
+  if (needOp) {
+    if (copy.$defs.operation.if !== undefined) throw new Error("manifest schema: operation already has an if/then; merge the spec 0.1.68 secretOutput rule by hand");
+    copy.$defs.operation.properties.secretOutput = SECRET_OUTPUT_SCHEMA;
+    copy.$defs.operation.if = SECRET_OUTPUT_IF;
+    // biome-ignore lint/suspicious/noThenProperty: `then` is the JSON Schema keyword of the spec's if/then
+    copy.$defs.operation.then = SECRET_OUTPUT_THEN;
+  }
+  if (needCaps) copy.properties.requires.properties.bridgeCaps = REQUIRES_BRIDGE_CAPS_SCHEMA;
   return copy;
 }
 
@@ -96,7 +111,7 @@ function secretOutputSchemaIssue(issue: ManifestIssue): ManifestIssue {
 }
 
 function checkSchema(json: unknown): ManifestIssue[] {
-  schemaCheck ??= new Ajv2020({ allErrors: true, strict: true, strictRequired: false, allowUnionTypes: true }).compile(schemaWithSecretOutput(manifestSchema));
+  schemaCheck ??= new Ajv2020({ allErrors: true, strict: true, strictRequired: false, allowUnionTypes: true }).compile(schemaWithSpec068(manifestSchema));
   if (schemaCheck(json)) return [];
   const out: ManifestIssue[] = [];
   const seen = new Set<string>();
@@ -508,6 +523,10 @@ function operationRules(m: Manifest, add: Add): void {
     if ((op as SecretOutputOp).secretOutput === true) {
       const ok = op.audience === "agent" && !op.dynamic && op.idempotency === "none" && op.receipt === true;
       if (!ok) add("M-OP-12", "secret_output_invalid", `${p}/secretOutput`, "secretOutput ops: audience agent, no dynamic, idempotency none, receipt true");
+      // C354: the gate is a capability, never a bridge version — the manifest names the cap it needs
+      if (!(m.requires as { bridgeCaps?: readonly string[] } | undefined)?.bridgeCaps?.includes("secret_output")) {
+        add("M-OP-12", "secret_output_invalid", `${p}/secretOutput`, 'a secretOutput op needs requires.bridgeCaps to list "secret_output"');
+      }
     }
   });
 }
