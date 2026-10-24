@@ -11,6 +11,7 @@ import { TbError } from "./errors.ts";
 import { header, readJson, readRaw, requestId, sendError, sendJson } from "./http.ts";
 import { withinCeiling } from "./ops.ts";
 import type { Runtime } from "./runtime.ts";
+import type { ScopeSourceItem } from "./scopes.ts";
 
 const HOOK_DEFAULT_TIMEOUT_MS = 2000;
 const CATALOG_LIST_MAX = 256;
@@ -175,13 +176,14 @@ export async function handleBridgeOp(rt: Runtime, req: IncomingMessage, res: Ser
         return sendJson(res, 200, { ok: true, marked: rec !== null });
       }
       case "scope_summary": {
-        const out: ScopeSummaryResult[] = [];
+        const out: (ScopeSummaryResult & { sources: ScopeSourceItem[] })[] = [];
         // v0.1.35 (C283 A1): `admittedOps` = this agent's STATIC agent ops with a scopeType whose crud its OWNER rows admit (possibly
         // above the Portal grant); absent when none. Display only: the SDK still authorizes every call.
         const staticOps = rt.manifest.operations.filter((o) => !o.dynamic && o.audience === "agent" && o.scopeType !== undefined);
         for (const a of rt.trust.slice?.agents ?? []) {
           const admittedOps = markable(rt, a.id) ? staticOps.filter((o) => o.scopeType !== undefined && rt.scopes.ownerAdmits(a.id, o.scopeType, o.crud)).map((o) => o.id) : [];
-          out.push({ agent: a.id, label: await rt.scopes.summary(a.id), ...(admittedOps.length > 0 ? { admittedOps } : {}) });
+          // spec 0.1.65 (C331 D8): the agent's scope instances for the canvas (display only)
+          out.push({ agent: a.id, label: await rt.scopes.summary(a.id), ...(admittedOps.length > 0 ? { admittedOps } : {}), sources: await rt.scopes.sources(a.id) });
         }
         return sendJson(res, 200, out);
       }

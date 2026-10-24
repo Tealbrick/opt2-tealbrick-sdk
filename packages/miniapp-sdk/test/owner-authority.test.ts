@@ -477,6 +477,11 @@ describe("C283 A1: owner-set access is primary, everything else is bounded (HTTP
     assert.deepEqual([...forB.admittedOps].sort(), ["note_can", "note_create", "note_purge"], "static scoped agent ops only (not the dynamic op, not unscoped ops, not person ops)");
     const forA = sum.body.find((x: { agent: string }) => x.agent === A());
     assert.equal("admittedOps" in forA, false, "agent A has bounded rows: nothing admitted by an owner row");
+    // spec 0.1.65 (C331 D8): every row carries the agent's scope instances for the canvas (display only)
+    const rowsA = (await b.running.scopes.list(A() as never)).map((r) => `${r.type}:${r.instanceId}`);
+    const srcA: string[] = forA.sources.map((x: { type: string; id: string }) => `${x.type}:${x.id}`);
+    assert.equal(srcA.length, Math.min(rowsA.length, 20), "one item per row, at most 20");
+    assert.ok(srcA.every((k) => rowsA.includes(k)), "only the agent's own rows");
     // paused: no marks
     b.bridge.push(await slice(b.w, PRODUCT, { pause: { workspace: false, agents: [agent], instances: [] } }));
     try {
