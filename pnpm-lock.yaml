@@ -66,8 +66,8 @@ importers:
         specifier: workspace:*
         version: link:../manifest
       '@opt2-tealbrick/spec':
-        specifier: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.57/opt2-tealbrick-spec-0.1.57.tgz
-        version: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.57/opt2-tealbrick-spec-0.1.57.tgz
+        specifier: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.64/opt2-tealbrick-spec-0.1.64.tgz
+        version: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.64/opt2-tealbrick-spec-0.1.64.tgz
       parse5:
         specifier: 8.0.1
         version: 8.0.1
@@ -145,6 +145,10 @@ packages:
     engines: {node: '>=14.21.3'}
     cpu: [x64]
     os: [win32]
+
+  '@opt2-tealbrick/spec@https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.64/opt2-tealbrick-spec-0.1.64.tgz':
+    resolution: {tarball: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.64/opt2-tealbrick-spec-0.1.64.tgz}
+    version: 0.1.64
 
   '@opt2-tealbrick/spec@https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.57/opt2-tealbrick-spec-0.1.57.tgz':
     resolution: {integrity: sha512-K7H049Ln2GSD4pk3jI429Xvfpa4djhFTrWbmumoftqqojR7xYxwCAwz7gCB5TWZE93/xIRzhQuB4fn1nayyGPA==, tarball: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.57/opt2-tealbrick-spec-0.1.57.tgz}
@@ -363,6 +367,8 @@ snapshots:
 
   '@biomejs/cli-win32-x64@2.5.15':
     optional: true
+
+  '@opt2-tealbrick/spec@https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.64/opt2-tealbrick-spec-0.1.64.tgz': {}
 
   '@opt2-tealbrick/spec@https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.57/opt2-tealbrick-spec-0.1.57.tgz': {}
 
