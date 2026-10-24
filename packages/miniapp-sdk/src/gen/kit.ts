@@ -46,13 +46,15 @@ interface Method {
 /** Kit package files under `<product>-kit/`. */
 export function genKit(lm: LoadedManifest, opts: { packageName?: string } = {}): GenFiles {
   const { manifest: m } = lm;
-  if (opts.packageName !== undefined && !/^@[a-z0-9][a-z0-9-]*\/[a-z0-9][a-z0-9-]*$/u.test(opts.packageName)) throw new GenError("package_name_invalid", `--package-name must be a scoped npm name (@scope/name), got ${opts.packageName}`);
+  if (opts.packageName !== undefined && (opts.packageName.length > 214 || !/^@[a-z0-9][a-z0-9-]*\/[a-z0-9][a-z0-9-]*$/u.test(opts.packageName))) {
+    throw new GenError("package_name_invalid", `--package-name must be a scoped npm name (@scope/name, at most 214 characters), got ${JSON.stringify(opts.packageName.slice(0, 80))}`);
+  }
   const dir = kitDirName(m.id);
   const files: GenFiles = new Map();
   files.set(`${dir}/package.json`, kitPackageJson(m, opts.packageName));
   files.set(`${dir}/tsconfig.json`, stableJson(KIT_TSCONFIG));
   files.set(`${dir}/src/index.ts`, kitIndex(lm));
-  files.set(`${dir}/README.md`, kitReadme(m));
+  files.set(`${dir}/README.md`, kitReadme(m, opts.packageName));
   return files;
 }
 
@@ -134,6 +136,7 @@ function kitIndex(lm: LoadedManifest): string {
   // C338 (agent packages): the tool definitions the bridge lists for an agent with a full grant, so a harness can
   // register them without an MCP round trip. Dynamic list-mode entries are per agent and are not listed here.
   const toolDefs: KitToolDefGen[] = [];
+  let hasLazy = false;
   const addMethod = (meth: Method) => {
     if (methods.some((x) => x.name === meth.name)) throw new GenError("name_collision", `client method ${meth.name} is derived twice`);
     methods.push(meth);
@@ -146,7 +149,9 @@ function kitIndex(lm: LoadedManifest): string {
     const opts = op.idempotency === "required" ? "options: KitIdempotent" : op.idempotency === "supported" ? "options?: KitCallOptions" : "";
     const pass = opts ? ", options" : "";
     if (op.standard) {
-      toolDefs.push({ name: mcpToolName(m.id, op.id), title: "Hold status", description: `Check a call to ${m.name} that is waiting for the owner's approval. Input: the holdId from the held result.`, inputSchema: standardOpInputSchema("tb.hold_status"), effect: "read" });
+      // QA-SDK48-1: the bridge lists exactly one standard tool per app for agents, hold status (BRIDGE tools.ts); other
+      // standard ops (tb.holds_pending) are app-to-app only and never a tool, so they get a client method but no definition
+      if (op.id === "tb.hold_status") toolDefs.push({ name: mcpToolName(m.id, op.id), title: "Hold status", description: `Check a call to ${m.name} that is waiting for the owner's approval. Input: the holdId from the held result.`, inputSchema: standardOpInputSchema("tb.hold_status"), effect: "read" });
       addMethod({
         name: key,
         tool: mcpToolName(m.id, op.id),
@@ -184,7 +189,10 @@ function kitIndex(lm: LoadedManifest): string {
       });
     } else {
       const P = pascal(op.id);
-      toolDefs.push({ name: mcpToolName(m.id, op.id), title: op.title, description: op.description, inputSchema: op.input ?? { type: "object" }, effect: op.effect, ...(op.listing === "workflow" ? { listing: "workflow" } : {}) });
+      // QA-SDK48-5 (forward, spec ≥ 0.1.66 `listing: "lazy"`): a lazy op is not listed; the bridge's more_search/more_call reach it
+      const listing = (op as { listing?: string }).listing;
+      if (listing === "lazy") hasLazy = true;
+      else toolDefs.push({ name: mcpToolName(m.id, op.id), title: op.title, description: op.description, inputSchema: op.input ?? { type: "object" }, effect: op.effect, ...(listing === "workflow" ? { listing: "workflow" } : {}) });
       addMethod({
         name: key,
         tool: mcpToolName(m.id, op.id),
@@ -195,6 +203,14 @@ function kitIndex(lm: LoadedManifest): string {
     }
   }
 
+  if (hasLazy) {
+    toolDefs.push(
+      { name: `${m.id}${TOOL_NAME_RULE.separator}more_search`, title: `${m.name}: more tools`, description: `Search the other tools of ${m.name} by what you want to do.`, inputSchema: DYNAMIC_SEARCH_INPUT_SCHEMA, effect: "read" },
+      { name: `${m.id}${TOOL_NAME_RULE.separator}more_call`, title: `${m.name}: call a tool`, description: `Call one tool found with ${m.id}${TOOL_NAME_RULE.separator}more_search.`, inputSchema: DYNAMIC_CALL_INPUT_SCHEMA, effect: "destructive" },
+    );
+  }
+  // QA-SDK48-2: the bridge lists a skills tool for every app (BRIDGE tools.ts `tb_skills`)
+  toolDefs.push({ name: `${m.id}${TOOL_NAME_RULE.separator}${TOOL_NAME_RULE.skillsOp}`, title: "Skills", description: `How to use ${m.name}. Without skillId: the skill index. With skillId: that skill's text.`, inputSchema: { type: "object", additionalProperties: false, properties: { skillId: { type: "string", maxLength: 64 } } }, effect: "read" });
   const skills = (m.skills ?? []).map((s) => {
     let text: string;
     try {
@@ -232,15 +248,16 @@ function kitIndex(lm: LoadedManifest): string {
   out.push(...em.declarations.flatMap((t) => [t, ""]));
   out.push(RUNTIME, "");
   out.push("/**");
-  out.push(" * Agent tool definitions as the bridge lists them for a grant that allows every op (name, title, description,");
-  out.push(" * input schema, effect). A harness registers these and routes each call through the bridge (`createKitClient`");
+  out.push(" * Agent tool definitions: the names the bridge lists for a grant that allows every op, with title, description, the");
+  out.push(" * input schema as the manifest derives it (the bridge may apply tighter limits) and effect. A harness registers these");
+  out.push(" * and routes each call through the bridge (`createKitClient`");
   out.push(" * or its own MCP client): the grant, Rules, holds and receipts still decide every call. `listing: \"workflow\"`");
   out.push(" * tools are listed only when the agent's grant names them; dynamic list-mode entries are per agent and not here.");
   out.push(" */");
   out.push(`export const TOOLS: readonly KitToolDef[] = ${JSON.stringify(toolDefs, null, 2)};`, "");
-  out.push("/** MCP annotations the bridge sets for an effect (read-only, destructive). */");
-  out.push("export function toolAnnotations(effect: KitToolDef[\"effect\"]): { readOnlyHint?: boolean; destructiveHint?: boolean } {");
-  out.push("  return effect === \"read\" ? { readOnlyHint: true } : effect === \"destructive\" ? { destructiveHint: true } : {};");
+  out.push("/** MCP annotations exactly as the bridge sets them (all three always present; MCP defaults would differ). */");
+  out.push("export function toolAnnotations(effect: KitToolDef[\"effect\"]): { readOnlyHint: boolean; destructiveHint: boolean; openWorldHint: boolean } {");
+  out.push("  return { readOnlyHint: effect === \"read\", destructiveHint: effect === \"destructive\", openWorldHint: effect === \"outward\" || effect === \"money\" };");
   out.push("}", "");
   out.push("/** Skill texts as shipped (raw, unrendered: `{{…}}` variables are filled by Core and the bridge). */");
   out.push(`export const SKILLS: readonly KitSkill[] = ${JSON.stringify(skills, null, 2)};`, "");
@@ -360,8 +377,8 @@ async function call<O>(mcp: KitMcp, name: string, input: unknown, options?: KitC
   return isHeld(body) ? body : { status: "ok", output: body as O };
 }`;
 
-function kitReadme(m: Manifest): string {
-  const name = kitPackageName(m.id);
+function kitReadme(m: Manifest, packageName?: string): string {
+  const name = packageName ?? kitPackageName(m.id);
   const lines = [
     `<!-- GENERATED by tb-gen from tealbrick.manifest.json. Do not edit. -->`,
     `# ${name}`,

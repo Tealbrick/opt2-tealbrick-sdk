@@ -80,7 +80,7 @@ export function runTbGen(argv: readonly string[], io: TbGenIo): number {
     const show = (p: string) => relative(io.cwd, p) || ".";
     if (args.command === "check") {
       const genDir = resolve(io.cwd, args.out ?? "gen");
-      const r = checkDrift(lm, genDir, { settings: args.settings, ...(args.packageName ? { packageName: args.packageName } : {}) });
+      const r = checkDrift(lm, genDir, { settings: args.settings, ...(args.packageName !== null ? { packageName: args.packageName } : {}) });
       if (!r.present) {
         io.out(`tb-gen check: no ${show(genDir)} directory; nothing committed, nothing to drift`);
         return 0;
@@ -96,7 +96,7 @@ export function runTbGen(argv: readonly string[], io: TbGenIo): number {
     const kinds: readonly GenKind[] = args.command === "all" ? GEN_KINDS : [args.command];
     for (const kind of kinds) {
       const outDir = resolve(io.cwd, args.command === "all" ? join(args.out ?? "gen", kind) : (args.out ?? join("gen", kind)));
-      for (const p of writeFiles(outDir, generate(kind, lm, { settings: args.settings, ...(args.packageName ? { packageName: args.packageName } : {}) }))) io.out(show(p));
+      for (const p of writeFiles(outDir, generate(kind, lm, { settings: args.settings, ...(args.packageName !== null ? { packageName: args.packageName } : {}) }))) io.out(show(p));
       if (kind === "kit" && args.build) io.out(show(buildKit(join(outDir, kitDirName(lm.manifest.id)), outDir, io.cwd)));
     }
     return 0;
