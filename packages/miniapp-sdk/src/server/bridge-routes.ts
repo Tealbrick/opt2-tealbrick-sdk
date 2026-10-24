@@ -13,6 +13,27 @@ import { withinCeiling } from "./ops.ts";
 import type { Runtime } from "./runtime.ts";
 import type { ScopeSourceItem } from "./scopes.ts";
 
+/** QA sdk#50: the bridge reads a bridge-op answer up to 256 KiB; the scope summary stays below this. */
+export const SCOPE_SUMMARY_MAX_BYTES = 192 * 1024;
+
+/**
+ * Keeps a `scope_summary` answer under SCOPE_SUMMARY_MAX_BYTES (many agents × 20 sources could pass the bridge's read cap):
+ * `sources` are display only, so they go first, from the last agent backwards; a dropped member is ABSENT (not reported), never
+ * `[]` (which says "nothing assigned"). Labels and `admittedOps` (which decide what tools/list shows) stay.
+ */
+export function boundScopeSummary<T extends { sources?: unknown[] }>(rows: T[], maxBytes = SCOPE_SUMMARY_MAX_BYTES): T[] {
+  let size = Buffer.byteLength(JSON.stringify(rows), "utf8");
+  if (size <= maxBytes) return rows;
+  const out = rows.map((r) => ({ ...r }));
+  for (let i = out.length - 1; i >= 0 && size > maxBytes; i--) {
+    const row = out[i] as T;
+    if (!row.sources?.length) continue;
+    size -= Buffer.byteLength(JSON.stringify({ sources: row.sources }), "utf8") - 2;
+    delete row.sources;
+  }
+  return out;
+}
+
 const HOOK_DEFAULT_TIMEOUT_MS = 2000;
 const CATALOG_LIST_MAX = 256;
 const ENTRY_NAME_RE = /^[a-z][a-z0-9_]{1,47}$/;
@@ -185,7 +206,7 @@ export async function handleBridgeOp(rt: Runtime, req: IncomingMessage, res: Ser
           // spec 0.1.65 (C331 D8): the agent's scope instances for the canvas (display only)
           out.push({ agent: a.id, label: await rt.scopes.summary(a.id), ...(admittedOps.length > 0 ? { admittedOps } : {}), sources: await rt.scopes.sources(a.id) });
         }
-        return sendJson(res, 200, out);
+        return sendJson(res, 200, boundScopeSummary(out));
       }
     }
   } catch (e) {

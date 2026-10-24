@@ -22,7 +22,13 @@ const summaryEmptyOf = (s: Scope): string | undefined => {
   const v = (s as Scope & { summaryEmpty?: unknown }).summaryEmpty;
   return typeof v === "string" && v.length > 0 && v.length <= 40 && !/[{}]/.test(v) ? v : undefined;
 };
-const sourceLabel = (label: string): string => label.replace(/[\p{Cc}\p{Cf}]/gu, "").trim().slice(0, SCOPE_SOURCE_LABEL_MAX);
+/** QA sdk#50: cut at code points (half a surrogate pair breaks Postgres jsonb at Core). */
+const sourceLabel = (label: string): string => Array.from(label.replace(/[\p{Cc}\p{Cf}]/gu, "").trim()).slice(0, SCOPE_SOURCE_LABEL_MAX).join("");
+/**
+ * QA sdk#50 (same rule as the bridge): a source id is the app's own instance id, `<prefix>_<ULID>` or a lower-case slug; an
+ * instance whose id looks like a provider id (Stripe `cus_…`, Slack `C04…`, an email) is not listed as a source.
+ */
+export const SOURCE_ID_RE = /^(?:[a-z]{2,4}_[0-9A-HJKMNP-TV-Z]{26}|[a-z][a-z0-9_-]{0,63})$/;
 /** v0.1.14 (Connect Q-C2): caller type of a scope caller id (companion app callers are instances). */
 const callerKind = (id: string): "agent" | "app" => (id.startsWith("ins_") ? "app" : "agent");
 const appliesTo = (g: { callers?: readonly ("agent" | "app")[] }, id: string): boolean => !g.callers || g.callers.includes(callerKind(id));
@@ -405,7 +411,7 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
             const inst = db.prepare("SELECT label FROM tb_scope_instances WHERE type = ? AND id = ?").get(s.type, r.instanceId) as Row | undefined;
             return { type: s.type, id: r.instanceId, label: sourceLabel(String(inst?.label ?? "")), access: r.access };
           })
-          .filter((i) => i.label.length > 0)
+          .filter((i) => i.label.length > 0 && SOURCE_ID_RE.test(i.id))
           .sort((a, b) => a.label.localeCompare(b.label) || (a.id < b.id ? -1 : 1));
         out.push(...items);
       }

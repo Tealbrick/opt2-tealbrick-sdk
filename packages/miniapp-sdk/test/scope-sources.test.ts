@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import type { PersonPrincipal } from "@opt2-tealbrick/spec/sdk";
 import { createAuditLog } from "../src/server/audit.ts";
+import { boundScopeSummary, SCOPE_SUMMARY_MAX_BYTES } from "../src/server/bridge-routes.ts";
 import { createScopeStore, SCOPE_SOURCES_MAX } from "../src/server/scopes.ts";
 import { openStore } from "../src/server/store.ts";
 import { fixtureManifest } from "./fixtures/manifest.ts";
@@ -70,5 +71,49 @@ describe("C331 D8 sources", () => {
     } finally {
       s.cleanup();
     }
+  });
+});
+
+describe("QA sdk#50", () => {
+  test("labels are cut at code points (no lone surrogate); provider-shaped ids and empty labels are not listed or counted", async () => {
+    const s = store();
+    try {
+      const emoji = String.fromCodePoint(0x1f600);
+      await s.st.instances.create(s.type, "nb_e", `${"a".repeat(59)}${emoji}${emoji}`);
+      await s.st.instances.create(s.type, "cus_bYze8b07KDY7UK", "Stripe customer");
+      await s.st.instances.create(s.type, "nb_empty", c(0x200b));
+      for (const id of ["nb_e", "cus_bYze8b07KDY7UK", "nb_empty"]) await s.st.set(person, AGT, s.type, id, s.level);
+      const out = await s.st.sources(AGT);
+      assert.deepEqual(out.map((i) => i.id), ["nb_e"]);
+      assert.equal(Array.from(out[0]?.label ?? "").length, 60);
+      assert.equal(out[0]?.label.at(-1), emoji.at(-1), "the pair is whole");
+      for (let i = 0; i < 25; i++) {
+        await s.st.instances.create(s.type, `nb_${i}`, `Book ${String(i).padStart(2, "0")}`);
+        await s.st.set(person, AGT, s.type, `nb_${i}`, s.level);
+      }
+      for (let i = 0; i < 5; i++) {
+        await s.st.instances.create(s.type, `nb_z${i}`, "");
+        await s.st.set(person, AGT, s.type, `nb_z${i}`, s.level);
+      }
+      assert.equal((await s.st.sources(AGT)).length, SCOPE_SOURCES_MAX, "empty labels never take a place of the 20");
+      assert.ok((await s.st.sources(AGT)).every((i) => i.label.length > 0));
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("the scope_summary answer stays under the byte bound: sources go first (absent, not []), labels and admittedOps stay", () => {
+    const sources = Array.from({ length: 20 }, (_, i) => ({ type: "account", id: `acc_${i}`, label: "L".repeat(60), access: "read" }));
+    const rows = Array.from({ length: 200 }, (_, i) => ({ agent: `agt_${i}`, label: "1 account", admittedOps: ["op_a"], sources }));
+    assert.ok(Buffer.byteLength(JSON.stringify(rows)) > SCOPE_SUMMARY_MAX_BYTES);
+    const out = boundScopeSummary(rows);
+    assert.ok(Buffer.byteLength(JSON.stringify(out)) <= SCOPE_SUMMARY_MAX_BYTES);
+    assert.equal(out.length, 200);
+    assert.ok(out.every((r) => r.label === "1 account" && r.admittedOps.length === 1));
+    assert.ok(out.some((r) => "sources" in r), "the first agents keep theirs");
+    assert.ok(out.filter((r) => !("sources" in r)).length > 0, "the last ones lose them");
+    assert.ok(out.every((r) => !("sources" in r) || (r.sources?.length ?? 0) === 20), "never an empty list instead");
+    const small = rows.slice(0, 3);
+    assert.equal(boundScopeSummary(small), small, "a small answer is unchanged");
   });
 });
