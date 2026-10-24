@@ -8,7 +8,7 @@ import { describe, test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { STANDARD_OPERATIONS } from "@opt2-tealbrick/spec/manifest";
 import { checkDrift, GEN_KINDS, generate, generateAll } from "../../src/gen/generate.ts";
-import { buildKit, kitDirName } from "../../src/gen/kit.ts";
+import { buildKit, kitDirName, lazyPairDefs } from "../../src/gen/kit.ts";
 import { fromManifest, GenError, loadManifest, stableJson, writeFiles } from "../../src/gen/load.ts";
 import { parseTbGenArgs, runTbGen } from "../../src/gen/main.ts";
 import { genRailway, KEK_SECRET, resolveSettings } from "../../src/gen/railway.ts";
@@ -156,6 +156,40 @@ describe("kit", () => {
     assert.equal(ok.code, 0, ok.err);
     assert.equal(JSON.parse(readFileSync(join(out, k, "package.json"), "utf8")).name, "@tealbrick/notes");
     assert.notEqual(capture(["kit", "--manifest", join(dir, "tealbrick.manifest.json"), "--out", out, "--package-name", ""], dir).code, 0);
+  });
+
+  test("QA-SDK48-5/-7/-8: lazy pair as the bridge lists it; tb-gen check honours --package-name; the skills tool schema", (t) => {
+    assert.deepEqual(lazyPairDefs("knowledge", "Knowledge", []), []);
+    const pair = lazyPairDefs("knowledge", "Knowledge", [
+      { id: "a1", effect: "read" },
+      { id: "a2", effect: "write" },
+      { id: "a3", effect: "destructive" },
+      { id: "a4", effect: "read" },
+      { id: "a5", effect: "read" },
+      { id: "a6", effect: "outward" },
+    ]);
+    assert.deepEqual(pair.map((d) => d.name), ["knowledge__tb_more_search", "knowledge__tb_more_call"]);
+    assert.equal(pair[0]?.effect, "read");
+    assert.match(pair[0]?.description ?? "", /6 not listed here \(e\.g\. a1, a2, a3, a4, a5, …\)/u);
+    assert.equal(pair[1]?.effect, "destructive", "widest effect of the lazy ops");
+    assert.deepEqual(pair[1]?.annotations, { readOnlyHint: false, destructiveHint: true, openWorldHint: true });
+    assert.deepEqual(lazyPairDefs("k", "K", [{ id: "r", effect: "read" }])[1]?.annotations, { readOnlyHint: true, destructiveHint: false, openWorldHint: false });
+    // -7: `check` with and without the flag
+    const dir = temp(t);
+    writeRepo(dir, notesJson());
+    const manifest = join(dir, "tealbrick.manifest.json");
+    const out = join(dir, "gen");
+    assert.equal(capture(["all", "--manifest", manifest, "--out", out, "--package-name", "@tealbrick/notes"], dir).code, 0);
+    assert.equal(capture(["check", "--manifest", manifest, "--package-name", "@tealbrick/notes"], dir).code, 0, "same name: no drift");
+    assert.notEqual(capture(["check", "--manifest", manifest], dir).code, 0, "without the flag the committed kit drifts");
+    // -8: the skills tool and its schema
+    const m = loadManifest(manifest);
+    const src = generate("kit", m).get(`${kitDirName(m.manifest.id)}/src/index.ts`) as string;
+    const marker = "export const TOOLS: readonly KitToolDef[] = ";
+    const tools = JSON.parse(src.slice(src.indexOf(marker) + marker.length, src.indexOf("];", src.indexOf(marker)) + 1)) as { name: string; inputSchema: unknown; effect: string }[];
+    const skills = tools.find((x) => x.name === `${m.manifest.id}__tb_skills`);
+    assert.deepEqual(skills?.inputSchema, { type: "object", additionalProperties: false, properties: { skillId: { type: "string", maxLength: 64 } } });
+    assert.equal(skills?.effect, "read");
   });
 
   test("person-audience ops: PERSON_OPS, IDEMPOTENCY facts and the PersonOps io map (Connect request, BSA-08/12)", (t) => {
