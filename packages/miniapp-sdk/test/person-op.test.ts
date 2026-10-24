@@ -364,14 +364,21 @@ describe("POST /tb/v1/person-op (K14, SDK-API §21)", () => {
     assert.equal(code(bad), "validation_failed");
   });
 
-  test("S-PO-7: cli tbd (write or read) or cli → 401 person_op_invalid (cli ∈ PERSON_OP_RELAY.clients is a V0 check); the jti is not spent", async () => {
-    const before = b.effects.item_decide ?? 0;
-    for (const [op, input, cli] of [["item_decide", { id: "itm_7", answer: "yes" }, "tbd"], ["items_list", {}, "tbd"], ["items_list", {}, "cli"]] as const) {
+  test("S-PO-7: cli tbd for a WRITE op and for a READ op, or cli → 401 person_op_invalid (cli ∈ PERSON_OP_RELAY.clients is a V0 check); the jti is not spent", async () => {
+    const before = { decide: b.effects.item_decide ?? 0, list: b.effects.items_list ?? 0 };
+    // write op (item_decide), read ops (items_list, item_get) with cli tbd; and the CLI client
+    for (const [op, input, cli] of [
+      ["item_decide", { id: "itm_7", answer: "yes" }, "tbd"],
+      ["items_list", {}, "tbd"],
+      ["item_get", { id: "itm_7" }, "tbd"],
+      ["items_list", {}, "cli"],
+    ] as const) {
       const r = await call(b, op, input, { cli });
       assert.equal(r.status, 401, `${op} ${cli}`);
       assert.equal(code(r), "person_op_invalid");
     }
-    assert.equal(b.effects.item_decide ?? 0, before);
+    assert.equal(b.effects.item_decide ?? 0, before.decide, "the write op did not run");
+    assert.equal(b.effects.items_list ?? 0, before.list, "the read op did not run");
     // V0 runs before the jti is consumed: a refused cli does not spend a jti (a later valid token with that jti still runs)
     const jti = ulid();
     assert.equal((await call(b, "items_list", {}, { cli: "tbd", jti })).status, 401);
@@ -406,13 +413,16 @@ describe("POST /tb/v1/person-op (K14, SDK-API §21)", () => {
     assert.equal(b.effects.item_decide, before + 1);
   });
 
-  test("S-PO-9: exp 3 s in the past → 401 (only PERSON_OP_RELAY.expLeewayS = 2 s, not LEEWAY_S); lifetime over 10 s → 401; iat 5 s ahead → 401", async () => {
+  test("S-PO-9: exp 3 s and 5 s in the past → 401 (only PERSON_OP_RELAY.expLeewayS = 2 s, not LEEWAY_S); lifetime over 10 s → 401; iat 5 s ahead → 401", async () => {
     assert.equal(PERSON_OP_RELAY.expLeewayS, 2);
     assert.equal(LIFETIME_S.personOp, 10);
-    const exp = nowS() - 3;
-    const expired = await call(b, "items_list", {}, { iat: exp - 10, exp });
-    assert.equal(expired.status, 401);
-    assert.equal(code(expired), "person_op_invalid");
+    // QA-SPEC43-7: an SDK that applied the general LEEWAY_S (30 s) to K14 would accept both of these
+    for (const ago of [3, 5]) {
+      const exp = nowS() - ago;
+      const expired = await call(b, "items_list", {}, { iat: exp - 10, exp });
+      assert.equal(expired.status, 401, `exp ${ago} s in the past`);
+      assert.equal(code(expired), "person_op_invalid");
+    }
     const long = nowS();
     const tooLong = await call(b, "items_list", {}, { iat: long, exp: long + LIFETIME_S.personOp + 1 });
     assert.equal(tooLong.status, 401);
