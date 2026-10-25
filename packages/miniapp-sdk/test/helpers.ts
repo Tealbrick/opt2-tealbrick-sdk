@@ -221,6 +221,14 @@ export class FakeBridge {
   onEvents: ((items: Record<string, unknown>[]) => { status: number; body: unknown } | null) | null = null;
   /** emit items stored once each (dedupe by key, as the bridge does per app instance) */
   storedEvents: Record<string, unknown>[] = [];
+  /** v0.1.63 (BRIDGE §15.4): the keys + role-binding revision the status answers carry (`bumpKeys`) */
+  keysRev = 0;
+  /** v0.1.63: role → answer of GET /tb/v1/model-roles/<role> (absent = 404 role_not_set); `keysRev` is added when sent */
+  modelRoles = new Map<string, { status: number; body: Record<string, unknown> }>();
+  /** v0.1.63: false = a bridge without cap `model_roles`: the route does not exist (404 not_found, no refuse code) */
+  modelRoutes = true;
+  /** v0.1.63: every model-role fetch: the role and whether the instance assertion verified (htm, htu) */
+  modelRoleFetches: { role: string; assertOk: boolean }[] = [];
   #slice: string | null = null;
   #rev = 0;
   #waiting: ServerResponse[] = [];
@@ -238,6 +246,12 @@ export class FakeBridge {
     return `http://127.0.0.1:${this.port}`;
   }
 
+  /** v0.1.63: a key or binding changed: one new revision, every waiting status answers at once */
+  bumpKeys(): void {
+    this.keysRev += 1;
+    for (const res of this.#waiting.splice(0)) this.#answer(res);
+  }
+
   push(token: string): void {
     this.#slice = token;
     this.#rev = this.w.rev;
@@ -247,7 +261,7 @@ export class FakeBridge {
   #answer(res: ServerResponse): void {
     if (res.writableEnded) return;
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ slice: this.#slice, sliceRevision: this.#rev, keysRev: 0 }));
+    res.end(JSON.stringify({ slice: this.#slice, sliceRevision: this.#rev, keysRev: this.keysRev }));
   }
 
   async #handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -278,6 +292,22 @@ export class FakeBridge {
       });
       res.writeHead(200, { "content-type": "application/json" });
       return void res.end(JSON.stringify({ results }));
+    }
+    if (url.pathname.startsWith("/tb/v1/model-roles/") && req.method === "GET") {
+      const role = decodeURIComponent(url.pathname.slice("/tb/v1/model-roles/".length));
+      const token = String(req.headers["tb-assert"] ?? "");
+      const keys = this.instanceKey ? keySetFrom({ keys: [this.instanceKey] }, `tb:ins:${this.w.ins}`) : null;
+      const v = keys ? verifyAssertion(token, keys, { typ: TYP.instanceAssertion, aud: `tb:brg:${this.w.brg}`, now: nowS(), method: "GET", pathAndQuery: url.pathname + url.search }) : { ok: false };
+      const send = (status: number, payload: unknown) => {
+        res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify(payload));
+      };
+      if (!this.modelRoutes) return send(404, { error: { code: "not_found", message: "no such route", requestId: "req_test" } });
+      this.modelRoleFetches.push({ role, assertOk: v.ok });
+      if (!v.ok) return send(401, { error: { code: "unauthenticated", message: "assertion", requestId: "req_test" } });
+      const a = this.modelRoles.get(role);
+      if (!a) return send(404, { error: { code: "role_not_set", message: "role_not_set", requestId: "req_test" } });
+      return send(a.status, a.status === 200 ? { ...a.body, keysRev: this.keysRev } : a.body);
     }
     if (url.pathname === "/tb/v1/claim") {
       const code = String(body?.code ?? "");
@@ -314,7 +344,7 @@ export class FakeBridge {
         return void res.end(JSON.stringify({ error: { code: "unauthenticated", message: "instance assertion missing or key unknown", requestId: "req_test" } }));
       }
       this.statuses.push(body);
-      if (body?.sliceRevision !== this.#rev) return this.#answer(res);
+      if (body?.sliceRevision !== this.#rev || (typeof body?.keysRev === "number" && body.keysRev !== this.keysRev)) return this.#answer(res);
       const wait = Number(url.searchParams.get("wait") ?? "0");
       if (wait === 0) {
         res.writeHead(204);

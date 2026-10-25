@@ -25,7 +25,8 @@ export interface FieldInfo {
   depth: number;
 }
 
-const SPEC_DTS = ["routes", "bridge", "credentials", "manifest"] as const;
+// v0.1.58 (spec 0.1.58..0.1.64): the host rows take their input types from host.d.ts
+const SPEC_DTS = ["routes", "bridge", "credentials", "manifest", "host"] as const;
 
 /** Index of every declaration in the installed @opt2-tealbrick/spec declaration files (routes first on clashes). */
 export function loadSpecTypes(): TypeIndex {

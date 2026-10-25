@@ -5,6 +5,7 @@
 import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  declaredModelRoles,
   digest,
   type Ed25519KeyPair,
   EVENT_KEY_RE,
@@ -34,11 +35,12 @@ import type { FakeBridge } from "../fake-bridge.ts";
 import { SDK_EXPORTS } from "../generated/sdk-exports.ts";
 import { errorCode } from "../http.ts";
 import { applyLevelCrud, LEVEL_CRUD_ENV, type LevelCrudChange } from "../level-crud.ts";
+import { listPersonPages } from "../list-pages.ts";
 import type { AppDriver } from "../multi-app.ts";
 import type { PayloadScan } from "../report.ts";
 import { sampleInput } from "../sample.ts";
 import { scanPayloads } from "../scan.ts";
-import { SDK_COVERAGE } from "../sdk-coverage.ts";
+import { SDK_COVERAGE, SDK_UNCOVERED } from "../sdk-coverage.ts";
 import { jsonPointer, resolvePlaceholders, runSetup } from "../setup.ts";
 import { bad, na, notRun, type Outcome, ok, refusedWith, type Suite, verdict } from "../suite.ts";
 import { Mint, newId, nowS, peek } from "../tokens.ts";
@@ -141,6 +143,8 @@ const SCOPE_GRANT_SINCE = "0.1.31";
 const COMPANION_CALLERS_SINCE = "0.1.32";
 /** conformance 0.1.27 (C292, spec 0.1.54): ctx.bridgeCaps() */
 const BRIDGE_CAPS_SINCE = "0.1.37";
+/** model roles (spec 0.1.63): miniapp-sdk 0.1.39 */
+const MODEL_ROLES_SINCE = "0.1.39";
 /** conformance 0.1.28 (C274c, spec 0.1.57): ctx.emit, the outbox and tb.hold.decided */
 const EVENTS_SINCE = "0.1.38";
 /** the bridge capability of BRIDGE §14 (slice `bridge.caps`) */
@@ -988,18 +992,17 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   });
   await s.run("A4.holds_list", "one table: holds are receipt rows", "person tb.holds_list contains the hold with status held", async () => {
     if (!hold || !sess) return noHold("no hold/session");
-    const r = await c().personOp(sess, "tb.holds_list", {});
-    const items = isObj(r.output) && Array.isArray(r.output.items) ? r.output.items : [];
-    const row = items.find((x) => isObj(x) && x.id === holdIdOf((hold as { answer: OpAnswer }).answer));
-    return verdict(isObj(row) && row.status === "held", row ? `row status ${String((row as Record<string, unknown>).status)}` : `${show(r)}, ${items.length} items, hold missing`);
+    const holdId = holdIdOf((hold as { answer: OpAnswer }).answer);
+    const r = await listPersonPages(c(), sess, "tb.holds_list", (xs) => xs.some((x) => x.id === holdId));
+    const row = r.items.find((x) => x.id === holdId);
+    return verdict(!!row && row.status === "held", row ? `row status ${String(row.status)}` : `${r.failed ?? "ok"}, ${r.items.length} items in ${r.pages} page(s)${r.truncated ? " (page limit reached)" : ""}, hold missing`);
   });
   await s.run("A4.receipt_digest", "receipt stores input digest, never raw input", "receipt row: inputDigest = sha256(JCS input); the canonical input is not in the receipt list", async () => {
     if (!hold || !sess) return noHold("no hold/session");
-    const r = await c().personOp(sess, "tb.receipts_list", {});
-    const items = isObj(r.output) && Array.isArray(r.output.items) ? r.output.items : [];
     const h = hold as { input: Json; answer: OpAnswer };
-    const row = items.find((x) => isObj(x) && x.id === holdIdOf(h.answer)) as Record<string, unknown> | undefined;
-    if (!row) return bad(`${show(r)}; hold row missing`);
+    const r = await listPersonPages(c(), sess, "tb.receipts_list", (xs) => xs.some((x) => x.id === holdIdOf(h.answer)));
+    const row = r.items.find((x) => x.id === holdIdOf(h.answer));
+    if (!row) return bad(`${r.failed ?? "ok"}, ${r.items.length} items in ${r.pages} page(s)${r.truncated ? " (page limit reached)" : ""}; hold row missing`);
     const raw = JSON.stringify(h.input);
     const leaked = raw.length > 12 && r.text.includes(raw.slice(1, -1));
     const forbidden = ["input", "body", "arguments"].filter((k) => k in row);
@@ -1124,10 +1127,10 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   };
   /** The receipt row id of an answer: receiptId (ran) or holdId (held; holds are receipt rows). */
   const rowIdOf = (a: OpAnswer) => (isHeld(a) ? holdIdOf(a) : isOk(a) && isObj(a.body) && typeof a.body.receiptId === "string" ? a.body.receiptId : null);
-  const receiptRows = async (): Promise<Record<string, unknown>[]> => {
+  const receiptRows = async (want?: readonly string[]): Promise<Record<string, unknown>[]> => {
     if (!sess) return [];
-    const r = await c().personOp(sess, "tb.receipts_list", {});
-    return (isObj(r.output) && Array.isArray(r.output.items) ? r.output.items : []).filter(isObj);
+    // newest first, 50 a page: follow nextCursor until every wanted row is in (the whole list when none are named)
+    return (await listPersonPages(c(), sess, "tb.receipts_list", want && ((xs) => want.every((id) => xs.some((x) => x.id === id))))).items;
   };
   await s.run("A12.caller_name", "an app caller is named from slice companionCallers; an unlisted one by its instance id (C102)", "a caller listed in companionCallers {product, ins, name} calls a receipt op (companion grant sub tb:ins:<ins>) → its tb.receipts_list row has caller.name = that name; an unlisted caller's row has caller.name = its instance id", async () => {
     const op = byRank(agentOps.filter((o) => o.receipt)).sort((x, y) => Number(x.effect === "money") - Number(y.effect === "money"))[0];
@@ -1145,7 +1148,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
       const authLike = [one.answer, two.answer].some((a) => AUTH_CODES.has(a.code ?? "") || a.code === "audience_not_agent");
       return authLike ? bad(shown) : notRun(`${shown} — no receipt row to read; supply an inputs fixture an app caller can run`);
     }
-    const items = await receiptRows();
+    const items = await receiptRows([id1, id2]);
     const nameOf = (id: string) => {
       const row = items.find((x) => x.id === id);
       return row && isObj(row.caller) ? row.caller.name : undefined;
@@ -1171,7 +1174,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
       const authLike = AUTH_CODES.has(one.answer.code ?? "") || one.answer.code === "audience_not_agent";
       return authLike ? bad(shown) : notRun(`${shown} — no receipt row to read; supply an inputs fixture an app caller can run`);
     }
-    const row = (await receiptRows()).find((x) => x.id === id);
+    const row = (await receiptRows([id])).find((x) => x.id === id);
     const caller = row && isObj(row.caller) ? row.caller : undefined;
     const got = `caller.product ${JSON.stringify(caller?.product)}, caller.name ${JSON.stringify(caller?.name)}`;
     if (caller?.product === "tbconf-observer") return bad(`${shown}; ${got}: the product was taken from the caller NAME (the decoy "tbconf-observer" has the same name), not from the entry of the grant's caller instance`);
@@ -1191,7 +1194,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     const one = await appCall(appCaller, op, { held: [], ...(prd !== undefined ? { prd } : {}) });
     const shown = `${op.id}: ${show(one.answer)} (${one.how})`;
     const id = rowIdOf(one.answer);
-    const row = id ? (await receiptRows()).find((x) => x.id === id) : undefined;
+    const row = id ? (await receiptRows([id])).find((x) => x.id === id) : undefined;
     const caller = row && isObj(row.caller) ? row.caller : undefined;
     return { one, shown, id, product: caller?.product, hasRow: !!row };
   };
@@ -1222,7 +1225,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     if (good.product !== "tbconf-slice") return bad(`${shown}; a grant whose prd equals the slice product must run with caller.product "tbconf-slice", got ${JSON.stringify(good.product)}`);
     if (isOk(bad1.answer) || isHeld(bad1.answer)) {
       const id = rowIdOf(bad1.answer);
-      const row = id ? (await receiptRows()).find((x) => x.id === id) : undefined;
+      const row = id ? (await receiptRows([id])).find((x) => x.id === id) : undefined;
       const got = row && isObj(row.caller) ? JSON.stringify(row.caller.product) : "no row";
       return bad(`${shown}; the app ran/held a call whose grant prd (tbconf-grant) differs from the slice product (tbconf-slice); it took caller.product ${got} instead of refusing`);
     }
@@ -1789,7 +1792,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
       if (a.code === "scope_denied") return bad(`${shown} — the owner-set row must be primary, also above the Portal grant`);
       if (!(isOk(a) || isHeld(a))) return notRun(`${shown} — the call neither ran nor was held; supply an inputs fixture`);
       const id = rowIdOf(a);
-      const row = id ? (await receiptRows()).find((x) => x.id === id) : undefined;
+      const row = id ? (await receiptRows([id])).find((x) => x.id === id) : undefined;
       if (!row) return ok(`${shown} (no receipt row to read admittedBy)`);
       return verdict(row.admittedBy === "app_owner_row", `${shown}; receipt admittedBy ${JSON.stringify(row.admittedBy)} (expected "app_owner_row")`);
     },
@@ -2356,6 +2359,50 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     },
   );
 
+  // ── A23 model roles (RM-17, spec 0.1.63, SDK >= 0.1.39): the app against a bridge WITHOUT the model-roles route ──────────────────
+  // A bridge without cap `model_roles` has no `GET /tb/v1/model-roles/<role>`: 404 without a refuse code. `modelRole()` then gives
+  // null — fail closed, never a guess and never a fall back to keys — so a required role keeps the app `needs_keys` with attention
+  // `model_role_missing`. Black-box through the status push (the app's own `modelRole()` is what the SDK calls), and the request for the
+  // route must be on the wire: an app that always says needs_keys without asking does not pass.
+  await s.run(
+    "A23.model_role_no_route",
+    "a bridge without the model-roles route: a required role gives needs_keys + model_role_missing, never a guess (RM-17)",
+    "with the route and a binding the app reports ready; after the bridge drops the route (404 not_found, the binding still set on the bridge) and keysRev moves: GET /tb/v1/model-roles/<role> is requested and the app reports needs_keys with attention model_role_missing naming the role",
+    async () => {
+      const role = declaredModelRoles(m).find((r) => r.required && r.usedBy.includes("app") && r.when === undefined);
+      const v = b.claims[0]?.request.sdkVersion;
+      if (!role) return na("the manifest declares no required model role for the app (settings.modelRoles, usedBy app, no when)");
+      if (versionBelow(v, MODEL_ROLES_SINCE)) return na(`SDK ${v} (self-reported) predates ${MODEL_ROLES_SINCE} (model roles, spec 0.1.63): not applicable by version`);
+      const binding = { provider: "ollama", model: "tbconf-model", baseUrl: "http://ollama.railway.internal:11434/v1", key: null, dataPolicy: "local" as const, dims: null };
+      const settle = async (): Promise<Awaited<ReturnType<typeof b.control.waitForStatus>> | null> => {
+        const rev = b.control.keysRev;
+        return b.control.waitForStatus((x) => x.status.keysRev === rev, T).catch(() => null);
+      };
+      try {
+        await b.control.setModelRoutes(true);
+        b.control.setRole(role.role, binding);
+        const withRoute = await settle();
+        if (!withRoute) return notRun("the app did not report the new keysRev in time: not observable here");
+        if (withRoute.status.readiness !== "ready") return notRun(`with the route and a binding the app reports ${withRoute.status.readiness} (${withRoute.status.attention?.code ?? "no attention"}): another reason keeps it from ready, so the RM-17 contrast is not observable`);
+        const asked = b.captured.length;
+        await b.control.setModelRoutes(false);
+        b.control.setRole(role.role, { ...binding, model: "tbconf-model-2" }); // keysRev moves, the binding is still set on the bridge
+        const noRoute = await settle();
+        if (!noRoute) return notRun("the app did not report the keysRev after the route went away in time");
+        const path = `/tb/v1/model-roles/${role.role}`;
+        const requested = b.captured.slice(asked).some((p) => p.dir === "bridge-in" && p.path.startsWith(path));
+        const st = noRoute.status;
+        if (!requested) return bad(`the app never asked for ${path} after the keysRev moved (status ${st.readiness}): modelRole() was not called`);
+        if (st.readiness !== "needs_keys") return bad(`bridge without the route (404 not_found): readiness ${st.readiness}, expected needs_keys: the app took a guess for the required role ${role.role}`);
+        if (st.attention?.code !== "model_role_missing" || !st.attention.reason.includes(role.role)) return bad(`needs_keys but attention is ${JSON.stringify(st.attention ?? null)}, expected code model_role_missing naming ${role.role}`);
+        return ok(`with the route: ready; without it: ${path} asked (404 not_found), needs_keys + model_role_missing (${st.attention.reason})`);
+      } finally {
+        await b.control.setModelRoutes(true);
+        b.control.deleteRole(role?.role ?? "reasoning");
+      }
+    },
+  );
+
   // ── A10 post-approval retry + P1 held release while paused + C8 no standing approval ──
   let retry: OpAnswer | null = null;
   const decide = async (id: string, decision: "approve" | "deny") => (sess ? c().personOp(sess, "tb.holds_decide", { holdId: id, decision }) : null);
@@ -2412,13 +2459,13 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
       const a = await c().callBridgeOp("mark", { call: t.call, mark: "after_failed" });
       if (a.status !== 200) return bad(`mark (${t.kind}) ${show(a)}`);
     }
-    const r = await c().personOp(sess, "tb.receipts_list", {});
-    const items = isObj(r.output) && Array.isArray(r.output.items) ? r.output.items : [];
+    // A12 ran every agent op first: the receipt can be more than one page behind the newest rows
+    const r = await listPersonPages(c(), sess, "tb.receipts_list", (xs) => targets.every((t) => xs.some((x) => x.id === t.rid)));
     let pass = true;
     for (const t of targets) {
-      const row = items.find((x) => isObj(x) && x.id === t.rid) as Record<string, unknown> | undefined;
+      const row = r.items.find((x) => x.id === t.rid);
       pass &&= row?.status === "after_failed";
-      seen.push(`${t.kind} ${t.rid}: ${String(row?.status ?? "missing")}`);
+      seen.push(`${t.kind} ${t.rid}: ${String(row?.status ?? (r.truncated ? `missing in ${r.pages} pages (page limit reached)` : "missing"))}`);
     }
     return verdict(pass, seen.join("; "));
   });
@@ -2434,8 +2481,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   const hvCall = (input: Json, reason: string, opts: CallOptions = {}) => c().callOp((hvOp as Operation).id, input, { hv: hvClaim(reason), idempotencyKey: idemKey(hvOp), ...opts });
   const listHolds = async (): Promise<Record<string, unknown>[]> => {
     if (!sess) return [];
-    const r = await c().personOp(sess, "tb.holds_list", {});
-    return (isObj(r.output) && Array.isArray(r.output.items) ? r.output.items : []).filter(isObj);
+    return (await listPersonPages(c(), sess, "tb.holds_list")).items;
   };
   const openHolds = async () => (await listHolds()).filter((x) => x.status === "held").length;
   let hvHold: { op: Operation; input: Json; id: string } | null = null;
@@ -3131,11 +3177,18 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
 
 /** A11: generated export list vs the coverage map vs the check catalogue. */
 export function coverageOutcome(): Outcome {
-  const unmapped = SDK_EXPORTS.filter((e) => !(SDK_COVERAGE[e.name]?.length > 0)).map((e) => e.name);
+  const unmapped = SDK_EXPORTS.filter((e) => !(SDK_COVERAGE[e.name]?.length > 0) && !(e.name in SDK_UNCOVERED)).map((e) => e.name);
+  const staleUncovered = Object.keys(SDK_UNCOVERED).filter((n) => !SDK_EXPORTS.some((e) => e.name === n) || SDK_COVERAGE[n]?.length > 0);
   const unknownIds = Object.entries(SDK_COVERAGE).flatMap(([n, ids]) => ids.filter((id) => !CHECK_IDS.has(id)).map((id) => `${n}→${id}`));
   const stale = Object.keys(SDK_COVERAGE).filter((n) => !SDK_EXPORTS.some((e) => e.name === n));
-  const pass = unmapped.length === 0 && unknownIds.length === 0 && stale.length === 0;
-  return verdict(pass, pass ? `${SDK_EXPORTS.length} exports, all mapped to catalogued checks` : `unmapped ${unmapped.join(",") || "-"}; unknown ids ${unknownIds.join(",") || "-"}; stale ${stale.join(",") || "-"}`);
+  const pass = unmapped.length === 0 && unknownIds.length === 0 && stale.length === 0 && staleUncovered.length === 0;
+  const declared = Object.keys(SDK_UNCOVERED);
+  return verdict(
+    pass,
+    pass
+      ? `${SDK_EXPORTS.length - declared.length} exports mapped to catalogued checks${declared.length > 0 ? `; not covered yet (declared in SDK_UNCOVERED): ${declared.join(", ")}` : ""}`
+      : `unmapped ${unmapped.join(",") || "-"}; unknown ids ${unknownIds.join(",") || "-"}; stale ${stale.join(",") || "-"}; stale uncovered ${staleUncovered.join(",") || "-"}`,
+  );
 }
 
 /** A13 ids (CONFORMANCE §4.5 v0.1.11): the slice key-set rule at the app. */

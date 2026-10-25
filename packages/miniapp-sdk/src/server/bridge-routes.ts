@@ -28,7 +28,7 @@ function ready(rt: Runtime): TrustContext {
 }
 
 function hookContext(rt: Runtime, timeoutMs: number): SdkHookContext {
-  return { log: rt.log, db: rt.appDb, getKey: (n) => rt.keys.getKey(n), signal: AbortSignal.timeout(timeoutMs), secrets: rt.secretsStore };
+  return { log: rt.log, db: rt.appDb, getKey: (n) => rt.keys.getKey(n), modelRole: (r) => rt.keys.modelRole(r), signal: AbortSignal.timeout(timeoutMs), secrets: rt.secretsStore };
 }
 
 async function withTimeout<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {

@@ -430,6 +430,24 @@ describe("agent operations via the bridge", () => {
     assert.equal(other.status, 200);
   });
 
+  test("C353: an app slice carries pause.agents [] always; an edge agent with agents[].status paused is refused, another agent is not", async () => {
+    b.bridge.push(
+      await slice(b.w, PRODUCT, {
+        pause: { workspace: false, agents: [], instances: [] },
+        agents: [
+          { id: b.w.agents.a, name: "Agent A", mode: "free", status: "paused" },
+          { id: b.w.agents.b, name: "Agent B", mode: "free", status: "active" },
+        ],
+      }),
+    );
+    const r = await until(async () => {
+      const x = await callOp(b, "note_get", { id: "n1" });
+      return x.status === 403 ? x : null;
+    });
+    assert.equal(r.body.error.code, "paused");
+    assert.equal((await callOp(b, "note_get", { id: "n1" }, { agent: b.w.agents.b })).status, 200);
+  });
+
   test("TbError carries code and HTTP status", () => {
     const e = new TbError("custom_code", "msg", 418);
     assert.equal(e.code, "custom_code");

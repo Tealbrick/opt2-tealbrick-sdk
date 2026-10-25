@@ -3,7 +3,8 @@ import { appendFileSync } from "node:fs";
 
 const [out, mode] = process.argv.slice(2) as [string, string | undefined];
 const record = (line: unknown) => appendFileSync(out, `${JSON.stringify(line)}\n`);
-record({ event: "start", pid: process.pid, key: process.env.ENGINE_KEY ?? null, tbNames: Object.keys(process.env).filter((k) => k.startsWith("TB_")) });
+const roleEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith("ROLE_")));
+record({ event: "start", pid: process.pid, key: process.env.ENGINE_KEY ?? null, tbNames: Object.keys(process.env).filter((k) => k.startsWith("TB_")), roleEnv, proxyEnv: Object.keys(process.env).filter((k) => /proxy/i.test(k)).sort() });
 if (mode === "exit3") process.exit(3);
 process.on("SIGTERM", () => {
   record({ event: "SIGTERM", pid: process.pid });

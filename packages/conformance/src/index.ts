@@ -20,6 +20,7 @@ export {
   FakeBridgeControl,
   type FakeBridgeIds,
   type FakeBridgeOptions,
+  type FakeRoleBinding,
 } from "./fake-bridge.ts";
 export { createFakePortal, FAKE_PORTAL_ROUTES, FakePortal, FakePortalControl, type FakePortalOptions } from "./fake-portal.ts";
 export { FakeUpstream, type UpstreamRequest } from "./fake-upstream.ts";
@@ -52,7 +53,7 @@ export { type CoreTargetOptions, gatewayOrigin, runCoreTarget } from "./run-core
 export { type RunRelayOptions, runRelayTarget } from "./run-relay.ts";
 export { sampleInput } from "./sample.ts";
 export { scanPayloads } from "./scan.ts";
-export { SDK_COVERAGE } from "./sdk-coverage.ts";
+export { SDK_COVERAGE, SDK_UNCOVERED } from "./sdk-coverage.ts";
 export { jsonPointer, type Resolved, resolvePlaceholders, runSetup, type SetupAnswer, type SetupResult } from "./setup.ts";
 export { type Outcome, Suite } from "./suite.ts";
 export { readTar, type TarEntry } from "./tar.ts";

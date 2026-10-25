@@ -8,7 +8,7 @@ import { describe, test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { STANDARD_OPERATIONS } from "@opt2-tealbrick/spec/manifest";
 import { checkDrift, GEN_KINDS, generate, generateAll } from "../../src/gen/generate.ts";
-import { buildKit, kitDirName } from "../../src/gen/kit.ts";
+import { buildKit, kitDirName, lazyPairDefs } from "../../src/gen/kit.ts";
 import { fromManifest, GenError, loadManifest, stableJson, writeFiles } from "../../src/gen/load.ts";
 import { parseTbGenArgs, runTbGen } from "../../src/gen/main.ts";
 import { genRailway, KEK_SECRET, resolveSettings } from "../../src/gen/railway.ts";
@@ -105,6 +105,91 @@ describe("kit", () => {
     assert.match(src, /Call `demo-items__items_list` to see/, "skill text embedded raw (placeholders of the template substituted)");
     assert.match(src, /\{\{agent\.name\}\}/, "skill variables left unrendered");
     assert.match(files.get(`${k}/README.md`) as string, /`itemCreate` \| `demo-items__item_create` \| write \| required/);
+  });
+
+  test("C338 / QA-SDK48: TOOLS names = the bridge's tools/list rule; order, text, flags, annotations; --package-name in package.json, README and the CLI", (t) => {
+    const dir = temp(t);
+    const manifest = notesJson();
+    // a workflow-listed op (QA-SDK48 mutant: listing flag)
+    const firstAgent = manifest.operations.find((o: { audience: string; dynamic?: unknown }) => o.audience === "agent" && !o.dynamic) as { id: string };
+    manifest.operations = manifest.operations.map((o) => (o.id === firstAgent.id ? { ...o, listing: "workflow" as const } : o));
+    writeRepo(dir, manifest);
+    const m = loadManifest(join(dir, "tealbrick.manifest.json"));
+    const files = generate("kit", m, { packageName: "@tealbrick/notes" });
+    const k = kitDirName(m.manifest.id);
+    assert.equal(JSON.parse(files.get(`${k}/package.json`) as string).name, "@tealbrick/notes");
+    assert.match(files.get(`${k}/README.md`) as string, /^# @tealbrick\/notes$/mu, "README names the package");
+    const src = files.get(`${k}/src/index.ts`) as string;
+    const marker = "export const TOOLS: readonly KitToolDef[] = ";
+    const json = src.slice(src.indexOf(marker) + marker.length, src.indexOf("];", src.indexOf(marker)) + 1);
+    const tools = JSON.parse(json) as { name: string; title: string; description: string; inputSchema: unknown; effect: string; listing?: string }[];
+    // the bridge rule (bridge tools.ts buildToolIndex): agent static ops in manifest order, search-mode pairs, then per app
+    // hold status (when the app has tb.hold_status) and skills; standard ops are never listed otherwise
+    const p = m.manifest.id;
+    const want: string[] = [];
+    for (const o of m.manifest.operations) {
+      if (o.audience !== "agent") continue;
+      if (o.dynamic?.mode === "search") want.push(`${p}__${o.id}_search`, `${p}__${o.id}_call`);
+      else if (!o.dynamic) want.push(`${p}__${o.id}`);
+    }
+    const names = tools.map((x) => x.name);
+    assert.deepEqual(names.filter((n) => !n.endsWith("__tb_hold_status") && !n.endsWith("__tb_skills")), want, "static and search tools in manifest order");
+    assert.ok(names.includes(`${p}__tb_hold_status`) && names.includes(`${p}__tb_skills`));
+    assert.deepEqual(names.filter((n) => n.includes("__tb_")).sort(), [`${p}__tb_hold_status`, `${p}__tb_skills`], "no other tb_ tool (tb_holds_pending is never listed)");
+    for (const o of m.manifest.operations.filter((x) => x.audience === "agent" && !x.dynamic)) {
+      const def = tools.find((x) => x.name === `${p}__${o.id}`);
+      assert.ok(def, o.id);
+      assert.equal(def.description, o.description);
+      assert.equal(def.title, o.title);
+      assert.deepEqual(def.inputSchema, o.input ?? { type: "object" });
+      assert.equal(def.effect, o.effect);
+      assert.equal(def.listing, o.id === firstAgent.id ? "workflow" : undefined, o.id);
+    }
+    // annotations exactly as the bridge: three booleans for every effect
+    assert.match(src, /readOnlyHint: effect === "read", destructiveHint: effect === "destructive", openWorldHint: effect === "outward" \|\| effect === "money"/u);
+    // package name edges
+    for (const bad of ["", "Not A Name", "@a.b/c", "@a/b.c", `@${"a".repeat(212)}/bb`, "@a/b/c", "notes"]) assert.throws(() => generate("kit", m, { packageName: bad }), isGen("package_name_invalid"), JSON.stringify(bad));
+    assert.equal(JSON.parse(generate("kit", m).get(`${k}/package.json`) as string).name, `@opt2-tealbrick/${p}-kit`, "default name unchanged");
+    // the CLI forwards the flag (and refuses an empty one)
+    const out = join(dir, "gen-cli");
+    const ok = capture(["kit", "--manifest", join(dir, "tealbrick.manifest.json"), "--out", out, "--package-name", "@tealbrick/notes"], dir);
+    assert.equal(ok.code, 0, ok.err);
+    assert.equal(JSON.parse(readFileSync(join(out, k, "package.json"), "utf8")).name, "@tealbrick/notes");
+    assert.notEqual(capture(["kit", "--manifest", join(dir, "tealbrick.manifest.json"), "--out", out, "--package-name", ""], dir).code, 0);
+  });
+
+  test("QA-SDK48-5/-7/-8: lazy pair as the bridge lists it; tb-gen check honours --package-name; the skills tool schema", (t) => {
+    assert.deepEqual(lazyPairDefs("knowledge", "Knowledge", []), []);
+    const pair = lazyPairDefs("knowledge", "Knowledge", [
+      { id: "a1", effect: "read" },
+      { id: "a2", effect: "write" },
+      { id: "a3", effect: "destructive" },
+      { id: "a4", effect: "read" },
+      { id: "a5", effect: "read" },
+      { id: "a6", effect: "outward" },
+    ]);
+    assert.deepEqual(pair.map((d) => d.name), ["knowledge__tb_more_search", "knowledge__tb_more_call"]);
+    assert.equal(pair[0]?.effect, "read");
+    assert.match(pair[0]?.description ?? "", /6 not listed here \(e\.g\. a1, a2, a3, a4, a5, …\)/u);
+    assert.equal(pair[1]?.effect, "destructive", "widest effect of the lazy ops");
+    assert.deepEqual(pair[1]?.annotations, { readOnlyHint: false, destructiveHint: true, openWorldHint: true });
+    assert.deepEqual(lazyPairDefs("k", "K", [{ id: "r", effect: "read" }])[1]?.annotations, { readOnlyHint: true, destructiveHint: false, openWorldHint: false });
+    // -7: `check` with and without the flag
+    const dir = temp(t);
+    writeRepo(dir, notesJson());
+    const manifest = join(dir, "tealbrick.manifest.json");
+    const out = join(dir, "gen");
+    assert.equal(capture(["all", "--manifest", manifest, "--out", out, "--package-name", "@tealbrick/notes"], dir).code, 0);
+    assert.equal(capture(["check", "--manifest", manifest, "--package-name", "@tealbrick/notes"], dir).code, 0, "same name: no drift");
+    assert.notEqual(capture(["check", "--manifest", manifest], dir).code, 0, "without the flag the committed kit drifts");
+    // -8: the skills tool and its schema
+    const m = loadManifest(manifest);
+    const src = generate("kit", m).get(`${kitDirName(m.manifest.id)}/src/index.ts`) as string;
+    const marker = "export const TOOLS: readonly KitToolDef[] = ";
+    const tools = JSON.parse(src.slice(src.indexOf(marker) + marker.length, src.indexOf("];", src.indexOf(marker)) + 1)) as { name: string; inputSchema: unknown; effect: string }[];
+    const skills = tools.find((x) => x.name === `${m.manifest.id}__tb_skills`);
+    assert.deepEqual(skills?.inputSchema, { type: "object", additionalProperties: false, properties: { skillId: { type: "string", maxLength: 64 } } });
+    assert.equal(skills?.effect, "read");
   });
 
   test("person-audience ops: PERSON_OPS, IDEMPOTENCY facts and the PersonOps io map (Connect request, BSA-08/12)", (t) => {
@@ -401,7 +486,9 @@ describe("refusals and CLI", () => {
   });
 
   test("parseTbGenArgs and per-kind output dirs", (t) => {
-    assert.deepEqual(parseTbGenArgs(["railway", "--manifest", "m.json", "--out", "o", "--set", "a=b=c"]), { command: "railway", manifest: "m.json", repo: null, out: "o", build: false, settings: { a: "b=c" } });
+    assert.deepEqual(parseTbGenArgs(["railway", "--manifest", "m.json", "--out", "o", "--set", "a=b=c"]), { command: "railway", manifest: "m.json", repo: null, out: "o", build: false, settings: { a: "b=c" }, packageName: null });
+    assert.equal(parseTbGenArgs(["kit", "--package-name", "@tealbrick/notes"]).packageName, "@tealbrick/notes");
+    assert.throws(() => parseTbGenArgs(["openapi", "--package-name", "@tealbrick/notes"]), /unknown flag --package-name/u);
     assert.equal(parseTbGenArgs(["kit", "--build"]).build, true);
     assert.equal(parseTbGenArgs(["all", "--repo", "../.."]).repo, "../..");
     const dir = temp(t);

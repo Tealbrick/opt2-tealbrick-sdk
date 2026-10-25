@@ -1,7 +1,7 @@
 // tb-exec test world: a manifest with one wrapped service (key, helper, backup), a fake bridge and a temp data dir.
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { ulid } from "@opt2-tealbrick/manifest";
+import { type ModelRoleRequirement, ulid } from "@opt2-tealbrick/manifest";
 import type { InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest, Service } from "@opt2-tealbrick/spec/manifest";
 import type { LogSink } from "../../src/server/log.ts";
@@ -25,12 +25,12 @@ export interface ExecWorld {
   env: Record<string, string>;
   logs: string[];
   sink: LogSink;
-  starts(): { event: string; pid: number; key: string | null; tbNames: string[] }[];
+  starts(): { event: string; pid: number; key: string | null; tbNames: string[]; roleEnv: Record<string, string>; proxyEnv: string[] }[];
   events(): { event: string; pid: number }[];
   cleanup(): Promise<void>;
 }
 
-export async function execWorld(opts: { helper?: boolean; backup?: boolean; dropPrivileges?: boolean } = {}): Promise<ExecWorld> {
+export async function execWorld(opts: { helper?: boolean; backup?: boolean; dropPrivileges?: boolean; modelRoles?: ModelRoleRequirement[]; settings?: Manifest["settings"]; runtimeEnv?: Manifest["runtime"]["env"] } = {}): Promise<ExecWorld> {
   const t = tempDir("tb-exec-test-");
   const helperPort = await freePort();
   const helperTarget = await freePort();
@@ -60,6 +60,10 @@ export async function execWorld(opts: { helper?: boolean; backup?: boolean; drop
   const settings = m.settings ?? { steps: [] };
   settings.keys = [...(settings.keys ?? []), { name: "ENGINE_KEY", label: "Engine key", provider: "Demo", required: true, source: "account_default", usedBy: [SERVICE] }];
   m.settings = settings;
+  // v0.1.63: `settings.modelRoles` (spec 0.1.57 types do not know the key; the validator does)
+  if (opts.modelRoles) (settings as { modelRoles?: ModelRoleRequirement[] }).modelRoles = opts.modelRoles;
+  if (opts.settings) settings.steps = opts.settings.steps;
+  if (opts.runtimeEnv) m.runtime.env = opts.runtimeEnv;
   const manifestPath = join(t.dir, "manifest.json");
   writeFileSync(manifestPath, JSON.stringify(m));
   const ins: InstanceId = `ins_${ulid()}`;

@@ -4,7 +4,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { join } from "node:path";
-import { isValidLaunchPath, keySetFrom, manifestDigest, memoryReplayGuard, sdkMajorOf, ulid, validateManifest, withStandardOps } from "@opt2-tealbrick/manifest";
+import { isValidLaunchPath, keySetFrom, type ModelRole, manifestDigest, memoryReplayGuard, type ResolvedModelRole, sdkMajorOf, ulid, validateManifest, withStandardOps } from "@opt2-tealbrick/manifest";
 import type { ScopeRequest } from "@opt2-tealbrick/spec/bridge";
 import type { Ed25519PublicJwk, InstanceId, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
@@ -490,6 +490,11 @@ export async function startApp(
     audit,
     log,
     bridge: () => (state.claimed ? bridge : null),
+    rolesChanged: () => statusChanged(),
+    paused: () => {
+      const p = trust.paused(null);
+      return p.workspace || p.instance;
+    },
     emit: async (names) => {
       try {
         await def.events?.keysChanged?.(names, eventContext());
@@ -576,7 +581,8 @@ export async function startApp(
         if (!state.claimed || state.attention) return "needs_claim";
         if (trust.stale(Date.now())) return "slice_stale";
       }
-      return keys.needsKeys() ? "needs_keys" : "ok";
+      // v0.1.63: a required model role that does not resolve is `needs_keys` too (attention `model_role_missing`, see `attention`)
+      return keys.needsKeys() || keys.rolesMissing().length > 0 ? "needs_keys" : "ok";
     },
     extras() {
       const slice = trust.slice;
@@ -601,7 +607,8 @@ export async function startApp(
     // v0.1.21: failed / stuck jobs raise attention when the app reports none (L3); v0.1.22 (SDK-03): a failed, overdue
     // or unparsable scheduled backup comes before them
     // v0.1.38 (admin queue c/5b): by severity, not first-non-null: a failed or overdue backup is never hidden by an app attention
-    attention: async () => pickAttention({ backup: backup.attention(), events: events.attention(), app: await attentionReader.read(), jobs: jobRunner().attention() }),
+    // v0.1.63: `model_role_missing` is the reason for needs_keys, so it comes before the app's own attention
+    attention: async () => pickAttention({ backup: backup.attention(), events: events.attention(), roles: keys.rolesAttention(), app: await attentionReader.read(), jobs: jobRunner().attention() }),
     backupHealth: () => backup.health(),
     ownerLink,
     ownerLinkFor,
@@ -626,7 +633,7 @@ export async function startApp(
     onClaimed() {
       if (onStartRan || !def.onStart) return;
       onStartRan = true;
-      const ctx: StartContext = { ...eventContext(), secrets: appSecrets, getKey: (n) => keys.getKey(n), callServiceHelper: helper };
+      const ctx: StartContext = { ...eventContext(), secrets: appSecrets, getKey: (n) => keys.getKey(n), modelRole: (r) => keys.modelRole(r), callServiceHelper: helper };
       def.onStart(ctx).catch((e) => log.error("onStart failed", { error: e instanceof Error ? e.message : "unknown" }));
     },
     async refreshSlice() {
@@ -777,6 +784,11 @@ export function decideHold(principal: PersonPrincipal, input: HoldDecideInput): 
 /** App-own value > workspace default (SDK-API §8). */
 export function getKey(name: string): Promise<string | null> {
   return running().keys.getKey(name);
+}
+
+/** v0.1.63 (SDK-API "v0.1.63 additions"): the binding of a model role the manifest declares for `app`; null = unset or below `minPolicy`. */
+export function modelRole(role: ModelRole): Promise<ResolvedModelRole | null> {
+  return running().keys.modelRole(role);
 }
 
 export function onKeysChanged(cb: (names: string[]) => void): () => void {

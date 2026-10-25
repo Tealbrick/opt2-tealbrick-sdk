@@ -16,6 +16,9 @@ export interface FakeBridge {
   refused: string[];
   keysRev: number;
   setKey(name: string, value: string | null): void;
+  /** v0.1.63 (BRIDGE §15.4): role → the answer of GET /tb/v1/model-roles/<role> (absent = 404 role_not_set); `keysRev` is added when sent. A change bumps keysRev. */
+  setRole(role: string, answer: { status: number; body: Record<string, unknown> } | null): void;
+  roleFetches: string[];
   /** test switch: names answered 403 key_not_declared (Core declaration bug, Knowledge S2); changes do NOT bump keysRev */
   undeclared: Set<string>;
   /** v0.1.12 tests: Core dropped the service key (assertions → 401 unauthenticated until a new claim) */
@@ -48,6 +51,7 @@ export async function startFakeBridge(o: { ins: InstanceId; code: string; servic
   const bridgeKey = await generateKeyPair();
   const brg: BridgeId = `brg_${ulid()}`;
   const keys = new Map(Object.entries(o.keys));
+  const roles = new Map<string, { status: number; body: Record<string, unknown> }>();
   const replay = memoryReplayGuard();
   let usedCode = false;
   let code = o.code;
@@ -64,6 +68,7 @@ export async function startFakeBridge(o: { ins: InstanceId; code: string; servic
     keyFetches: [],
     statusBodies: [],
     refused: [],
+    roleFetches: [],
     keysRev: 7,
     undeclared: new Set<string>(),
     forget() {
@@ -76,6 +81,12 @@ export async function startFakeBridge(o: { ins: InstanceId; code: string; servic
     setKey(name, value) {
       if (value === null) keys.delete(name);
       else keys.set(name, value);
+      fb.keysRev++;
+      for (const w of [...waiters]) w();
+    },
+    setRole(role, answer) {
+      if (answer === null) roles.delete(role);
+      else roles.set(role, answer);
       fb.keysRev++;
       for (const w of [...waiters]) w();
     },
@@ -129,6 +140,13 @@ export async function startFakeBridge(o: { ins: InstanceId; code: string; servic
       const value = keys.get(name);
       if (value === undefined) return refuse(res, 404, "key_not_set");
       return send(res, 200, { name, value, keysRev: fb.keysRev });
+    }
+    if (req.method === "GET" && url.startsWith("/tb/v1/model-roles/")) {
+      const role = decodeURIComponent(url.slice("/tb/v1/model-roles/".length));
+      fb.roleFetches.push(role);
+      const a = roles.get(role);
+      if (!a) return refuse(res, 404, "role_not_set");
+      return send(res, a.status, a.status === 200 ? { ...a.body, keysRev: fb.keysRev } : a.body);
     }
     if (req.method === "POST" && url === "/tb/v1/status?wait=60") {
       const b = JSON.parse(raw.toString("utf8")) as AppStatus;

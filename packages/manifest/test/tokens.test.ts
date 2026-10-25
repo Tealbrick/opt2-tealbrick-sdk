@@ -274,6 +274,49 @@ test("verifyTicket / verifyKeysTicket: purpose, audience, lifetime, typ confusio
   assert.equal(code(verifyAgentSession(launch, { now: NOW, self: `tb:brg:${w.brg}`, ws: w.ws, keys: w.trust.issuers })), "invalid_token");
 });
 
+test("v0.1.31 K11 `roles` claim (spec 0.1.63): accepted on a keys ticket within its limits; refused otherwise", async () => {
+  const w = await world();
+  const keysCtx = { now: NOW, self: `tb:brg:${w.brg}` as const, ws: w.ws, issuers: w.trust.issuers };
+  const base = { iss: "tb:portal" as const, sub: `tb:per:${w.per}` as const, aud: `tb:brg:${w.brg}` as const, ws: w.ws, pur: "keys" as const, iat: NOW, exp: NOW + 120 };
+  const roles = [
+    { role: "reasoning" as const, provider: "openai", model: "gpt-5.1", dataPolicy: "zdr" as const },
+    { role: "embeddings" as const, provider: "ollama", model: "nomic-embed-text:latest" },
+    { role: "rerank" as const },
+  ];
+  const ok = await signTicket({ ...base, roles }, w.portal);
+  const r = verifyKeysTicket(ok, keysCtx);
+  assert.ok(r.ok);
+  assert.deepEqual(r.ok && r.claims.roles, roles);
+  assert.ok(verifyKeysTicket(await signTicket({ ...base, roles: [] }, w.portal), keysCtx).ok);
+  assert.ok(verifyKeysTicket(await signTicket({ ...base, roles: Array.from({ length: 8 }, () => ({ role: "utility" as const })) }, w.portal), keysCtx).ok, "8 items is the limit");
+
+  // refused: the signer refuses the claim set, and the verifier refuses the same token signed raw
+  const hdr = { alg: "EdDSA", typ: TYP.personTicket, kid: w.portal.kid };
+  const jti = ulid();
+  const bad: [string, unknown, string?][] = [
+    ["9 items", Array.from({ length: 9 }, () => ({ role: "utility" })), undefined],
+    ["an unknown role", [{ role: "chat" }], undefined],
+    ["an extra key", [{ role: "reasoning", apiKey: "x" }], undefined],
+    ["a provider that is no id", [{ role: "reasoning", provider: "Open AI" }], undefined],
+    ["a model with // or a space", [{ role: "reasoning", model: "https://x" }], undefined],
+    ["a model with a space", [{ role: "reasoning", model: "two words" }], undefined],
+    ["an unknown dataPolicy", [{ role: "reasoning", dataPolicy: "strict" }], undefined],
+    ["a non-array", { role: "reasoning" }, undefined],
+    ["an item that is no object", ["reasoning"], undefined],
+  ];
+  for (const [name, value] of bad) {
+    await assert.rejects(signTicket({ ...base, roles: value as never }, w.portal), name);
+    assert.equal(code(verifyKeysTicket(await rawSign(hdr, { ...base, jti, roles: value }, w.portal), keysCtx)), "invalid_token", name);
+  }
+  // `roles` on a launch ticket, and on a keys ticket aimed at an instance
+  const launch = { iss: "tb:portal" as const, sub: base.sub, aud: `tb:ins:${w.ins}` as const, ws: w.ws, pur: "launch" as const, iat: NOW };
+  await assert.rejects(signTicket({ ...launch, roles: [{ role: "reasoning" }] } as never, w.portal));
+  assert.equal(code(verifyTicket(await rawSign(hdr, { ...launch, jti, exp: NOW + 60, roles: [{ role: "reasoning" }] }, w.portal), w.trust)), "invalid_token");
+  assert.ok(verifyTicket(await signTicket(launch, w.portal), w.trust).ok, "a launch ticket without roles still verifies");
+  // without `roles` a keys ticket is unchanged (older Core)
+  assert.ok(verifyKeysTicket(await signTicket(base, w.portal), keysCtx).ok);
+});
+
 function sliceBody(w: Awaited<ReturnType<typeof world>>, over: Record<string, unknown> = {}): Issue<InstanceSlice> {
   return {
     iss: "tb:portal",
