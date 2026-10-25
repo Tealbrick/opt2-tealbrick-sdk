@@ -31,7 +31,9 @@ import { newId, nowS } from "./tokens.ts";
 const API = "/api/v1";
 /** The rows the fake serves: every `bridge`/`device` auth row plus the public rows that start those flows. */
 export const FAKE_PORTAL_ROUTES = ROUTES.filter(
-  (r) => r.exposure === "gateway" && ((r.auth as readonly string[]).some((a) => a === "bridge" || a === "device") || r.opId === "bridge_api.enrol" || r.opId === "device.start"),
+  // v0.1.64 (C326): the person-op relay rows (`bridge_api.person_ops`, `bridge_api.person_op_result`) are not served by this fake (no relay lane here yet)
+  (r) =>
+    !r.opId.startsWith("bridge_api.person_op") && r.exposure === "gateway" && ((r.auth as readonly string[]).some((a) => a === "bridge" || a === "device") || r.opId === "bridge_api.enrol" || r.opId === "device.start"),
 );
 
 interface DeviceReq {
