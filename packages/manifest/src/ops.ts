@@ -131,9 +131,16 @@ const STANDARD_DEFS: Record<StandardOperationId, StandardDef> = {
   },
 };
 
+/**
+ * spec 0.1.68 (C336 RQ-2, C354, BRIDGE v0.1.68): the requested tool name of a dynamic call. A catalog name (≤ 48 chars, no
+ * `__`) or a variant the agent requests explicitly, such as `<tool>__first_contact` (≤ 63 chars; Connect answers
+ * `first_contact_required` and names it). The resolution must EQUAL the requested name (the bridge refuses any other).
+ */
+export const DYNAMIC_CALL_TOOL_PATTERN = "^[a-z][a-z0-9_]{1,62}$";
+
 /** Input of every dynamic operation call and of the `<product>__<op>_call` tool (`DynamicCallInput`, MANIFEST §5.3). */
 export const DYNAMIC_CALL_INPUT_SCHEMA: JsonSchemaObject = Object.freeze(
-  closed({ tool: { type: "string", pattern: "^[a-z][a-z0-9_]{1,47}$" }, arguments: { type: "object" } }, ["tool", "arguments"]),
+  closed({ tool: { type: "string", pattern: DYNAMIC_CALL_TOOL_PATTERN }, arguments: { type: "object" } }, ["tool", "arguments"]),
 );
 
 /** Input of the `<product>__<op>_search` tool (`DynamicSearchInput`, MANIFEST §5.3). */
