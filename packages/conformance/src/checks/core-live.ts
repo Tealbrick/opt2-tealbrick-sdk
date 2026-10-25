@@ -320,7 +320,7 @@ const DEFERRED: readonly [string, string][] = [
   ["R10.live_replay", NEEDS_QA],
   ["R11.flow", NEEDS_QA],
   ["R12", NEEDS_QA],
-  // conformance 0.1.30 (spec 0.1.73, C354): needs a test workspace whose bridge does not declare lazy_tools + a lazy release
+  // conformance 0.1.30 (spec 0.1.75, C354): needs a test workspace whose bridge does not declare lazy_tools + a lazy release
   ["R-LZ-1", NEEDS_QA],
   ["C7", NEEDS_QA],
   ["P2", NEEDS_QA],

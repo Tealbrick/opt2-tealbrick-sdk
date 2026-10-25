@@ -1,4 +1,4 @@
-// B30 (conformance 0.1.30, spec 0.1.73, BRIDGE §7.5, MANIFEST §5.5): lazy tools on a bridge that DECLARES `lazy_tools`. Gated by
+// B30 (conformance 0.1.30, spec 0.1.75, BRIDGE §7.5, MANIFEST §5.5): lazy tools on a bridge that DECLARES `lazy_tools`. Gated by
 // the capability in the bridge's StatusReport (`bridge.caps`), never by version (C292): without it every row is not_applicable.
 // The suite lists its lazy-tools app (bridge-world.ts `lazyManifest`) only for this group: a bridge without the cap refuses a
 // manifest with `listing: "lazy"` at claim. Grants: the free agent read/create/update (Free), the bound agent every action but
@@ -13,7 +13,7 @@ import { type BridgeCtx, describeCall, isObj, toolRefused } from "./bridge-ctx.t
 import { BRIDGE_GROUPS } from "./bridge-ids.ts";
 
 export const LAZY_CAP = "lazy_tools";
-/** spec 0.1.73 TOOL_NAME_RULE.moreSearchOp / moreCallOp; the suite pins spec 0.1.57 until its pin bump (then the fallback goes) */
+/** spec 0.1.75 TOOL_NAME_RULE.moreSearchOp / moreCallOp; the suite pins spec 0.1.57 until its pin bump (then the fallback goes) */
 const RULE = TOOL_NAME_RULE as typeof TOOL_NAME_RULE & { moreSearchOp?: string; moreCallOp?: string };
 export const MORE_SEARCH_OP = RULE.moreSearchOp ?? "tb_more_search";
 export const MORE_CALL_OP = RULE.moreCallOp ?? "tb_more_call";
@@ -33,7 +33,7 @@ export async function lazyChecks(c: BridgeCtx): Promise<void> {
   }
   const app = c.w.lazyApp;
   if (!app) {
-    for (const [id, title] of ROWS) await c.run(id, title, SECTION, () => notRun("the suite's manifest validator refuses listing \"lazy\" (it pins a spec before 0.1.73): no lazy-tools app"));
+    for (const [id, title] of ROWS) await c.run(id, title, SECTION, () => notRun("the suite's manifest validator refuses listing \"lazy\" (it pins a spec before 0.1.75): no lazy-tools app"));
     return;
   }
   const specsBefore = [...c.w.grantSpecs];

@@ -119,11 +119,11 @@ export function eventManifest(base: Manifest, product: string, events: boolean):
 }
 
 /**
- * conformance 0.1.30 (spec 0.1.73, BRIDGE §7.5, CONFORMANCE B30): the lazy-tools app. Product `tbconf-lazy`, the base's
+ * conformance 0.1.30 (spec 0.1.75, BRIDGE §7.5, CONFORMANCE B30): the lazy-tools app. Product `tbconf-lazy`, the base's
  * person ops, and six agent ops: one listed (`hot`, outward: wider than any lazy op the bound agent sees) and five `listing: "lazy"` — `find` (read, a distinctive word in its
  * description), `make` (create, idempotency required, a required `title`), `send` (outward, held by the fake app) and `drop`
  * (destructive: above the free grant, so never visible to the free agent). A before hook on `make` (B30.lazy_call_same_route:
- * the envelope names the op). Null while the suite's validator refuses `lazy` (it pins a spec before 0.1.73).
+ * the envelope names the op). Null while the suite's validator refuses `lazy` (it pins a spec before 0.1.75).
  */
 export const LAZY_OPS = { hot: "conf_lazy_hot", find: "conf_lazy_find", make: "conf_lazy_make", send: "conf_lazy_send", drop: "conf_lazy_drop", pay: "conf_lazy_pay" } as const;
 export const LAZY_FIND_WORD = "zebrafinch";

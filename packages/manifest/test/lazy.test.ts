@@ -1,4 +1,4 @@
-// manifest 0.1.31 (spec 0.1.73, C330(1), M4b, C354): `listing: "lazy"` — M-OP-13. Capability gating, never a version: no
+// manifest 0.1.31 (spec 0.1.75, C330(1), M4b, C354): `listing: "lazy"` — M-OP-13. Capability gating, never a version: no
 // requiredBridgeVersion row and no requires.bridge rule (Core and the bridge decide by the `lazy_tools` cap).
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
@@ -15,16 +15,16 @@ const withLazy = (): M => {
   return m;
 };
 const codes = (r: ReturnType<typeof validateManifest>) => (r.ok ? [] : r.errors.map((e) => `${e.rule}:${e.code}:${e.path}`));
-/** does the pinned spec schema know `lazy`? (false until the pin moves to spec >= 0.1.73) */
+/** does the pinned spec schema know `lazy`? (false until the pin moves to spec >= 0.1.75) */
 const schemaKnowsLazy = !codes(validateManifest(withLazy())).some((c) => c.startsWith("schema:"));
 
-describe("listing lazy (spec 0.1.73)", () => {
+describe("listing lazy (spec 0.1.75)", () => {
   test("C354: no version gate — requiredBridgeVersion ignores lazy ops and BRIDGE_FEATURES has no lazy row", () => {
     assert.deepEqual(requiredBridgeVersion(withLazy() as never), requiredBridgeVersion(base() as never));
     assert.ok(!BRIDGE_FEATURES.some((f) => /lazy/.test(f.feature)));
   });
 
-  test("M-OP-13: a static lazy op without requires.bridge is valid; lazy on a dynamic op → listing_invalid", { skip: schemaKnowsLazy ? false : "the pinned spec schema (before 0.1.73) refuses listing lazy itself (schema_invalid)" }, () => {
+  test("M-OP-13: a static lazy op without requires.bridge is valid; lazy on a dynamic op → listing_invalid", { skip: schemaKnowsLazy ? false : "the pinned spec schema (before 0.1.75) refuses listing lazy itself (schema_invalid)" }, () => {
     const ok = validateManifest(withLazy());
     assert.equal(ok.ok, true, JSON.stringify(codes(ok)));
     const m = withLazy();
