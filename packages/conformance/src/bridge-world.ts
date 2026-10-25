@@ -120,12 +120,12 @@ export function eventManifest(base: Manifest, product: string, events: boolean):
 
 /**
  * conformance 0.1.30 (spec 0.1.73, BRIDGE §7.5, CONFORMANCE B30): the lazy-tools app. Product `tbconf-lazy`, the base's
- * person ops, and five agent ops: one listed (`hot`, outward: wider than any lazy op the bound agent sees) and four `listing: "lazy"` — `find` (read, a distinctive word in its
+ * person ops, and six agent ops: one listed (`hot`, outward: wider than any lazy op the bound agent sees) and five `listing: "lazy"` — `find` (read, a distinctive word in its
  * description), `make` (create, idempotency required, a required `title`), `send` (outward, held by the fake app) and `drop`
  * (destructive: above the free grant, so never visible to the free agent). A before hook on `make` (B30.lazy_call_same_route:
  * the envelope names the op). Null while the suite's validator refuses `lazy` (it pins a spec before 0.1.73).
  */
-export const LAZY_OPS = { hot: "conf_lazy_hot", find: "conf_lazy_find", make: "conf_lazy_make", send: "conf_lazy_send", drop: "conf_lazy_drop" } as const;
+export const LAZY_OPS = { hot: "conf_lazy_hot", find: "conf_lazy_find", make: "conf_lazy_make", send: "conf_lazy_send", drop: "conf_lazy_drop", pay: "conf_lazy_pay" } as const;
 export const LAZY_FIND_WORD = "zebrafinch";
 export const LAZY_HOOK_ID = "conf_lazy_hook";
 export function lazyManifest(base: Manifest): Manifest | null {
@@ -144,6 +144,8 @@ export function lazyManifest(base: Manifest): Manifest | null {
     op(LAZY_OPS.make, { listing: "lazy", crud: ["create"], effect: "write", idempotency: "required", receipt: true, input: { type: "object", additionalProperties: false, required: ["title"], properties: { title: { type: "string" } } } }),
     op(LAZY_OPS.send, { listing: "lazy", crud: ["update"], effect: "outward", holdFamily: "outward", idempotency: "supported", receipt: true }),
     op(LAZY_OPS.drop, { listing: "lazy", crud: ["delete"], effect: "destructive", holdFamily: "destructive", idempotency: "supported", receipt: true }),
+    // QA-SDK47D-2: a money op (above the free grant: needs delete) so B30.lazy_annotations reaches money without outward
+    op(LAZY_OPS.pay, { listing: "lazy", crud: ["update", "delete"], effect: "money", holdFamily: "money", idempotency: "supported", receipt: true }),
   ];
   m.hooks = [{ id: LAZY_HOOK_ID, title: "Conformance lazy hook", phase: "before", order: 50, match: { products: [m.id], operations: [LAZY_OPS.make] } }] as Manifest["hooks"];
   return validateManifest(m).ok ? m : null;

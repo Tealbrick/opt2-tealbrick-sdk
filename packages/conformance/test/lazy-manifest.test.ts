@@ -34,7 +34,7 @@ test("lazyManifest: null exactly while the suite's validator refuses listing laz
   const agent = m.operations.filter((o) => o.audience === "agent");
   assert.deepEqual(agent.map((o) => o.id).sort(), Object.values(LAZY_OPS).sort());
   const lazy = agent.filter((o) => (o as { listing?: string }).listing === "lazy").map((o) => o.id);
-  assert.deepEqual(lazy.sort(), [LAZY_OPS.drop, LAZY_OPS.find, LAZY_OPS.make, LAZY_OPS.send].sort());
+  assert.deepEqual(lazy.sort(), [LAZY_OPS.drop, LAZY_OPS.find, LAZY_OPS.make, LAZY_OPS.pay, LAZY_OPS.send].sort());
   assert.ok(agent.find((o) => o.id === LAZY_OPS.find)?.description.includes(LAZY_FIND_WORD));
   assert.deepEqual(m.hooks?.map((h) => h.id), [LAZY_HOOK_ID]);
   assert.equal(agent.find((o) => o.id === LAZY_OPS.hot)?.effect, "outward", "the listed op is wider than the lazy read (B30.lazy_annotations)");

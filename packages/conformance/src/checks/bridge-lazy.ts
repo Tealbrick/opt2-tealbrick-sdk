@@ -41,6 +41,9 @@ export async function lazyChecks(c: BridgeCtx): Promise<void> {
   c.w.grantSpecs.push(
     { role: "free", app, crud: ["read", "create", "update"], mode: "free", wf: [] },
     { role: "bound", app, crud: ["read", "create", "update", "delete"], mode: "bound", wf: [LAZY_OPS.hot, LAZY_OPS.find] },
+    // QA-SDK47D-2: the agent without grants gets, for this group only, a Bound grant that reaches a read, a destructive and a
+    // money op and NO outward op, so openWorldHint can only come from money and destructiveHint from the destructive op
+    { role: "none", app, crud: ["read", "create", "update", "delete"], mode: "bound", wf: [LAZY_OPS.find, LAZY_OPS.drop, LAZY_OPS.pay] },
   );
   // the fake app holds `send` (202 held) and answers every other op ok
   const prevOnOp = app.onOp;
@@ -83,11 +86,16 @@ async function rows(c: BridgeCtx, app: FakeApp): Promise<void> {
     return verdict(missing.length === 0 && leaked.length === 0, `listed ${JSON.stringify(mine)}; missing ${JSON.stringify(missing)}; lazy ops listed ${JSON.stringify(leaked)}`);
   });
 
-  await c.run("B30.lazy_annotations", title("B30.lazy_annotations"), `${MORE_CALL_OP} = the widest over the ops THIS agent reaches through it, lazy and listed: bound (hot outward + find read) and free → readOnlyHint false, destructiveHint false, openWorldHint true; ${MORE_SEARCH_OP} readOnlyHint true`, async () => {
-    const want = { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
+  await c.run("B30.lazy_annotations", title("B30.lazy_annotations"), `${MORE_CALL_OP} = the widest over the ops THIS agent reaches through it, lazy and listed: bound (hot outward + find read) and free → readOnlyHint false, destructiveHint false, openWorldHint true; none (Bound: find read + drop destructive + pay money) → destructiveHint true, openWorldHint true; ${MORE_SEARCH_OP} readOnlyHint true`, async () => {
+    const wants = {
+      bound: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+      free: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+      none: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+    } as const;
     const out: string[] = [];
     let pass = true;
-    for (const slot of ["bound", "free"] as const) {
+    for (const slot of ["bound", "free", "none"] as const) {
+      const want = wants[slot];
       const { message } = await (await c.session(slot)).rpc("tools/list");
       const tools = isObj(message?.result) && Array.isArray(message.result.tools) ? (message.result.tools as { name?: unknown; annotations?: Record<string, unknown> }[]) : [];
       const a = tools.find((t) => t.name === CALL)?.annotations ?? null;
@@ -96,9 +104,9 @@ async function rows(c: BridgeCtx, app: FakeApp): Promise<void> {
       const okCall = got !== null && JSON.stringify(got) === JSON.stringify(want);
       const okSearch = sa?.readOnlyHint === true;
       pass &&= okCall && okSearch;
-      out.push(`${slot}: ${CALL} ${JSON.stringify(a)}, ${SEARCH} ${JSON.stringify(sa)}`);
+      out.push(`${slot}: ${CALL} ${JSON.stringify(a)} (expected ${JSON.stringify(want)}), ${SEARCH} ${JSON.stringify(sa)}`);
     }
-    return verdict(pass, `${out.join("; ")} (expected ${JSON.stringify(want)}; lazy ops alone would give the bound agent readOnlyHint true)`);
+    return verdict(pass, `${out.join("; ")} — lazy ops alone would give bound readOnlyHint true; "none" reaches destructive + money and no outward op`);
   });
 
   await c.run("B30.lazy_search", title("B30.lazy_search"), `"*" → exactly the visible lazy ops {tool, title, description, inputSchema, effect} + total; "${LAZY_FIND_WORD}" ranks ${LAZY_OPS.find} first; the app receives nothing`, async () => {
