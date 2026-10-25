@@ -20,7 +20,6 @@ import { HOLDS_PENDING_OP } from "./decision.ts";
 import { canonicalize, digest } from "./jcs.ts";
 import { DYNAMIC_CALL_INPUT_SCHEMA, derivedToolNames, standardOpInputSchema, toolNameFits } from "./ops.ts";
 import { parseSkillFile, parseVariable, skillTextViolation, VARIABLE_RE } from "./skill-text.ts";
-import { compareSemver, LAZY_LISTING_MIN_BRIDGE } from "./version.ts";
 
 type Add = (rule: string, code: string, path: string, message: string) => void;
 
@@ -837,20 +836,12 @@ function backupArtifactRouteRules(m: Manifest, add: Add): void {
   m.operations.forEach((op, i) => {
     if (op.listing !== undefined && op.audience !== "agent") add("M-OP-11", "listing_invalid", ptr("operations", i, "listing"), "listing applies to agent ops only");
   });
-  // v0.1.31 (spec 0.1.73, M4b; QA-SPEC48-2): `listing: "lazy"` only on STATIC agent ops, and the manifest states
-  // requires.bridge >= the first bridge with `lazy_tools` (an older bridge has no fallback: the app would lose every tool)
-  let lazy = false;
+  // v0.1.31 (spec 0.1.73, M4b, C354): `listing: "lazy"` only on STATIC agent ops. Whether the workspace bridge can serve it is a
+  // capability question (`lazy_tools`, checked by Core and the bridge), never a version minimum here
   m.operations.forEach((op, i) => {
-    if ((op.listing as string | undefined) !== "lazy") return;
-    lazy = true;
-    if (op.dynamic !== undefined) add("M-OP-13", "listing_invalid", ptr("operations", i, "listing"), "lazy applies to static agent ops only (a dynamic family is already one search away)");
+    if ((op.listing as string | undefined) === "lazy" && op.dynamic !== undefined) add("M-OP-13", "listing_invalid", ptr("operations", i, "listing"), "lazy applies to static agent ops only (a dynamic family is already one search away)");
   });
-  if (lazy) {
-    const rb = m.requires?.bridge;
-    if (typeof rb !== "string" || !/^\d+\.\d+\.\d+/.test(rb) || compareSemver(rb, LAZY_LISTING_MIN_BRIDGE) < 0) {
-      add("M-OP-13", "listing_invalid", ptr("requires", "bridge"), `a manifest with lazy ops states requires.bridge >= ${LAZY_LISTING_MIN_BRIDGE} (the first bridge with lazy_tools)`);
-    }
-  }
+
 }
 
 // ───────────────────────────── public surface ─────────────────────────────

@@ -1,7 +1,7 @@
 // conformance 0.1.30 (spec 0.1.73, BRIDGE §7.5): the lazy-tools app of group `lazy` (B30.*) and the rows' wiring.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { LAZY_LISTING_MIN_BRIDGE, validateManifest } from "@opt2-tealbrick/manifest";
+import { validateManifest } from "@opt2-tealbrick/manifest";
 import { exampleManifests, LAZY_FIND_WORD, LAZY_HOOK_ID, LAZY_OPS, lazyManifest } from "../src/bridge-world.ts";
 import { BRIDGE_GROUP_ORDER, BRIDGE_GROUPS } from "../src/checks/bridge-ids.ts";
 import { MORE_CALL_OP, MORE_SEARCH_OP } from "../src/checks/bridge-lazy.ts";
@@ -38,6 +38,6 @@ test("lazyManifest: null exactly while the suite's validator refuses listing laz
   assert.ok(agent.find((o) => o.id === LAZY_OPS.find)?.description.includes(LAZY_FIND_WORD));
   assert.deepEqual(m.hooks?.map((h) => h.id), [LAZY_HOOK_ID]);
   assert.equal(agent.find((o) => o.id === LAZY_OPS.hot)?.effect, "outward", "the listed op is wider than the lazy read (B30.lazy_annotations)");
-  assert.equal(m.requires?.bridge, LAZY_LISTING_MIN_BRIDGE, "M-OP-13");
+  assert.equal(m.requires, undefined, "C354: no version minimum; the lazy_tools cap gates it");
   assert.equal(validateManifest(m).ok, true);
 });

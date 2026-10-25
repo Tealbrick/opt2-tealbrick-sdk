@@ -14,7 +14,6 @@ import {
   generateKeyPair,
   keySetFrom,
   keySetFromPortalKeys,
-  LAZY_LISTING_MIN_BRIDGE,
   opaqueDigest,
   opaqueValue,
   resolveSettings,
@@ -146,8 +145,6 @@ export function lazyManifest(base: Manifest): Manifest | null {
     op(LAZY_OPS.send, { listing: "lazy", crud: ["update"], effect: "outward", holdFamily: "outward", idempotency: "supported", receipt: true }),
     op(LAZY_OPS.drop, { listing: "lazy", crud: ["delete"], effect: "destructive", holdFamily: "destructive", idempotency: "supported", receipt: true }),
   ];
-  // M-OP-13 (manifest >= 0.1.31): a manifest with lazy ops states the first bridge with lazy_tools
-  m.requires = { bridge: LAZY_LISTING_MIN_BRIDGE };
   m.hooks = [{ id: LAZY_HOOK_ID, title: "Conformance lazy hook", phase: "before", order: 50, match: { products: [m.id], operations: [LAZY_OPS.make] } }] as Manifest["hooks"];
   return validateManifest(m).ok ? m : null;
 }
