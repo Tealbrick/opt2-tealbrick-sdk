@@ -3,6 +3,10 @@
 The Teal Brick opt2 conformance suite: checks, a fake bridge and a fake Portal, generated from `@opt2-tealbrick/spec`.
 Targets: `app`, `manifest`, `bridge`, `relay`, `core` (`tb-conformance --help`).
 
+## 0.1.32 (spec 0.1.74, C354a): A11.resolve_family checks hold-family sets and variants — version provisional, assigned at merge (C352)
+
+`A11.resolve_family` also fails when a catalog answer lists a name that fails `DYNAMIC_CATALOG_NAME_RE`, when a resolution's `holdFamilies` is not a list of known families that contains `holdFamily`, or when a resolved variant `<base>__<suffix>` (for example one named in `dynamic.<op>.resolveTools`) is broader than the app's own resolution of `<base>` (`variantNarrowerOrEqual`: crud ⊆, effect ≤, hold families ⊇). Helpers from `@opt2-tealbrick/manifest` 0.1.33. Mini app: a variant `<entry>__<suffix>` resolves its base's family plus `outward`; fault `variantDropsBaseFamily` drops the base family (fails the row). The bridge rows `B29.*` of spec 0.1.74 are not in this release.
+
 ## 0.1.29 (fix, no spec change): list checks follow `nextCursor`
 
 `tb.receipts_list` and `tb.holds_list` answer newest first, 50 rows a page, with `nextCursor`. Check `A4.mark_after_failed` read page 1 only. A manifest with a companion makes `A12` call every agent op first, which writes more than 50 newer receipts, so the receipt of `A4` was off page 1 and the check FAILED a correct app. The checks that look up one row now follow `nextCursor` (`src/list-pages.ts`, at most 20 pages, stop at the row): `A4.mark_after_failed`, `A4.receipt_digest`, `A4.holds_list`, the receipt rows read by `A12.*` and `A20` (`receiptRows`), the hold list of `A14` (`listHolds`) and the peer reads of group X (`X2`, `X5`). A page limit reached before the row is reported in the check line. Test: `test/app-suite.test.ts` runs the mini app with `listPageSize: 3` (paged, newest first).

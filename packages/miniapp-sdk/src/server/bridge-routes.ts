@@ -1,7 +1,7 @@
 // Grantless bridge→app routes (SDK-API §3.2): hook calls (`verifyHookProof`) and the bridge ops catalog, resolve,
 // mark, scope-summary (`verifyBridgeOpProof`, C16 B5). No receipts, no hooks, no agent action.
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { bridgeOpBinding, digest, hookCallerRef, hookResponseProblem, mcpToolName, sha256Bytes, toolNameFits, verifyBridgeOpProof, verifyHookProof } from "@opt2-tealbrick/manifest";
+import { bridgeOpBinding, DYNAMIC_CATALOG_NAME_RE, digest, hookCallerRef, hookResponseProblem, mcpToolName, sha256Bytes, toolNameFits, verifyBridgeOpProof, verifyHookProof } from "@opt2-tealbrick/manifest";
 import { BRIDGE_HEADERS, type HookRequest, type ScopeSummaryResult } from "@opt2-tealbrick/spec/bridge";
 import type { BridgeOp } from "@opt2-tealbrick/spec/credentials";
 import { type DynamicCatalogEntry, EFFECTS, HOOK_PHASES, type Operation } from "@opt2-tealbrick/spec/manifest";
@@ -9,12 +9,14 @@ import type { Json, TrustContext } from "@opt2-tealbrick/spec/sdk";
 import type { SdkHookContext } from "./context.ts";
 import { TbError } from "./errors.ts";
 import { header, readJson, readRaw, requestId, sendError, sendJson } from "./http.ts";
-import { withinCeiling } from "./ops.ts";
+import { resolveTool, withinCeiling } from "./ops.ts";
 import type { Runtime } from "./runtime.ts";
 
 const HOOK_DEFAULT_TIMEOUT_MS = 2000;
 const CATALOG_LIST_MAX = 256;
-const ENTRY_NAME_RE = /^[a-z][a-z0-9_]{1,47}$/;
+/** spec 0.1.74 (C354a): catalog names already logged as dropped, per runtime (logged once per name, SDK-API v0.1.74). */
+const droppedNames = new WeakMap<Runtime, Set<string>>();
+const DROPPED_NAMES_MAX = 1024;
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 
@@ -104,7 +106,9 @@ function dynamicOp(rt: Runtime, opId: unknown): Operation {
 
 function entryValid(rt: Runtime, op: Operation, e: DynamicCatalogEntry): boolean {
   return (
-    ENTRY_NAME_RE.test(e.name) &&
+    // spec 0.1.74 (C354a): DYNAMIC_CATALOG_NAME_RE — 2–48 chars, no `__` (reserved for variants), no trailing `_`
+    typeof e.name === "string" &&
+    DYNAMIC_CATALOG_NAME_RE.test(e.name) &&
     toolNameFits(mcpToolName(rt.product, e.name)) &&
     !rt.manifest.operations.some((o) => o.id === e.name) &&
     EFFECTS.includes(e.effect) &&
@@ -112,6 +116,19 @@ function entryValid(rt: Runtime, op: Operation, e: DynamicCatalogEntry): boolean
     isObj(e.inputSchema) &&
     e.inputSchema.type === "object"
   );
+}
+
+/** A dropped catalog entry is logged once per (op, name) for the runtime's life (bounded; spec 0.1.74 "logged once per name"). */
+function logDropped(rt: Runtime, opId: string, name: string): void {
+  let seen = droppedNames.get(rt);
+  if (!seen) {
+    seen = new Set();
+    droppedNames.set(rt, seen);
+  }
+  const k = `${opId}/${name}`; // an op id never contains "/"
+  if (seen.has(k)) return;
+  if (seen.size < DROPPED_NAMES_MAX) seen.add(k);
+  rt.log.warn("dynamic catalog entry dropped", { op: opId, name });
 }
 
 /**
@@ -145,7 +162,7 @@ export async function handleBridgeOp(rt: Runtime, req: IncomingMessage, res: Ser
         const entries = await d.catalog(query, hookContext(rt, 5000));
         const valid = entries.filter((e) => {
           const ok = entryValid(rt, op, e);
-          if (!ok) rt.log.warn("dynamic catalog entry dropped", { op: op.id, name: String(e?.name) });
+          if (!ok) logDropped(rt, op.id, String(e?.name));
           return ok;
         });
         const max = op.dynamic?.mode === "list" ? CATALOG_LIST_MAX : (limit ?? CATALOG_LIST_MAX);
@@ -163,10 +180,10 @@ export async function handleBridgeOp(rt: Runtime, req: IncomingMessage, res: Ser
         const op = dynamicOp(rt, body.op);
         const d = rt.def.dynamic?.[op.id];
         if (typeof body.tool !== "string" || !d) throw new TbError("input_invalid", "body must be { op, tool }", 400);
-        const r = await d.resolve(body.tool, hookContext(rt, 2000));
-        if (!r) throw new TbError("dynamic_resolve_failed", "unknown dynamic tool", 404);
-        if (!withinCeiling(op, r)) throw new TbError("dynamic_ceiling_exceeded", "resolved tool exceeds the operation's ceiling", 403);
-        return sendJson(res, 200, { tool: body.tool, crud: r.crud, effect: r.effect, ...(r.holdFamily ? { holdFamily: r.holdFamily } : {}) });
+        // the op path's resolution rule (ceiling; spec 0.1.74 variant check against the app's own resolve(base))
+        const r = await resolveTool(rt, op, body.tool, hookContext(rt, 2000));
+        // spec 0.1.74 (C354a): `holdFamilies` passes through unchanged (a bridge with cap `hold_families` holds on ANY member)
+        return sendJson(res, 200, { tool: body.tool, crud: r.crud, effect: r.effect, ...(r.holdFamily ? { holdFamily: r.holdFamily } : {}), ...(Array.isArray(r.holdFamilies) ? { holdFamilies: r.holdFamilies } : {}) });
       }
       case "mark": {
         if (typeof body.call !== "string" || body.mark !== "after_failed") throw new TbError("input_invalid", "body must be { call, mark: after_failed }", 400);

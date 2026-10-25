@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { GrantClaims } from "@opt2-tealbrick/spec/credentials";
 import type { AuthorizeInput, GateInput, OperationView } from "@opt2-tealbrick/spec/sdk";
-import { authorize, gate } from "../src/decision.ts";
+import { type AuthorizeInputV074, authorize, gate } from "../src/decision.ts";
 import type { Issue } from "../src/jws.ts";
 import { signGrant } from "../src/tokens.ts";
 import { world } from "./fixtures.ts";
@@ -329,4 +329,24 @@ test("authorize (C283 A1): tb.hold_status and tb.holds_pending carry no admitted
   const { authIn } = await setup({ crud: ["create"] });
   const hs = { id: "tb.hold_status", crud: ["read"] as Crud[], effect: "read" as const };
   assert.deepEqual(authorize(authIn({ op: hs, access: null })), { decision: "run", reason: "run" });
+});
+
+test("authorize (spec 0.1.74, C354a): held when ANY member of holdFamilies is held; the first held member is recorded; an empty set falls back to holdFamily", async () => {
+  const { authIn } = await setup({ crud: ["read", "create"], held: ["outward"] });
+  const dyn = (over: Partial<AuthorizeInputV074["op"]>): AuthorizeInputV074 => ({ ...authIn({ access: null }), op: { id: "tools", crud: ["create"], effect: "outward", ...over } });
+  // Connect's first-contact variant: holdFamily first_contact (what an old bridge applies), set [first_contact, outward]
+  assert.deepEqual(authorize(dyn({ holdFamily: "first_contact", holdFamilies: ["first_contact", "outward"] })), { decision: "hold", reason: "held_family", holdFamily: "outward" }, "fires on bad: holdFamily alone (first_contact) is not held");
+  // holdFamily outside the list still counts (set = holdFamilies ∪ {holdFamily})
+  assert.deepEqual(authorize(dyn({ holdFamily: "outward", holdFamilies: ["first_contact"] })), { decision: "hold", reason: "held_family", holdFamily: "outward" });
+  // an EMPTY holdFamilies never means "no holds"
+  assert.deepEqual(authorize(dyn({ holdFamily: "outward", holdFamilies: [] })), { decision: "hold", reason: "held_family", holdFamily: "outward" }, "fires on bad: empty set read as no holds");
+  // nothing held → run; no family at all → run
+  assert.equal(authorize(dyn({ holdFamily: "first_contact", holdFamilies: ["first_contact", "identity"] })).decision, "run");
+  assert.equal(authorize(dyn({})).decision, "run");
+  // first held member in set order: holdFamilies first, then holdFamily
+  const both = await setup({ crud: ["read", "create"], held: ["outward", "first_contact"] });
+  const op2: AuthorizeInputV074["op"] = { id: "tools", crud: ["create"], effect: "outward", holdFamily: "outward", holdFamilies: ["first_contact", "outward"] };
+  assert.equal(authorize({ ...both.authIn({ access: null }), op: op2 }).holdFamily, "first_contact");
+  // money stays always held, before the families
+  assert.deepEqual(authorize(dyn({ effect: "money", holdFamily: "money", holdFamilies: ["money", "outward"] })), { decision: "hold", reason: "held_money", holdFamily: "money" });
 });
