@@ -1,6 +1,6 @@
 {
   "name": "@opt2-tealbrick/miniapp-sdk",
-  "version": "0.1.38",
+  "version": "0.1.39",
   "private": true,
   "description": "Teal Brick opt2 Miniapp SDK: server runtime (defineApp/startApp), React client (/client), the tb-exec wrapper bin and the tb-gen generator bin.",
   "license": "SEE LICENSE IN LICENSE",
