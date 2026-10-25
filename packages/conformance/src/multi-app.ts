@@ -18,6 +18,7 @@ import type { AppClient, OpAnswer, OpTamper, PersonSession } from "./app-client.
 import { createFakeBridge, type FakeBridge, type PeerRoute } from "./fake-bridge.ts";
 import { forkStart } from "./fork-start.ts";
 import { errorCode, request } from "./http.ts";
+import { listPersonPages } from "./list-pages.ts";
 import { fetchVerifiedIndex, type LoadedPeer, loadPeer, type PeerSourceOptions } from "./peer-source.ts";
 import { sampleInput } from "./sample.ts";
 import { bad, notRun, ok, type Suite, verdict } from "./suite.ts";
@@ -326,9 +327,8 @@ class World {
   async #receiptRow(peer: Peer, rowIdValue: string): Promise<Record<string, unknown> | null> {
     const sess = await this.#session(peer);
     if (!sess) return null;
-    const r = await peer.bridge.client(peer.url()).personOp(sess, "tb.receipts_list", {});
-    const items = isObj(r.output) && Array.isArray(r.output.items) ? r.output.items.filter(isObj) : [];
-    return items.find((x) => x.id === rowIdValue) ?? null;
+    const r = await listPersonPages(peer.bridge.client(peer.url()), sess, "tb.receipts_list", (xs) => xs.some((x) => x.id === rowIdValue));
+    return r.items.find((x) => x.id === rowIdValue) ?? null;
   }
 
   /** X2: the real callApp of the app under test crossed the fake bridge to the real peer. */
@@ -470,8 +470,8 @@ class World {
         if (!isHeldBody(first)) return bad(`first call answered ${answerOf(first)}, expected 202 held${errorCode(first.body) === "scope_denied" ? " (the op is scoped and the app caller holds no scope instance on the peer)" : ""}`);
         const holdId = String((first.body as { holdId: string }).holdId);
         const client = peer.bridge.client(peer.url());
-        const listed = await client.personOp(sess, "tb.holds_list", {});
-        if (!JSON.stringify(listed.output ?? null).includes(holdId)) return bad(`hold ${holdId} is not listed by the peer's tb.holds_list (${listed.status})`);
+        const listed = await listPersonPages(client, sess, "tb.holds_list", (xs) => xs.some((x) => x.id === holdId));
+        if (!listed.items.some((x) => x.id === holdId)) return bad(`hold ${holdId} is not listed by the peer's tb.holds_list (${listed.failed ?? `${listed.pages} page(s)${listed.truncated ? ", page limit reached" : ""}`})`);
         const d = await client.personOp(sess, "tb.holds_decide", { holdId, decision: "approve" });
         if (d.status !== 200) return bad(`approve ${holdId} → ${d.status}${d.code ? ` ${d.code}` : ""}`);
         const same = await this.#asApp(peer, op, input, key ? { idempotencyKey: key } : {});

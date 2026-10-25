@@ -9,6 +9,11 @@ export function requestId(): string {
   return `req_${randomBytes(12).toString("base64url")}`;
 }
 
+/** The pathname of a request target, or "" when it does not parse (e.g. `//`); never throws (a throw in a listener stops the process). */
+export function pathOf(target: string | undefined, base: string): string {
+  return URL.canParse(target ?? "/", base) ? new URL(target ?? "/", base).pathname : "";
+}
+
 export async function readRaw(req: IncomingMessage, limit = MAX_BODY_BYTES): Promise<Buffer> {
   const declared = Number(req.headers["content-length"] ?? "0");
   if (declared > limit) throw new TbError("payload_too_large", "request body too large", 413);
