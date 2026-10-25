@@ -12,6 +12,7 @@ export const CORE_STATIC_CHECKS: readonly PendingCheck[] = [
   { id: "R1.table.bindings", title: "path params and query keys bind to input fields; query keys on GET rows only" },
   { id: "R1.table.explicit_public", title: "rows reachable without a person or bridge credential are exactly the four explicit public rows" },
   { id: "R1.table.p1_disjoint", title: "no row accepts a person credential and a non-person credential (P1)" },
+  { id: "R1.table.rt9", title: "auth host only on host.* rows, and host.* rows only host (RT9)" },
   { id: "R2.owner_cli_rows", title: "owner-cli rows are reads, drafts.* or owner_sessions.logout (RT1)" },
   { id: "R2.owner_cli_no_confirm", title: "no owner-cli row is a confirm row (RT3)" },
   { id: "R2.apply_browser_only", title: "drafts.apply / drafts.reject are browser-only; apply is confirm + idempotent" },

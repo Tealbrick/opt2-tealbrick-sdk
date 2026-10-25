@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { CHECK_IDS, coverageOutcome, SDK_COVERAGE, SDK_EXPORTS } from "../src/index.ts";
+import { CHECK_IDS, coverageOutcome, SDK_COVERAGE, SDK_EXPORTS, SDK_UNCOVERED } from "../src/index.ts";
 
 describe("A11 SDK coverage", () => {
   it("the committed export list equals the one generated from @opt2-tealbrick/spec/sdk", () => {
@@ -19,9 +19,20 @@ describe("A11 SDK coverage", () => {
   it("every export maps to ≥ 1 catalogued check id", () => {
     for (const e of SDK_EXPORTS) {
       const ids = SDK_COVERAGE[e.name] ?? [];
+      if (e.name in SDK_UNCOVERED) {
+        assert.equal(ids.length, 0, `${e.name} is declared uncovered and must not be mapped`);
+        continue;
+      }
       assert.ok(ids.length > 0, `${e.name} unmapped`);
       for (const id of ids) assert.ok(CHECK_IDS.has(id), `${e.name} → ${id} not catalogued`);
     }
     assert.equal(coverageOutcome().pass, true);
+  });
+
+  it("modelRole maps to the real RM-17 row, and the one uncovered export is declared with a reason, not mapped to a row that does not call it", () => {
+    assert.deepEqual(SDK_COVERAGE.modelRole, ["A23.model_role_no_route"]);
+    assert.ok(!("familyAllowedFor" in SDK_COVERAGE));
+    assert.match(SDK_UNCOVERED.familyAllowedFor ?? "", /person-op relay lane/);
+    assert.match(coverageOutcome().asserted, /not covered yet \(declared in SDK_UNCOVERED\): familyAllowedFor/);
   });
 });

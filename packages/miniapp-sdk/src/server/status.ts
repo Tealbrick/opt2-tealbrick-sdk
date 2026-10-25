@@ -1,5 +1,6 @@
 // v0.1.13 (C86): status push pacing (`ctx.statusChanged()`) and `AppStatus.pendingHolds` = held receipts +
 // `defineApp({ pendingCount })` (clamped 0..10 000, 1 s timeout, error/timeout → 0 with a rate-limited WARNING).
+import { MODEL_ROLE_ATTENTION } from "@opt2-tealbrick/manifest";
 import type { Db, Logger } from "@opt2-tealbrick/spec/sdk";
 
 /** One push per second at most (C86). */
@@ -104,10 +105,18 @@ export class PendingCounter {
  *    shows it; 2. `events_send_failing` (10 failed event sends in a row: agents are no longer told about changes);
  * 3. the app's own `attention()` (it knows why it is degraded); 4. the SDK's job attention (failed, stuck jobs).
  * Before 0.1.38 the app's attention came first and hid a failed or overdue backup.
+ * v0.1.63: ONE slot. Any attention that is not a model-role code (a backup code, `events_send_failing`, the app's own fault, a job
+ * fault) is reported and the model-role codes (`model_role_missing`, `model_role_optional`, `embeddings_changed`) are not; they
+ * show only when nothing else is wrong. A model-role code of the app never hides a job fault either.
  */
-export function pickAttention(a: { backup: Attention | null; events?: Attention | null; app: Attention | null; jobs: Attention | null }): Attention | null {
-  return a.backup ?? a.events ?? a.app ?? a.jobs;
+export function pickAttention(a: { backup: Attention | null; events?: Attention | null; roles?: Attention | null; app: Attention | null; jobs: Attention | null }): Attention | null {
+  // ONE attention slot (SDK-API v0.1.63, spec follow-up #49): a fault outranks every model-role code, whoever reports it (a model code
+  // the app reports itself, `model_role_optional` / `embeddings_changed`, is a model code too). Model codes show only when nothing
+  // else is wrong: the SDK's `model_role_missing` first (it is why readiness is needs_keys), then the app's own.
+  const fault = [a.backup, a.events ?? null, a.app, a.jobs].find((x) => x !== null && !isModelRoleCode(x.code));
+  return fault ?? a.roles ?? a.app ?? null;
 }
+const isModelRoleCode = (code: string): boolean => (MODEL_ROLE_ATTENTION as readonly string[]).includes(code);
 
 /** v0.1.20 (spec 0.1.28, F89): `AppStatus.attention` limits (BRIDGE §10.3). */
 export const ATTENTION_CODE = /^[a-z][a-z0-9_]{0,39}$/u;

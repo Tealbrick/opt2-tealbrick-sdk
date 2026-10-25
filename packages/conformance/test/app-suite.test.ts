@@ -1003,6 +1003,17 @@ describe("A20 owner-set access is primary + caller_unverified + hook proof bindi
       assert.equal(st(r, passId)?.status, "pass", `${passId}: ${st(r, passId)?.asserted}`);
     });
   }
+  // QA-SPEC49-25 / C353: the fake sends `pause.agents: []` and marks the paused agent by `agents[].status` only, so an app that reads
+  // only `pause.agents` (the old form) is caught by the pause rows
+  it("fire-on-bad (P4): an app that reads ONLY slice.pause.agents fails P1.agent and A20.paused_agent_owner_row (the fake sends the C353 form)", async () => {
+    const r = await runA({ pauseAgentsListOnly: true });
+    for (const id of ["P1.agent", "A20.paused_agent_owner_row"]) {
+      const c = st(r, id);
+      assert.ok(c?.status === "fail" || c?.status === "not_run", `${id}: ${c?.status} ${c?.asserted}`);
+    }
+    const good = await runA();
+    for (const id of ["P1.agent", "A20.paused_agent_owner_row"]) assert.equal(st(good, id)?.status, "pass", `${id}: ${st(good, id)?.asserted}`);
+  });
 });
 
 // ── spec 0.1.52 (C283b/C283c, C268 B/C268c), conformance 0.1.25: A21 owner rows keep their CRUD, hook proof bd, proofClaims ──────────
@@ -1168,5 +1179,33 @@ describe("A22 ctx.bridgeCaps (conformance 0.1.27)", { timeout: 300_000 }, () => 
     }
     const good = { op: "x", path: "/a", input: { k: 1 } };
     assert.deepEqual(parseConformanceConfig({ bridgeCapsOp: good }, "t").bridgeCapsOp, good);
+  });
+});
+
+// ── spec 0.1.63 (RM-17), conformance 0.1.30: A23 the app against a bridge without the model-roles route ──────────────────────────────
+describe("A23 model role, bridge without the route (RM-17, conformance 0.1.30)", { timeout: 300_000 }, () => {
+  const mm = structuredClone(manifest) as Manifest;
+  mm.settings = { ...(mm.settings ?? { steps: [] }), modelRoles: [{ role: "reasoning", required: true, minPolicy: "standard", usedBy: ["app"] }] };
+  const runR = (faults: MiniAppFaults = {}) => runApp({ manifest: mm, manifestPath: path, start: (env) => startMiniApp(mm, env, faults), deployTemplate: template, timeoutMs: 8000 });
+  const row = (r: Report) => r.checks.find((c) => c.id === "A23.model_role_no_route");
+
+  it("a correct app passes: ready with the route, needs_keys + model_role_missing without it; the route request is on the wire", async () => {
+    const r = await runR();
+    assert.equal(row(r)?.status, "pass", row(r)?.asserted);
+    assert.match(row(r)?.asserted ?? "", /\/tb\/v1\/model-roles\/reasoning asked \(404 not_found\), needs_keys \+ model_role_missing/);
+    assert.deepEqual(failing(r), [], renderMarkdown(r));
+  });
+
+  it("fire-on-bad: an app that takes the missing route for a resolved role (a guess) fails A23.model_role_no_route", async () => {
+    const r = await runR({ modelRoleGuess: true });
+    assert.equal(row(r)?.status, "fail", row(r)?.asserted);
+    assert.match(row(r)?.asserted ?? "", /took a guess for the required role reasoning/);
+  });
+
+  it("a manifest without a required role app: not_applicable; an SDK older than 0.1.39: not_applicable by version", async () => {
+    assert.equal(row(await run())?.status, "not_applicable");
+    const old = await runR({ reportedSdkVersion: "0.1.38", modelRoleGuess: true });
+    assert.equal(row(old)?.status, "not_applicable");
+    assert.match(row(old)?.asserted ?? "", /predates 0\.1\.39/);
   });
 });

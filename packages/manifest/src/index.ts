@@ -11,6 +11,7 @@ export * from "./jcs.ts";
 export * from "./jws.ts";
 export * from "./keys.ts";
 export * from "./keyset.ts";
+export * from "./model-roles.ts";
 export * from "./ops.ts";
 export * from "./privilege.ts";
 export * from "./random.ts";

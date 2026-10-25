@@ -5,6 +5,7 @@
 import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  declaredModelRoles,
   digest,
   type Ed25519KeyPair,
   EVENT_KEY_RE,
@@ -39,7 +40,7 @@ import type { AppDriver } from "../multi-app.ts";
 import type { PayloadScan } from "../report.ts";
 import { sampleInput } from "../sample.ts";
 import { scanPayloads } from "../scan.ts";
-import { SDK_COVERAGE } from "../sdk-coverage.ts";
+import { SDK_COVERAGE, SDK_UNCOVERED } from "../sdk-coverage.ts";
 import { jsonPointer, resolvePlaceholders, runSetup } from "../setup.ts";
 import { bad, na, notRun, type Outcome, ok, refusedWith, type Suite, verdict } from "../suite.ts";
 import { Mint, newId, nowS, peek } from "../tokens.ts";
@@ -142,6 +143,8 @@ const SCOPE_GRANT_SINCE = "0.1.31";
 const COMPANION_CALLERS_SINCE = "0.1.32";
 /** conformance 0.1.27 (C292, spec 0.1.54): ctx.bridgeCaps() */
 const BRIDGE_CAPS_SINCE = "0.1.37";
+/** model roles (spec 0.1.63): miniapp-sdk 0.1.39 */
+const MODEL_ROLES_SINCE = "0.1.39";
 /** conformance 0.1.28 (C274c, spec 0.1.57): ctx.emit, the outbox and tb.hold.decided */
 const EVENTS_SINCE = "0.1.38";
 /** the bridge capability of BRIDGE §14 (slice `bridge.caps`) */
@@ -2356,6 +2359,50 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     },
   );
 
+  // ── A23 model roles (RM-17, spec 0.1.63, SDK >= 0.1.39): the app against a bridge WITHOUT the model-roles route ──────────────────
+  // A bridge without cap `model_roles` has no `GET /tb/v1/model-roles/<role>`: 404 without a refuse code. `modelRole()` then gives
+  // null — fail closed, never a guess and never a fall back to keys — so a required role keeps the app `needs_keys` with attention
+  // `model_role_missing`. Black-box through the status push (the app's own `modelRole()` is what the SDK calls), and the request for the
+  // route must be on the wire: an app that always says needs_keys without asking does not pass.
+  await s.run(
+    "A23.model_role_no_route",
+    "a bridge without the model-roles route: a required role gives needs_keys + model_role_missing, never a guess (RM-17)",
+    "with the route and a binding the app reports ready; after the bridge drops the route (404 not_found, the binding still set on the bridge) and keysRev moves: GET /tb/v1/model-roles/<role> is requested and the app reports needs_keys with attention model_role_missing naming the role",
+    async () => {
+      const role = declaredModelRoles(m).find((r) => r.required && r.usedBy.includes("app") && r.when === undefined);
+      const v = b.claims[0]?.request.sdkVersion;
+      if (!role) return na("the manifest declares no required model role for the app (settings.modelRoles, usedBy app, no when)");
+      if (versionBelow(v, MODEL_ROLES_SINCE)) return na(`SDK ${v} (self-reported) predates ${MODEL_ROLES_SINCE} (model roles, spec 0.1.63): not applicable by version`);
+      const binding = { provider: "ollama", model: "tbconf-model", baseUrl: "http://ollama.railway.internal:11434/v1", key: null, dataPolicy: "local" as const, dims: null };
+      const settle = async (): Promise<Awaited<ReturnType<typeof b.control.waitForStatus>> | null> => {
+        const rev = b.control.keysRev;
+        return b.control.waitForStatus((x) => x.status.keysRev === rev, T).catch(() => null);
+      };
+      try {
+        await b.control.setModelRoutes(true);
+        b.control.setRole(role.role, binding);
+        const withRoute = await settle();
+        if (!withRoute) return notRun("the app did not report the new keysRev in time: not observable here");
+        if (withRoute.status.readiness !== "ready") return notRun(`with the route and a binding the app reports ${withRoute.status.readiness} (${withRoute.status.attention?.code ?? "no attention"}): another reason keeps it from ready, so the RM-17 contrast is not observable`);
+        const asked = b.captured.length;
+        await b.control.setModelRoutes(false);
+        b.control.setRole(role.role, { ...binding, model: "tbconf-model-2" }); // keysRev moves, the binding is still set on the bridge
+        const noRoute = await settle();
+        if (!noRoute) return notRun("the app did not report the keysRev after the route went away in time");
+        const path = `/tb/v1/model-roles/${role.role}`;
+        const requested = b.captured.slice(asked).some((p) => p.dir === "bridge-in" && p.path.startsWith(path));
+        const st = noRoute.status;
+        if (!requested) return bad(`the app never asked for ${path} after the keysRev moved (status ${st.readiness}): modelRole() was not called`);
+        if (st.readiness !== "needs_keys") return bad(`bridge without the route (404 not_found): readiness ${st.readiness}, expected needs_keys: the app took a guess for the required role ${role.role}`);
+        if (st.attention?.code !== "model_role_missing" || !st.attention.reason.includes(role.role)) return bad(`needs_keys but attention is ${JSON.stringify(st.attention ?? null)}, expected code model_role_missing naming ${role.role}`);
+        return ok(`with the route: ready; without it: ${path} asked (404 not_found), needs_keys + model_role_missing (${st.attention.reason})`);
+      } finally {
+        await b.control.setModelRoutes(true);
+        b.control.deleteRole(role?.role ?? "reasoning");
+      }
+    },
+  );
+
   // ── A10 post-approval retry + P1 held release while paused + C8 no standing approval ──
   let retry: OpAnswer | null = null;
   const decide = async (id: string, decision: "approve" | "deny") => (sess ? c().personOp(sess, "tb.holds_decide", { holdId: id, decision }) : null);
@@ -3130,11 +3177,18 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
 
 /** A11: generated export list vs the coverage map vs the check catalogue. */
 export function coverageOutcome(): Outcome {
-  const unmapped = SDK_EXPORTS.filter((e) => !(SDK_COVERAGE[e.name]?.length > 0)).map((e) => e.name);
+  const unmapped = SDK_EXPORTS.filter((e) => !(SDK_COVERAGE[e.name]?.length > 0) && !(e.name in SDK_UNCOVERED)).map((e) => e.name);
+  const staleUncovered = Object.keys(SDK_UNCOVERED).filter((n) => !SDK_EXPORTS.some((e) => e.name === n) || SDK_COVERAGE[n]?.length > 0);
   const unknownIds = Object.entries(SDK_COVERAGE).flatMap(([n, ids]) => ids.filter((id) => !CHECK_IDS.has(id)).map((id) => `${n}→${id}`));
   const stale = Object.keys(SDK_COVERAGE).filter((n) => !SDK_EXPORTS.some((e) => e.name === n));
-  const pass = unmapped.length === 0 && unknownIds.length === 0 && stale.length === 0;
-  return verdict(pass, pass ? `${SDK_EXPORTS.length} exports, all mapped to catalogued checks` : `unmapped ${unmapped.join(",") || "-"}; unknown ids ${unknownIds.join(",") || "-"}; stale ${stale.join(",") || "-"}`);
+  const pass = unmapped.length === 0 && unknownIds.length === 0 && stale.length === 0 && staleUncovered.length === 0;
+  const declared = Object.keys(SDK_UNCOVERED);
+  return verdict(
+    pass,
+    pass
+      ? `${SDK_EXPORTS.length - declared.length} exports mapped to catalogued checks${declared.length > 0 ? `; not covered yet (declared in SDK_UNCOVERED): ${declared.join(", ")}` : ""}`
+      : `unmapped ${unmapped.join(",") || "-"}; unknown ids ${unknownIds.join(",") || "-"}; stale ${stale.join(",") || "-"}; stale uncovered ${staleUncovered.join(",") || "-"}`,
+  );
 }
 
 /** A13 ids (CONFORMANCE §4.5 v0.1.11): the slice key-set rule at the app. */

@@ -1,9 +1,9 @@
-// tb-exec orchestration (SDK-API §11, C2, C6, C33): claim as service → fetch declared keys → start helper, helper proxy,
-// control port and the upstream child → status long-poll (BRIDGE §10.3) → restart the child when key values change →
-// exit with the child's code.
+// tb-exec orchestration (SDK-API §11, C2, C6, C33): claim as service → fetch declared keys (and, v0.1.63, the model roles that
+// list this service with `env`) → start helper, helper proxy, control port and the upstream child → status long-poll
+// (BRIDGE §10.3) → restart the child when key or role values change → exit with the child's code.
 import { createHash } from "node:crypto";
 import type { Server } from "node:http";
-import { conditionHolds, settingsFromEnv } from "@opt2-tealbrick/manifest";
+import { conditionHolds, type ModelRole, settingsFromEnv } from "@opt2-tealbrick/manifest";
 import type { AppStatus } from "@opt2-tealbrick/spec/bridge";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Logger } from "@opt2-tealbrick/spec/sdk";
@@ -17,6 +17,7 @@ import { ServiceBridge } from "./bridge.ts";
 import { HelperProcess, Upstream } from "./child.ts";
 import { childEnv, type ExecConfig, loadExecConfig, SDK_VERSION } from "./config.ts";
 import { type ClaimRecord, claimOrLoad, claimWith, loadServiceKey, retryable } from "./identity.ts";
+import { carriedSettings, type ExecRole, fetchRoles, rolesInForce } from "./roles.ts";
 import { startControlServer, startHelperProxy } from "./servers.ts";
 import { signalExitCode, sleep } from "./util.ts";
 import { appAssertionVerifier } from "./verify.ts";
@@ -45,9 +46,12 @@ export interface TbExecHandle {
 }
 
 interface FetchedKeys {
-  /** env name → value (memory only) */
+  /** env name → value (memory only): keys, then model role env (M-MR-4: the names never collide) */
   values: Map<string, string>;
   missing: string[];
+  /** v0.1.63: model roles that did not resolve, and the required ones among them (the upstream waits for those) */
+  missingRoles: ModelRole[];
+  blockingRoles: ModelRole[];
   rev: number;
   /** digest of the values, to restart only on a real change */
   fingerprint: string;
@@ -70,7 +74,7 @@ export function keysInForce(
   env: Record<string, string | undefined>,
   log?: Logger,
 ): { name: string; env: string }[] {
-  const carried = new Set((manifest.runtime.env ?? []).filter((e) => "setting" in e && typeof e.setting === "string" && env[e.name] !== undefined).map((e) => e.setting as string));
+  const carried = carriedSettings(manifest, env);
   const settings = settingsFromEnv(manifest, env);
   const reqs = new Map((manifest.settings?.keys ?? []).filter((k) => k.usedBy.includes(serviceId)).map((k) => [k.name, k]));
   return listed.filter((k) => {
@@ -83,7 +87,7 @@ export function keysInForce(
   });
 }
 
-async function fetchKeys(rec: ClaimRecord, bridge: ServiceBridge, secrets: SecretRegistry, log: Logger, signal: AbortSignal): Promise<FetchedKeys> {
+async function fetchKeys(rec: ClaimRecord, roles: readonly ExecRole[], bridge: ServiceBridge, secrets: SecretRegistry, log: Logger, signal: AbortSignal): Promise<FetchedKeys> {
   const values = new Map<string, string>();
   const missing: string[] = [];
   let rev = 0;
@@ -112,7 +116,10 @@ async function fetchKeys(rec: ClaimRecord, bridge: ServiceBridge, secrets: Secre
       }
     }
   }
-  return { values, missing, rev, fingerprint: fp.digest("hex") };
+  const fromRoles = await fetchRoles(roles, bridge, secrets, log, signal);
+  for (const [name, v] of fromRoles.values) values.set(name, v);
+  for (const part of fromRoles.parts) fp.update(part);
+  return { values, missing, missingRoles: fromRoles.missing, blockingRoles: fromRoles.blocking, rev: Math.max(rev, fromRoles.rev), fingerprint: fp.digest("hex") };
 }
 
 async function closeAll(servers: Server[]): Promise<void> {
@@ -157,11 +164,15 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
     const bridge = new ServiceBridge({ baseUrl: cfg.bridgeUrl, instanceId: cfg.instanceId, service: cfg.service.id, key });
     const inForce = (c: ClaimRecord): ClaimRecord => ({ ...c, serviceKeys: keysInForce(cfg.manifest, cfg.service.id, c.serviceKeys, o.env, log) });
     let rec = inForce(await claimOrLoad(cfg, key, bridge, log, startup.signal, gate));
-    let keys = await fetchKeys(rec, bridge, secrets, log, startup.signal);
+    // v0.1.63: the model roles this service is listed for with `env` (resolved with the service key, like keys)
+    const roles = rolesInForce(cfg.manifest, cfg.service.id, o.env);
+    // a role-bound service never inherits proxy variables: a proxy would resolve the name itself and skip the endpoint check
+    const envOpts = { stripProxy: roles.length > 0 };
+    let keys = await fetchKeys(rec, roles, bridge, secrets, log, startup.signal);
     // Required keys block the upstream (Knowledge S2): it waits in needs_keys and keys are re-pulled with backoff.
     const required = new Set((cfg.manifest.settings?.keys ?? []).filter((k) => k.required && k.usedBy.includes(cfg.service.id)).map((k) => k.name));
-    const blocking = (k: FetchedKeys) => k.missing.filter((n) => required.has(n));
-    if (keys.missing.length > 0) log.warn("needs_keys", { missing: keys.missing, blocking: blocking(keys) });
+    const blocking = (k: FetchedKeys): string[] => [...k.missing.filter((n) => required.has(n)), ...k.blockingRoles.map((r) => `role:${r}`)];
+    if (keys.missing.length > 0 || keys.blockingRoles.length > 0) log.warn("needs_keys", { missing: keys.missing, missingRoles: keys.missingRoles, blocking: blocking(keys) });
     if (startup.signal.aborted) throw new TbError("stopped", "stopped before start", 500);
 
     // the app key accepted on the control / helper ports follows the claim record (a reclaim may bring a new one)
@@ -173,11 +184,11 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
     upstream = up;
     try {
       if (cfg.service.helper && args.helperTarget && args.helperCmd) {
-        helper = new HelperProcess(args.helperCmd, childEnv(o.env, new Map()), log);
+        helper = new HelperProcess(args.helperCmd, childEnv(o.env, new Map(), envOpts), log);
         helper.start();
         servers.push(await startHelperProxy({ port: cfg.service.helper.port, host, paths: cfg.service.helper.paths, target: args.helperTarget, verify, log }));
       }
-      if (cfg.service.backup) servers.push(await startControlServer({ port: o.controlPort ?? TB_EXEC_CONTROL_PORT, host, backup: cfg.service.backup, verify, env: () => childEnv(o.env, keys.values), log }));
+      if (cfg.service.backup) servers.push(await startControlServer({ port: o.controlPort ?? TB_EXEC_CONTROL_PORT, host, backup: cfg.service.backup, verify, env: () => childEnv(o.env, keys.values, envOpts), log }));
     } catch (e) {
       await helper?.stop();
       await closeAll(servers);
@@ -188,7 +199,7 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
       await closeAll(servers);
       return signalExitCode(stopSignal);
     }
-    if (blocking(keys).length === 0) up.start(childEnv(o.env, keys.values));
+    if (blocking(keys).length === 0) up.start(childEnv(o.env, keys.values, envOpts));
     else log.warn("upstream waits for required keys", { missing: blocking(keys) });
 
     /** start the waiting upstream once no required key is missing; restart a running one when values changed */
@@ -197,11 +208,11 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
       if (!up.started) {
         if (blocking(keys).length === 0) {
           log.info("required keys present; starting upstream");
-          up.start(childEnv(o.env, keys.values));
+          up.start(childEnv(o.env, keys.values, envOpts));
         }
         return;
       }
-      if (changed) await up.restart(childEnv(o.env, keys.values));
+      if (changed) await up.restart(childEnv(o.env, keys.values, envOpts));
     };
 
     // Status long-poll: echo the bridge's slice revision, act on a new keysRev (restart only when values changed).
@@ -228,7 +239,7 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
       refused = false;
       appVerify = appAssertionVerifier(rec);
       sliceRevision = 0;
-      const next = await fetchKeys(rec, bridge, secrets, log, polling.signal);
+      const next = await fetchKeys(rec, roles, bridge, secrets, log, polling.signal);
       const restart = next.fingerprint !== keys.fingerprint;
       keys = next;
       if (!polling.signal.aborted) await applyKeys(restart);
@@ -238,13 +249,15 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
       let delay = 1000;
       while (!polling.signal.aborted) {
         const body: AppStatus = {
-          readiness: keys.missing.length > 0 ? "needs_keys" : "ready",
+          readiness: keys.missing.length > 0 || keys.blockingRoles.length > 0 ? "needs_keys" : "ready",
           version: cfg.manifest.version,
           sdkVersion: SDK_VERSION,
           scopesRev: 0,
           sliceRevision,
           keysRev: keys.rev,
           pendingHolds: 0,
+          // v0.1.63 (MANIFEST §7.1): a required role that does not resolve names itself to the owner
+          ...(keys.blockingRoles.length > 0 ? { attention: { code: "model_role_missing", reason: `Model role not set: ${keys.blockingRoles.join(", ")}. Set it on the Keys and models page.` } } : {}),
         };
         try {
           const r = await bridge.status(body, polling.signal);
@@ -257,7 +270,7 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
           const changed = r.sliceRevision !== sliceRevision || r.keysRev !== keys.rev;
           sliceRevision = r.sliceRevision;
           if (r.keysRev !== keys.rev) {
-            const next = await fetchKeys(rec, bridge, secrets, log, polling.signal);
+            const next = await fetchKeys(rec, roles, bridge, secrets, log, polling.signal);
             next.rev = Math.max(next.rev, r.keysRev);
             const restart = next.fingerprint !== keys.fingerprint;
             keys = next;
@@ -288,7 +301,7 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
           break;
         }
         delay = Math.min(delay * 2, 60_000);
-        const next = await fetchKeys(rec, bridge, secrets, log, polling.signal).catch(() => null);
+        const next = await fetchKeys(rec, roles, bridge, secrets, log, polling.signal).catch(() => null);
         if (!next || polling.signal.aborted) continue;
         next.rev = Math.max(next.rev, keys.rev);
         const restart = next.fingerprint !== keys.fingerprint;

@@ -18,6 +18,7 @@ import type { ErrorObject, ValidateFunction } from "ajv/dist/2020.js";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { HOLDS_PENDING_OP } from "./decision.ts";
 import { canonicalize, digest } from "./jcs.ts";
+import { DATA_POLICIES, declaredModelRoles, MODEL_ROLES, modelRoleEnvDenied } from "./model-roles.ts";
 import { DYNAMIC_CALL_INPUT_SCHEMA, derivedToolNames, standardOpInputSchema, toolNameFits } from "./ops.ts";
 import { parseSkillFile, parseVariable, skillTextViolation, VARIABLE_RE } from "./skill-text.ts";
 
@@ -284,6 +285,7 @@ function unusedSettings(m: Manifest, idx: SettingsIndex, extraRefs: ReadonlySet<
     for (const f of st.fields) conds.push(f.when);
   }
   for (const k of m.settings?.keys ?? []) conds.push(k.when);
+  for (const r of declaredModelRoles(m)) conds.push(r.when);
   for (const sk of m.skills ?? []) conds.push(sk.when);
   for (const c of conds) for (const k of Object.keys(c ?? {})) refs.add(k);
   for (const [key, path] of idx.fieldPath) {
@@ -554,8 +556,13 @@ function eventRules(m: Manifest, add: Add): void {
   });
 }
 
-/** Schema failures inside `events[]` carry the M-EV rule and code (the schema owns the name pattern and the object root). */
+/**
+ * Schema failures inside `events[]` carry the M-EV rule and code (the schema owns the name pattern and the object root);
+ * v0.1.63: the same for `settings.modelRoles[]` role / minPolicy (enums) and usedBy (id pattern): M-MR-1..3, `model_role_invalid`.
+ */
 function eventSchemaIssue(issue: ManifestIssue): ManifestIssue {
+  const mr = /^\/settings\/modelRoles\/\d+\/(role|minPolicy|usedBy)(\/|$)/.exec(issue.path);
+  if (mr) return { ...issue, rule: mr[1] === "role" ? "M-MR-1" : mr[1] === "minPolicy" ? "M-MR-2" : "M-MR-3", code: "model_role_invalid" };
   const m = /^\/events\/\d+\/(name|payloadSchema|visibleWith)(\/|$)/.exec(issue.path);
   if (!m) return issue;
   const [rule, code] = m[1] === "name" ? ["M-EV-1", "event_name_invalid"] : m[1] === "payloadSchema" ? ["M-EV-2", "event_schema_invalid"] : ["M-EV-3", "event_visible_with_invalid"];
@@ -704,6 +711,51 @@ function settingsRules(m: Manifest, idx: SettingsIndex, add: Add): void {
   // SPEC-GAP: M-ST-7 counts skill `{{settings.<key>}}` references, but skill bodies are not visible to this pure
   // function; with skills declared the check is deferred to validateAppFiles (CI), which has the bodies.
   if (!m.skills?.length) unusedSettings(m, idx, new Set(), add);
+}
+
+/** M-MR-1..5 (MANIFEST §7.1, v0.1.63). The schema owns the shape; these are the cross-field checks. */
+function modelRoleRules(m: Manifest, idx: SettingsIndex, add: Add): void {
+  const roles = declaredModelRoles(m);
+  const services = new Map((m.runtime.services ?? []).map((s) => [s.id, s]));
+  const seen = new Set<string>();
+  roles.forEach((r, i) => {
+    const p = ptr("settings", "modelRoles", i);
+    if (!(MODEL_ROLES as readonly string[]).includes(r.role)) add("M-MR-1", "model_role_invalid", `${p}/role`, `role ${r.role} is not a model role`);
+    else if (seen.has(r.role)) add("M-MR-1", "model_role_invalid", `${p}/role`, `role ${r.role} declared twice`);
+    seen.add(r.role);
+    if (r.minPolicy !== undefined && !(DATA_POLICIES as readonly string[]).includes(r.minPolicy)) add("M-MR-2", "model_role_invalid", `${p}/minPolicy`, `minPolicy ${r.minPolicy} is not a data policy`);
+    for (const u of r.usedBy) {
+      if (u !== "app" && !services.has(u)) add("M-MR-3", "model_role_invalid", `${p}/usedBy`, `usedBy ${u} is neither app nor a declared service`);
+    }
+    if (r.env !== undefined) {
+      for (const u of r.usedBy) {
+        const svc = services.get(u);
+        if (u === "app" || (svc && svc.build === undefined)) {
+          add("M-MR-4", "model_role_invalid", `${p}/env`, `env needs every usedBy item to be a service with build (the tb-exec entrypoint); ${u} is not`);
+        }
+      }
+    }
+    checkCondition(r.when, `${p}/when`, idx.fields, null, "M-MR-5", "condition_invalid", add);
+  });
+  // M-MR-4, names: one service env namespace = its own env, the keys it uses and every role env that names it
+  for (const [id, svc] of services) {
+    const owner = new Map<string, string>();
+    for (const e of svc.env ?? []) owner.set(e.name, "runtime.env");
+    for (const k of m.settings?.keys ?? []) if (k.usedBy.includes(id) && !owner.has(k.name)) owner.set(k.name, "keys[]");
+    roles.forEach((r, i) => {
+      if (!r.usedBy.includes(id) || r.env === undefined) return;
+      for (const [field, name] of Object.entries(r.env)) {
+        if (typeof name !== "string") continue;
+        if (modelRoleEnvDenied(name)) {
+          add("M-MR-4", "model_role_invalid", ptr("settings", "modelRoles", i, "env", field), `env name ${name} changes how the service connects or loads code (MODEL_ROLE_DENIED_ENV and *_PROXY names are refused)`);
+          continue;
+        }
+        const first = owner.get(name);
+        if (first !== undefined) add("M-MR-4", "model_role_invalid", ptr("settings", "modelRoles", i, "env", field), `env name ${name} of service ${id} is already used by ${first}`);
+        else owner.set(name, `modelRoles ${r.role}`);
+      }
+    });
+  }
 }
 
 function hookRules(m: Manifest, add: Add): void {
@@ -875,6 +927,7 @@ export function validateManifest(json: unknown): ManifestValidation {
   operationRules(m, add);
   scopeRules(m, add);
   settingsRules(m, idx, add);
+  modelRoleRules(m, idx, add);
   hookRules(m, add);
   companionRules(m, add);
   skillHintRules(m, idx, add);
