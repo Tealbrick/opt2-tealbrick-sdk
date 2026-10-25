@@ -174,6 +174,7 @@ export function buildContext(
     receipt,
     getKey: (name) => rt.keys.getKey(name),
     modelRole: (role) => rt.keys.modelRole(role),
+    modelFetch: (role) => rt.keys.modelFetch(role),
     callApp: (product, opId, input, opts) => rt.callApp(product, opId, input, { idempotencyKey: opts?.idempotencyKey, parentCall: callId }),
     callServiceHelper: (serviceId, path, body) => rt.callServiceHelper(serviceId, path, body),
     db: rt.appDb,
@@ -439,7 +440,7 @@ function toTbError(e: unknown, rt: Runtime): TbError {
 async function resolveDynamic(rt: Runtime, op: ManifestOp, input: Json): Promise<{ eff: EffectiveOp; tool: string; args: Record<string, unknown> }> {
   if (!isObj(input) || typeof input.tool !== "string" || !isObj(input.arguments)) throw new TbError("input_invalid", "dynamic call input must be { tool, arguments }", 400);
   const d = rt.def.dynamic?.[op.id];
-  const hctx: SdkHookContext = { log: rt.log, db: rt.appDb, getKey: (n) => rt.keys.getKey(n), modelRole: (r) => rt.keys.modelRole(r), signal: AbortSignal.timeout(2000), secrets: rt.secretsStore };
+  const hctx: SdkHookContext = { log: rt.log, db: rt.appDb, getKey: (n) => rt.keys.getKey(n), modelRole: (r) => rt.keys.modelRole(r), modelFetch: (r) => rt.keys.modelFetch(r), signal: AbortSignal.timeout(2000), secrets: rt.secretsStore };
   const res: DynamicResolution | null = d ? await d.resolve(input.tool, hctx) : null;
   if (!res) throw new TbError("dynamic_resolve_failed", "unknown dynamic tool", 404);
   if (!withinCeiling(op, res)) throw new TbError("dynamic_ceiling_exceeded", "resolved tool exceeds the operation's ceiling", 403);

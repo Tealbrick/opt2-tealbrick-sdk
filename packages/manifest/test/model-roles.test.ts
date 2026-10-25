@@ -7,12 +7,17 @@ import type { Manifest, ManifestValidation } from "@opt2-tealbrick/spec/manifest
 import {
   activeModelRoles,
   declaredModelRoles,
+  MODEL_GATEWAYS,
   MODEL_ID_PATTERN,
   MODEL_PROVIDERS,
   MODEL_ROLE_ATTENTION,
   MODEL_ROLE_HINTS_MAX,
   MODEL_ROLES,
   MODEL_ROLES_CAP,
+  NEVER_LOCAL,
+  NEVER_LOCAL_HOSTNAMES,
+  OWN_HOSTS_MAX,
+  POLICY_BASES,
   PROVIDER_ID_PATTERN,
   settingsFromEnv,
   validateManifest,
@@ -154,6 +159,13 @@ describe("mirror constants of spec 0.1.63", () => {
     assert.ok(MODEL_PROVIDERS.every((p) => new RegExp(PROVIDER_ID_PATTERN).test(p.id) && p.roles.every((r) => MODEL_ROLES.includes(r))));
     assert.ok(new RegExp(MODEL_ID_PATTERN).test("gpt-5.1") && new RegExp(MODEL_ID_PATTERN).test("nomic-embed-text:latest"));
     assert.ok(!new RegExp(MODEL_ID_PATTERN).test("two words") && !new RegExp(MODEL_ID_PATTERN).test("https://x"));
+    assert.deepEqual([...MODEL_GATEWAYS], ["openrouter", "litellm", "openai-compatible"], "spec follow-up #49");
+    assert.ok(MODEL_GATEWAYS.every((id) => MODEL_PROVIDERS.some((p) => p.id === id && p.zdrOffered && !p.local)));
+    assert.deepEqual([...NEVER_LOCAL_HOSTNAMES], ["metadata.google.internal", "metadata.goog", "metadata"]);
+    assert.deepEqual([...POLICY_BASES], ["verified", "owner_attested"]);
+    assert.equal(NEVER_LOCAL.length, 8);
+    assert.equal(OWN_HOSTS_MAX, 32);
+    assert.ok(NEVER_LOCAL.includes("100.100.100.200/32"));
     assert.equal(MODEL_ROLE_HINTS_MAX, 8);
     assert.equal(MODEL_ROLES_CAP, "model_roles");
     assert.deepEqual(MODEL_ROLE_ATTENTION, ["model_role_missing", "model_role_optional", "embeddings_changed"]);

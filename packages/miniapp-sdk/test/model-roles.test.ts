@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { after, before, describe, mock, test } from "node:test";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json, RunningApp, StartContext } from "@opt2-tealbrick/spec/sdk";
-import { defineApp, getKey, modelRole, onKeysChanged, startApp, TbError } from "../src/server/index.ts";
+import { defineApp, getKey, modelFetch, modelRole, onKeysChanged, startApp, TbError } from "../src/server/index.ts";
 import { pickAttention } from "../src/server/status.ts";
 import { fixtureManifest } from "./fixtures/manifest.ts";
 import { FakeBridge, freePort, migrationsDir, slice, tempDir, testRoots, ticket, until, type World, world } from "./helpers.ts";
@@ -167,6 +167,18 @@ describe("modelRole() (SDK-API v0.1.63 additions)", T, () => {
     assert.equal((await modelRole("reasoning"))?.model, "gpt-5");
     assert.equal(((await seen.start) as { provider: string } | null)?.provider, "openai", "StartContext.modelRole");
     assert.equal(fetches("reasoning"), 1, "one fetch serves the op, start and free-export calls (cache per keysRev)");
+  });
+
+  test("modelFetch(role): the binding and a fetch bound to its origin; null as modelRole; role_undeclared before any request; refuses a path off the origin", T, async () => {
+    const h = await modelFetch("reasoning");
+    assert.ok(h);
+    assert.equal(h.binding.model, "gpt-5");
+    assert.equal(typeof h.fetch, "function");
+    await assert.rejects(h.fetch("https://evil.example/x"), (e: unknown) => e instanceof TbError && e.code === "model_endpoint_refused");
+    assert.equal(await modelFetch("embeddings"), null, "unset: null");
+    const before = b.bridge.modelRoleFetches.length;
+    await assert.rejects(modelFetch("rerank"), (e: unknown) => e instanceof TbError && e.code === "role_undeclared");
+    assert.equal(b.bridge.modelRoleFetches.length, before);
   });
 
   test("the returned object is a copy: changing it does not change what the next call returns", T, async () => {

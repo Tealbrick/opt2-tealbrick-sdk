@@ -4,7 +4,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { join } from "node:path";
-import { isValidLaunchPath, keySetFrom, type ModelRole, manifestDigest, memoryReplayGuard, type ResolvedModelRole, sdkMajorOf, ulid, validateManifest, withStandardOps } from "@opt2-tealbrick/manifest";
+import { isValidLaunchPath, keySetFrom, type ModelFetchHandle, type ModelRole, manifestDigest, memoryReplayGuard, type ResolvedModelRole, sdkMajorOf, ulid, validateManifest, withStandardOps } from "@opt2-tealbrick/manifest";
 import type { ScopeRequest } from "@opt2-tealbrick/spec/bridge";
 import type { Ed25519PublicJwk, InstanceId, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
@@ -629,7 +629,7 @@ export async function startApp(
     onClaimed() {
       if (onStartRan || !def.onStart) return;
       onStartRan = true;
-      const ctx: StartContext = { ...eventContext(), secrets: appSecrets, getKey: (n) => keys.getKey(n), modelRole: (r) => keys.modelRole(r), callServiceHelper: helper };
+      const ctx: StartContext = { ...eventContext(), secrets: appSecrets, getKey: (n) => keys.getKey(n), modelRole: (r) => keys.modelRole(r), modelFetch: (r) => keys.modelFetch(r), callServiceHelper: helper };
       def.onStart(ctx).catch((e) => log.error("onStart failed", { error: e instanceof Error ? e.message : "unknown" }));
     },
     async refreshSlice() {
@@ -785,6 +785,11 @@ export function getKey(name: string): Promise<string | null> {
 /** v0.1.63 (SDK-API "v0.1.63 additions"): the binding of a model role the manifest declares for `app`; null = unset or below `minPolicy`. */
 export function modelRole(role: ModelRole): Promise<ResolvedModelRole | null> {
   return running().keys.modelRole(role);
+}
+
+/** spec follow-up #49 (SDK-API "modelFetch"): the binding plus a `fetch` guarded for its base URL; null as `modelRole`. */
+export function modelFetch(role: ModelRole): Promise<ModelFetchHandle | null> {
+  return running().keys.modelFetch(role);
 }
 
 export function onKeysChanged(cb: (names: string[]) => void): () => void {

@@ -10,6 +10,7 @@ import { DEFAULT_MANIFEST_PATH, parseArgs } from "../../src/exec/args.ts";
 import { childEnv } from "../../src/exec/config.ts";
 import { startTbExec, type TbExecHandle } from "../../src/exec/run.ts";
 import { enrolCodeDigest } from "../../src/server/claim-guard.ts";
+import type { LookupAll } from "../../src/server/model-fetch.ts";
 import { freePort, nowS } from "../helpers.ts";
 import { type ExecWorld, execWorld, HELPER, KEY_VALUE, SERVICE, UPSTREAM, until } from "./world.ts";
 
@@ -35,8 +36,8 @@ test("childEnv strips every TB_* name and adds the keys", () => {
   assert.deepEqual(env, { PATH: "/bin", HOME: "/h", ENGINE_KEY: "v" });
 });
 
-function run(w: ExecWorld, extra: string[] = [], controlPort?: number, env: Record<string, string> = {}): TbExecHandle {
-  return startTbExec({ argv: [...extra, "--manifest", w.manifestPath, "--", process.execPath, UPSTREAM, w.outFile], env: { ...w.env, ...env }, host: "127.0.0.1", controlPort, logSink: w.sink });
+function run(w: ExecWorld, extra: string[] = [], controlPort?: number, lookup?: LookupAll, env: Record<string, string> = {}): TbExecHandle {
+  return startTbExec({ argv: [...extra, "--manifest", w.manifestPath, "--", process.execPath, UPSTREAM, w.outFile], env: { ...w.env, ...env }, host: "127.0.0.1", controlPort, logSink: w.sink, ...(lookup ? { lookup } : {}) });
 }
 
 describe("tb-exec with helper and backup", () => {
@@ -440,7 +441,7 @@ describe("tb-exec model roles (BRIDGE §15.4)", () => {
     const w = await execWorld({ helper: false, backup: false, modelRoles: [{ role: "embeddings", required: false, usedBy: [SERVICE], env: ENV }] });
     w.bridge.setRole("embeddings", emb({ provider: "ollama", model: "nomic-embed-text", baseUrl: "http://ollama.railway.internal:11434/v1", key: null, dims: null, dataPolicy: "local" }));
     try {
-      const h = run(w);
+      const h = run(w, [], undefined, async () => [{ address: "10.0.0.7", family: 4 }]);
       await until(() => w.starts().length === 1);
       assert.deepEqual(w.starts()[0]?.roleEnv, { ROLE_PROVIDER: "ollama", ROLE_MODEL: "nomic-embed-text", ROLE_URL: "http://ollama.railway.internal:11434/v1" });
       await stop(h);
@@ -502,13 +503,73 @@ describe("tb-exec model roles (BRIDGE §15.4)", () => {
     }
   });
 
+  test("RM-20: a local role whose name resolves to a refused address is not filled (public, metadata, mapped metadata, AWS IPv6, a private/public mix, CGNAT when verified, no record, a base URL that is no URL)", { timeout: 60_000 }, async () => {
+    const bad: [string, { address: string; family: number }[], string?][] = [
+      ["public", [{ address: "93.184.216.34", family: 4 }]],
+      ["169.254.169.254", [{ address: "169.254.169.254", family: 4 }]],
+      ["mapped metadata", [{ address: "::ffff:169.254.169.254", family: 6 }]],
+      ["fd00:ec2::254", [{ address: "fd00:ec2::254", family: 6 }]],
+      ["mix", [{ address: "10.0.0.7", family: 4 }, { address: "93.184.216.34", family: 4 }]],
+      ["CGNAT", [{ address: "100.64.0.9", family: 4 }]],
+      ["no record", []],
+      ["a base URL with userinfo", [{ address: "10.0.0.7", family: 4 }], "http://10.0.0.1\\@evil.example/v1"],
+    ];
+    for (const [name, addrs, base] of bad) {
+      const w = await execWorld({ helper: false, backup: false, modelRoles: [{ role: "embeddings", required: false, usedBy: [SERVICE], env: ENV }] });
+      w.bridge.setRole("embeddings", emb({ dataPolicy: "local", baseUrl: base ?? "http://ollama.railway.internal:11434/v1" }));
+      try {
+        const h = run(w, [], undefined, async () => addrs);
+        await until(() => w.starts().length === 1);
+        assert.deepEqual(w.starts()[0]?.roleEnv, {}, name);
+        assert.ok(w.logs.some((l) => l.includes("model role endpoint refused") && l.includes("model_endpoint_refused")), name);
+        assert.ok(!w.logs.some((l) => l.includes(ROLE_KEY)), "no key in logs");
+        await stop(h);
+      } finally {
+        await w.cleanup();
+      }
+    }
+  });
+
+  test("RM-20: the check runs again on every keysRev change: a rebinding after start fills nothing and restarts the child without the env", { timeout: 40_000 }, async () => {
+    const w = await execWorld({ helper: false, backup: false, modelRoles: [{ role: "embeddings", required: false, usedBy: [SERVICE], env: ENV }] });
+    w.bridge.setRole("embeddings", emb({ dataPolicy: "local", baseUrl: "http://ollama.railway.internal:11434/v1" }));
+    let address = "10.0.0.7";
+    try {
+      const h = run(w, [], undefined, async () => [{ address, family: 4 }]);
+      await until(() => w.starts().length === 1);
+      assert.equal(w.starts()[0]?.roleEnv.ROLE_MODEL, "text-embedding-3-large");
+      address = "169.254.169.254"; // the name was taken over / rebound
+      w.bridge.setRole("embeddings", emb({ dataPolicy: "local", baseUrl: "http://ollama.railway.internal:11434/v1", model: "other-model" }));
+      await until(() => w.starts().length === 2, 15_000);
+      assert.deepEqual(w.starts()[1]?.roleEnv, {});
+      await stop(h);
+    } finally {
+      await w.cleanup();
+    }
+  });
+
+  test("RM-20: a REQUIRED local role that is refused blocks the upstream: needs_keys + model_role_missing", { timeout: 30_000 }, async () => {
+    const w = await execWorld({ helper: false, backup: false, modelRoles: [{ role: "reasoning", required: true, usedBy: [SERVICE], env: { model: "ROLE_MODEL", key: "ROLE_KEY" } }] });
+    w.bridge.setRole("reasoning", emb({ role: "reasoning", dataPolicy: "local", baseUrl: "http://ollama.railway.internal:11434/v1" }));
+    try {
+      const h = run(w, [], undefined, async () => [{ address: "93.184.216.34", family: 4 }]);
+      await until(() => w.bridge.statusBodies.length > 0, 10_000);
+      assert.equal(w.starts().length, 0);
+      assert.equal(w.bridge.statusBodies.at(-1)?.readiness, "needs_keys");
+      assert.equal(w.bridge.statusBodies.at(-1)?.attention?.code, "model_role_missing");
+      await stop(h);
+    } finally {
+      await w.cleanup();
+    }
+  });
+
   test("RM-20: a role-bound service never sees HTTP_PROXY, HTTPS_PROXY, ALL_PROXY or NO_PROXY (any case); a service without roles keeps them", { timeout: 40_000 }, async () => {
     const proxies = { HTTP_PROXY: "http://proxy:3128", https_proxy: "http://proxy:3128", All_Proxy: "socks5://proxy:1080", NO_PROXY: "localhost", no_proxy: "localhost" };
     const bound = await execWorld({ helper: false, backup: false, modelRoles: [{ role: "embeddings", required: false, usedBy: [SERVICE], env: ENV }] });
     const plain = await execWorld({ helper: false, backup: false });
     try {
-      const h1 = run(bound, [], undefined, proxies);
-      const h2 = run(plain, [], undefined, proxies);
+      const h1 = run(bound, [], undefined, undefined, proxies);
+      const h2 = run(plain, [], undefined, undefined, proxies);
       await until(() => bound.starts().length === 1 && plain.starts().length === 1);
       assert.deepEqual(bound.starts()[0]?.proxyEnv, [], "stripped for a role-bound service");
       assert.deepEqual(plain.starts()[0]?.proxyEnv, ["All_Proxy", "HTTP_PROXY", "NO_PROXY", "https_proxy", "no_proxy"].sort());
