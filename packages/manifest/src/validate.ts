@@ -23,6 +23,9 @@ import { parseSkillFile, parseVariable, skillTextViolation, VARIABLE_RE } from "
 
 type Add = (rule: string, code: string, path: string, message: string) => void;
 
+/** spec 0.1.68 (C336 RQ-3): `Operation.secretOutput` — local until the spec pin carries it. */
+type SecretOutputOp = Operation & { secretOutput?: true };
+
 const MAX_MANIFEST_BYTES = 256 * 1024;
 const MAX_SKILL_BYTES = 64 * 1024;
 
@@ -54,8 +57,61 @@ const isReadOnly = (crud: readonly string[]): boolean => crud.length === 1 && cr
 
 // SPEC-GAP: no code is named for structural (schema) failures; they are reported as rule `schema`, code `schema_invalid`.
 let schemaCheck: ValidateFunction | undefined;
+
+/** spec 0.1.68 (C336 RQ-3, S-8, M-OP-12): `operations[].secretOutput` and its if/then, as the spec 0.1.68 schema states them. */
+const SECRET_OUTPUT_SCHEMA = {
+  const: true,
+  description: "v0.1.68 (C336 RQ-3, S-8, M-OP-12): the output carries a secret; app callers only, never stored, logged, replayed or given to after hooks. Requires audience agent, no dynamic, idempotency none, receipt true.",
+};
+const SECRET_OUTPUT_IF = { required: ["secretOutput"] };
+const SECRET_OUTPUT_THEN = {
+  description: "v0.1.68 M-OP-12: a secretOutput op is an agent-audience op reached by app callers, not dynamic, idempotency none, receipt true.",
+  properties: { audience: { const: "agent" }, idempotency: { const: "none" }, receipt: { const: true } },
+  not: { required: ["dynamic"] },
+};
+
+/** spec 0.1.68 (C354, MANIFEST v0.1.15 additions): `requires.bridgeCaps`, as the spec 0.1.68 schema states it. */
+const REQUIRES_BRIDGE_CAPS_SCHEMA = {
+  type: "array",
+  uniqueItems: true,
+  maxItems: 16,
+  items: { type: "string", pattern: "^[a-z][a-z0-9_]{1,31}$" },
+  description: "v0.1.68 (C354): bridge capabilities the release needs; Core refuses a bridge without each (bridge_cap_missing). Never inferred from a version.",
+};
+
+/**
+ * spec 0.1.68: the pinned schema predates `operations[].secretOutput` (+ the M-OP-12 if/then) and `requires.bridgeCaps`; add
+ * each one that is missing (to a copy, the import stays untouched) until the pin carries them. A no-op once the pinned schema
+ * declares them — then this helper goes with the pin bump.
+ */
+function schemaWithSpec068(schema: typeof manifestSchema): object {
+  type S = { $defs: { operation: Record<string, unknown> & { properties: Record<string, unknown> } }; properties: { requires: { properties: Record<string, unknown> } } };
+  const src = schema as unknown as Partial<S>;
+  const needOp = !!src.$defs?.operation?.properties && !("secretOutput" in src.$defs.operation.properties);
+  const needCaps = !!src.properties?.requires?.properties && !("bridgeCaps" in src.properties.requires.properties);
+  if (!needOp && !needCaps) return schema;
+  const copy = structuredClone(schema) as unknown as S;
+  if (needOp) {
+    if (copy.$defs.operation.if !== undefined) throw new Error("manifest schema: operation already has an if/then; merge the spec 0.1.68 secretOutput rule by hand");
+    copy.$defs.operation.properties.secretOutput = SECRET_OUTPUT_SCHEMA;
+    copy.$defs.operation.if = SECRET_OUTPUT_IF;
+    // biome-ignore lint/suspicious/noThenProperty: `then` is the JSON Schema keyword of the spec's if/then
+    copy.$defs.operation.then = SECRET_OUTPUT_THEN;
+  }
+  if (needCaps) copy.properties.requires.properties.bridgeCaps = REQUIRES_BRIDGE_CAPS_SCHEMA;
+  return copy;
+}
+
+/** spec 0.1.68: a failure of the operation if/then (the secretOutput rule) carries the M-OP-12 rule and code. */
+function secretOutputSchemaIssue(issue: ManifestIssue): ManifestIssue {
+  // ajv reports the paths relative to the referenced `operation` schema: `#/if`, `#/then/properties/<key>/const`, `#/then/not`
+  if (!/^\/operations\/\d+(\/(audience|idempotency|receipt))?$/.test(issue.path)) return issue;
+  if (!/\(#\/(if|then\/not|then\/properties\/(audience|idempotency|receipt)\/const)\)$/.test(issue.message)) return issue;
+  return { ...issue, rule: "M-OP-12", code: "secret_output_invalid" };
+}
+
 function checkSchema(json: unknown): ManifestIssue[] {
-  schemaCheck ??= new Ajv2020({ allErrors: true, strict: true, strictRequired: false, allowUnionTypes: true }).compile(manifestSchema);
+  schemaCheck ??= new Ajv2020({ allErrors: true, strict: true, strictRequired: false, allowUnionTypes: true }).compile(schemaWithSpec068(manifestSchema));
   if (schemaCheck(json)) return [];
   const out: ManifestIssue[] = [];
   const seen = new Set<string>();
@@ -462,6 +518,16 @@ function operationRules(m: Manifest, add: Add): void {
         add("M-OP-10", "dynamic_invalid", `${p}/dynamic/effectCeiling`, 'crudCeiling ["read"] requires effectCeiling read');
       }
     }
+
+    // spec 0.1.68 (C336 RQ-3, S-8): M-OP-12 (the schema if/then checks the same; this is the rule's own statement)
+    if ((op as SecretOutputOp).secretOutput === true) {
+      const ok = op.audience === "agent" && !op.dynamic && op.idempotency === "none" && op.receipt === true;
+      if (!ok) add("M-OP-12", "secret_output_invalid", `${p}/secretOutput`, "secretOutput ops: audience agent, no dynamic, idempotency none, receipt true");
+      // C354: the gate is a capability, never a bridge version — the manifest names the cap it needs
+      if (!(m.requires as { bridgeCaps?: readonly string[] } | undefined)?.bridgeCaps?.includes("secret_output")) {
+        add("M-OP-12", "secret_output_invalid", `${p}/secretOutput`, 'a secretOutput op needs requires.bridgeCaps to list "secret_output"');
+      }
+    }
   });
 }
 
@@ -848,7 +914,7 @@ export function manifestDigest(manifest: Manifest): `sha256:${string}` {
 /** Schema + every M-* rule. Returns the manifest (same object) and its digest, or every issue found. */
 export function validateManifest(json: unknown): ManifestValidation {
   const schemaErrors = checkSchema(json);
-  if (schemaErrors.length) return { ok: false, errors: schemaErrors.map(eventSchemaIssue) };
+  if (schemaErrors.length) return { ok: false, errors: schemaErrors.map(eventSchemaIssue).map(secretOutputSchemaIssue) };
   const m = json as Manifest;
   let bytes: number;
   try {

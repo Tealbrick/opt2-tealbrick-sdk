@@ -46,9 +46,9 @@ export const BRIDGE_FEATURES = [
 ] as const;
 
 type ManifestLike = {
-  operations?: readonly { dynamic?: unknown }[];
+  operations?: readonly { dynamic?: unknown; secretOutput?: unknown }[];
   companions?: readonly { product: string; operations: readonly string[] }[];
-  requires?: { bridge?: string };
+  requires?: { bridge?: string; bridgeCaps?: readonly string[] };
   events?: readonly unknown[];
 };
 
@@ -80,3 +80,16 @@ export function requiredBridgeVersion(m: ManifestLike): { bridge: string | null;
 export const MIN_BRIDGE_FREE_WF = "0.1.19";
 /** C111a: the first miniapp-sdk whose authorize() pairs with op-limited Free grants (caps in any mode, C108 tolerant held). */
 export const MIN_SDK_FREE_WF = "0.1.16";
+
+/**
+ * spec 0.1.68 (C354, MANIFEST `requires.bridgeCaps`): the bridge capabilities (BRIDGE_CAPS) a manifest needs = its declared
+ * `requires.bridgeCaps` plus every cap a feature it uses implies (a `secretOutput` op → `secret_output`; the validator already
+ * requires the declaration, M-OP-12). Core refuses to deploy onto a workspace bridge that does not declare each one
+ * (`bridge_cap_missing`). Feature gates are capabilities, never bridge version numbers (versions are assigned at merge time,
+ * C352): add new capability-gated features here, not to BRIDGE_FEATURES. Sorted, unique.
+ */
+export function requiredBridgeCaps(m: ManifestLike): string[] {
+  const caps = new Set<string>(m.requires?.bridgeCaps ?? []);
+  if ((m.operations ?? []).some((o) => o.secretOutput === true)) caps.add("secret_output");
+  return [...caps].sort();
+}

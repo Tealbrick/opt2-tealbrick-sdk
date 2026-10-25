@@ -196,3 +196,12 @@ describe("runCoreTarget", () => {
     }
   });
 });
+
+describe("PORTAL-API §1.4 status table (spec 0.1.68)", () => {
+  it("bridge_cap_missing (C336, BRIDGE v0.1.68: a release needs a bridge cap the workspace bridge lacks) maps to 409", async () => {
+    const { coreErrorStatus } = await import("../../src/checks/core-live.ts");
+    assert.deepEqual(coreErrorStatus("bridge_cap_missing"), [409]);
+    assert.deepEqual(coreErrorStatus("conflict"), [409], "control: an existing 409 code");
+    assert.equal(coreErrorStatus("no_such_code"), undefined);
+  });
+});

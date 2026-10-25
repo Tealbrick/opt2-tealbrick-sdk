@@ -33,6 +33,7 @@ import { type ClaimedJob, jobsView, type OpFireOutcome, unsealGrant } from "./jo
 import { HOLD_TTL_MS, type NewReceipt, type Receipts } from "./receipts.ts";
 import type { Runtime } from "./runtime.ts";
 import { scopeGrantOps } from "./scopes.ts";
+import { isSecretOutput, SECRET_OUTPUT_META, secretOutputAppOnly, secretOutputError } from "./secret-output.ts";
 import { resolveCallerProduct } from "./trust.ts";
 
 export const OP_TIMEOUT_MS = 30_000;
@@ -56,6 +57,7 @@ interface EffectiveOp {
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
 const iso = (ms: number) => new Date(ms).toISOString();
 
 /**
@@ -116,7 +118,8 @@ function parseOpBody(body: unknown): { input: Json; context: Record<string, Json
 }
 
 function idempotencyKeyFor(op: { idempotency: string }, key: string | null): string | null {
-  if (op.idempotency === "none") return null;
+  // spec 0.1.68: a secretOutput op never keeps an idempotency row, whatever its manifest says (M-OP-11 requires none)
+  if (op.idempotency === "none" || isSecretOutput(op)) return null;
   if (key === null) {
     if (op.idempotency === "required") throw new TbError("idempotency_key_required", "this operation requires an idempotency key", 400);
     return null;
@@ -428,9 +431,10 @@ async function claimIdempotency(rt: Runtime, callerId: string, opId: string, key
   }
 }
 
-function toTbError(e: unknown, rt: Runtime): TbError {
+function toTbError(e: unknown, rt: Runtime, secret = false): TbError {
   if (e instanceof TbError) return e;
-  rt.log.error("handler failed", { error: e instanceof Error ? e.message : "unknown" });
+  // spec 0.1.68: a secretOutput handler's error text may carry the secret — log that it failed, never its message
+  rt.log.error("handler failed", { error: secret ? "redacted (secretOutput op)" : e instanceof Error ? e.message : "unknown" });
   return new TbError("app_error", "the operation failed", 500);
 }
 
@@ -569,6 +573,9 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       rt.kickStatus();
       throw new TbError("agent_unknown", "this agent is not in the instance slice", 403);
     }
+    // spec 0.1.68 (SDK-API v0.1.68 rule 1): a secretOutput op answers APP callers only; an agent is refused before anything
+    // runs (no idempotency key, no cap slot, no handler)
+    if (g.caller.type === "agent" && isSecretOutput(op)) throw secretOutputAppOnly();
 
     // v0.1.35 (C261): an app caller with no verified product is refused before ANYTHING else runs (standard ops included: no
     // hold status, no pending list, no defaults, no idempotency key, no cap slot); the refusal is audited as a refused receipt
@@ -714,6 +721,7 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       const life = opLife(sig.signal);
       if (caller.type === "agent") ctx.scopeSelfRevoke = agentSelfRevoke(rt, op.id, callerId, callId, life);
       const writeReceipt = approved !== null || op.receipt || (dyn !== null && eff.effect !== "read");
+      const secret = isSecretOutput(op);
       const h = startHandler(rt, op, body.input, ctx, dyn);
       life.bind(h.actual);
       // the key and the slot end with the HANDLER, not with the answer: a run that outlives the 30 s timeout or the
@@ -735,7 +743,14 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       try {
         output = await h.raced;
       } catch (e) {
-        const err = toTbError(e, rt);
+        const err = toTbError(e, rt, secret);
+        if (secret) {
+          // SDK-API v0.1.68 rule 4: the code with the fixed message; the receipt carries the code, never a message
+          const meta: Json = { secretOutput: true, error: err.code };
+          if (approved) rt.receipts.finish(approved.id, "failed", { meta, ...admit });
+          else if (writeReceipt) rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "failed", summary: secretSummary(spec, op, body.input), meta });
+          throw secretOutputError(err);
+        }
         const meta = rh.meta ?? meta0;
         if (approved) rt.receipts.finish(approved.id, "failed", { meta, ...admit });
         else if (writeReceipt) rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "failed", summary: rh.summary ?? clampSummary(op.title), meta: { ...(isObj(meta) ? meta : {}), error: err.code } });
@@ -743,13 +758,15 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       } finally {
         sig.done();
       }
-      const summary = rh.summary ?? clampSummary(spec?.redact ? spec.redact(body.input, output) : op.title);
+      // spec 0.1.68: a secretOutput receipt never derives from the output (no redact(input, output), no ctx.receipt values)
+      const summary = secret ? secretSummary(spec, op, body.input) : (rh.summary ?? clampSummary(spec?.redact ? spec.redact(body.input, output) : op.title));
+      const runMeta = secret ? SECRET_OUTPUT_META : (rh.meta ?? meta0);
       let receiptId: string | undefined;
       if (approved) {
-        rt.receipts.finish(approved.id, "run", { summary, meta: rh.meta ?? meta0, ...admit });
+        rt.receipts.finish(approved.id, "run", { summary, meta: runMeta, ...admit });
         receiptId = approved.id;
       } else if (writeReceipt) {
-        receiptId = rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "run", summary, meta: rh.meta ?? meta0 }).id;
+        receiptId = rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "run", summary, meta: runMeta }).id;
       }
       sendJson(res, 200, receiptId ? ({ status: "ok", output, receiptId } satisfies OpResult) : ({ status: "ok", output } satisfies OpResult));
     } catch (e) {
@@ -814,6 +831,9 @@ export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: Abor
   const now = Date.now();
   const op = job.op ? rt.ops.get(job.op) : undefined;
   if (!op || op.standard || op.dynamic) return { kind: "refused", reason: "unknown_tool" };
+  // spec 0.1.68 (SDK-API v0.1.68 rule 2.6, C354): a schedule created before the op had `secretOutput` (or by an older release)
+  // is refused when it runs; the handler never runs from a job (ctx.schedule refuses new ones)
+  if (isSecretOutput(op)) return { kind: "refused", reason: "secret_output_not_schedulable" };
   const who = job.caller;
   if (!who) return { kind: "refused", reason: "schedule_caller_required" };
   if (!rt.cfg.standalone && rt.trust.stale(now)) return { kind: "defer", reason: "slice_stale" };
@@ -930,6 +950,11 @@ export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: Abor
   if (approved) rt.receipts.finish(approved.id, "run", { summary, meta: rh.meta ?? null, ...admit });
   else if (writeReceipt) rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "run", summary, meta: rh.meta ?? null });
   return { kind: "done", result: output };
+}
+
+/** spec 0.1.68: the receipt summary of a secretOutput op — from the input only (`redact(input)`), else the op title. */
+function secretSummary(spec: HandlerSpec | null, op: OperationView, input: Json): string {
+  return clampSummary(spec?.redact ? spec.redact(input) : op.title);
 }
 
 // ── tb.holds_pending (v0.1.13, G4) ───────────────────────────────────────────

@@ -46,3 +46,13 @@ test("C232 (LA-2): an outward op may declare public_link; a typo stays refused; 
   assert.ok((m.KNOWN_HOLD_FAMILIES as readonly string[]).includes("public_link"));
   assert.ok((m.HOOK_HOLD_FAMILIES as readonly string[]).includes("public_link"));
 });
+
+test("requiredBridgeCaps (spec 0.1.68, C354): declared caps plus secret_output for a secretOutput op; secretOutput never gates a bridge version", async () => {
+  const { requiredBridgeCaps } = await import("../src/index.ts");
+  assert.deepEqual(requiredBridgeCaps({ operations: [{}] }), []);
+  assert.deepEqual(requiredBridgeCaps({ operations: [{}, { secretOutput: true }], requires: { bridgeCaps: ["secret_output"] } }), ["secret_output"]);
+  assert.deepEqual(requiredBridgeCaps({ operations: [{ secretOutput: true }] }), ["secret_output"], "implied even when undeclared");
+  assert.deepEqual(requiredBridgeCaps({ operations: [], requires: { bridgeCaps: ["lazy_tools", "hook_tool"] } }), ["hook_tool", "lazy_tools"]);
+  const v = requiredBridgeVersion({ operations: [{ secretOutput: true }], requires: { bridgeCaps: ["secret_output"] } });
+  assert.deepEqual(v, { bridge: null, reasons: [] }, "no version-based gate for secret_output");
+});
