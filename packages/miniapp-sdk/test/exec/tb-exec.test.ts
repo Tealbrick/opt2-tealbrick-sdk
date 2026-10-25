@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { connect } from "node:net";
 import { join } from "node:path";
 import { after, afterEach, before, describe, test } from "node:test";
 import { type Ed25519KeyPair, generateKeyPair, manifestDigest, signInstanceAssertion, validateManifest } from "@opt2-tealbrick/manifest";
@@ -169,6 +170,22 @@ describe("tb-exec with helper and backup", () => {
     assert.deepEqual(new Uint8Array(readFileSync(w.restoreFile)), dump);
     const foreign = await fetch(`http://127.0.0.1:${controlPort}/tb/v1/exec/backup`, { method: "POST", headers: { "tb-assert": await sign("/tb/v1/exec/backup", empty, await generateKeyPair()) }, body: empty });
     assert.equal(foreign.status, 401);
+    const unknown = await fetch(`http://127.0.0.1:${controlPort}/tb/v1/exec/other`, { method: "POST", body: "{}" });
+    assert.equal(unknown.status, 404);
+  });
+
+  test("control port: an unparseable target (POST //) is a 404 and tb-exec keeps serving", async () => {
+    const text = await new Promise<string>((resolve) => {
+      const s = connect(controlPort, "127.0.0.1");
+      let out = "";
+      s.on("data", (c: Buffer) => {
+        out += c.toString("utf8");
+      });
+      s.on("close", () => resolve(out));
+      s.on("error", () => resolve(out));
+      s.write("POST // HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+    });
+    assert.match(text, /^HTTP\/1\.1 404 /);
     const unknown = await fetch(`http://127.0.0.1:${controlPort}/tb/v1/exec/other`, { method: "POST", body: "{}" });
     assert.equal(unknown.status, 404);
   });

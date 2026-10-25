@@ -10,14 +10,15 @@ import { genRailway, type RailwayOptions } from "./railway.ts";
 export const GEN_KINDS = ["openapi", "kit", "docs", "railway"] as const;
 export type GenKind = (typeof GEN_KINDS)[number];
 
-export type GenOptions = RailwayOptions;
+/** `packageName` (C338): publish the kit under the app's own package name (e.g. `@tealbrick/knowledge`). */
+export type GenOptions = RailwayOptions & { packageName?: string };
 
 export function generate(kind: GenKind, lm: LoadedManifest, opts: GenOptions = {}): GenFiles {
   switch (kind) {
     case "openapi":
       return genOpenApi(lm);
     case "kit":
-      return genKit(lm);
+      return genKit(lm, opts.packageName !== undefined ? { packageName: opts.packageName } : {});
     case "docs":
       return genDocs(lm);
     case "railway":
