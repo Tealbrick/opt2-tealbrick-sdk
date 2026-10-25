@@ -319,8 +319,9 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     }
   })();
 
-  // spec 0.1.64 (BRIDGE §16): the person-op relay
-  if (flags.personOps || flags.personOpsWithoutCap) runMiniPersonOps({ portalCall, config: () => cfg, stopped: () => stopped, log: (l) => logLines.push(l), faults: flags.personOpFaults ?? {} });
+  // spec 0.1.64 (BRIDGE §16): the person-op relay; spec 0.1.69 (C354): the caps of each app's latest status push
+  const appCaps = new Map<string, unknown>();
+  if (flags.personOps || flags.personOpsWithoutCap) runMiniPersonOps({ portalCall, config: () => cfg, appCaps: (ins) => appCaps.get(ins), stopped: () => stopped, log: (l) => logLines.push(l), faults: flags.personOpFaults ?? {} });
 
   /** an app that is not up yet (a real SDK app deployed before it claims) is fetched again later */
   async function fetchManifest(a: { ins: string; internalUrl: string }): Promise<void> {
@@ -774,7 +775,10 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     if (path === "/tb/v1/status" && req.method === "POST") {
       const ins = instanceOf(req, raw);
       if (!ins) return send(res, 401, { error: { code: "unauthenticated", message: "instance assertion refused", requestId: "req_mini" } });
-      const pushed = (JSON.parse(raw.toString() || "{}") as { sliceRevision?: number }).sliceRevision;
+      const pushedBody = JSON.parse(raw.toString() || "{}") as { sliceRevision?: number; caps?: unknown };
+      const pushed = pushedBody.sliceRevision;
+      // spec 0.1.69 (C354): every push states the app's current caps (the relay forwards only to an app that declares person_op)
+      appCaps.set(ins, pushedBody.caps);
       const wait = Math.min(10, Number(new URL(req.url ?? "/", "http://x").searchParams.get("wait") ?? 0) || 0);
       const end = Date.now() + wait * 1000;
       for (;;) {

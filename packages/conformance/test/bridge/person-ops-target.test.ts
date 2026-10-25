@@ -6,7 +6,7 @@ import { describe, it } from "node:test";
 import { type Report, runBridgeTarget } from "../../src/index.ts";
 import { type MiniFlags, type MiniState, startMiniBridge } from "./mini-bridge.ts";
 
-const RPO = ["R-PO-1", "R-PO-2", "R-PO-3", "R-PO-4", "R-PO-5", "R-PO-6"];
+const RPO = ["R-PO-1", "R-PO-2", "R-PO-3", "R-PO-4", "R-PO-5", "R-PO-6", "R-PO-7", "R-PO-8"];
 const status = (r: Report, id: string) => r.checks.find((c) => c.id === id)?.status;
 const asserted = (r: Report, id: string) => r.checks.find((c) => c.id === id)?.asserted ?? "";
 const run = (flags: MiniFlags, opts: { logs?: boolean } = {}) => {
@@ -22,7 +22,7 @@ const run = (flags: MiniFlags, opts: { logs?: boolean } = {}) => {
 };
 
 describe("bridge target: person-op relay (R-PO, spec 0.1.64)", () => {
-  it("a bridge that declares person_ops and implements BRIDGE §16 passes R-PO-1..6; B9 admits the relay paths and stays clean", { timeout: 120_000 }, async () => {
+  it("a bridge that declares person_ops and implements BRIDGE §16 passes R-PO-1..8; B9 admits the relay paths and stays clean", { timeout: 120_000 }, async () => {
     const r = await run({ personOps: true });
     for (const id of RPO) assert.equal(status(r, id), "pass", `${id}: ${asserted(r, id)}`);
     assert.equal(status(r, "B9.portal_paths"), "pass", asserted(r, "B9.portal_paths"));
@@ -53,6 +53,9 @@ describe("bridge target: person-op relay (R-PO, spec 0.1.64)", () => {
       [{ personOps: true, personOpFaults: { unknownInsNotDelivered: true } }, ["R-PO-2"]],
       [{ personOps: true, personOpFaults: { zeroForUnreachable: true } }, ["R-PO-6"]],
       [{ personOpsWithoutCap: true }, ["R-PO-1", "B9.portal_paths"]],
+      // spec 0.1.69 (C354): a bridge that forwards whatever the app declares, or that reads malformed caps as a declaration
+      [{ personOps: true, personOpFaults: { ignoresAppCaps: true } }, ["R-PO-7", "R-PO-8"]],
+      [{ personOps: true, personOpFaults: { lenientAppCaps: true } }, ["R-PO-8"]],
     ];
     const reports = await Promise.all(cases.map(([flags]) => run(flags)));
     cases.forEach(([flags, ids], i) => {
@@ -62,5 +65,6 @@ describe("bridge target: person-op relay (R-PO, spec 0.1.64)", () => {
     // a faulty variant fails ONLY its own row among R-PO (the others still pass)
     assert.equal(status(reports[0] as Report, "R-PO-5"), "pass", asserted(reports[0] as Report, "R-PO-5"));
     assert.equal(status(reports[1] as Report, "R-PO-3"), "pass", asserted(reports[1] as Report, "R-PO-3"));
+    assert.equal(status(reports[7] as Report, "R-PO-7"), "pass", `lenient caps still refuse an app without caps: ${asserted(reports[7] as Report, "R-PO-7")}`);
   });
 });

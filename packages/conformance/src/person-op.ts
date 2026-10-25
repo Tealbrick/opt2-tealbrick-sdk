@@ -13,8 +13,22 @@ export const PERSON_OPS_CAP = "person_ops";
 export const PERSON_OP_ROUTE = "/tb/v1/person-op";
 /** SPEC-GAP: spec 0.1.64 names the header in SDK-API §21 / BRIDGE §16 only (no constant in BRIDGE_HEADERS). */
 export const PERSON_OP_HEADER = "TB-Person-Op";
-/** First miniapp-sdk release that serves `POST /tb/v1/person-op` (spec 0.1.64). */
-export const PERSON_OP_SINCE = "0.1.39";
+/**
+ * spec 0.1.69 (C354): the app capability for `POST /tb/v1/person-op` (APP_CAPS), declared in ClaimRequest.caps and every
+ * AppStatus.caps. Gates read it, never a version number. SPEC-GAP: the pinned spec is 0.1.64 (no APP_CAPS, APP_CAPS_LIMITS,
+ * PERSON_OP_BRIDGE_REFUSALS yet), so the values are written here with the 0.1.69 numbers and the raw `caps` member is read; they
+ * go when the pin moves to 0.1.69.
+ */
+export const PERSON_OP_APP_CAP = "person_op";
+export const APP_CAPS_LIMITS = { maxEntries: 16, maxLength: 32 } as const;
+export const PERSON_OP_BRIDGE_REFUSALS = { instanceUnknown: "instance_unknown", appUnsupported: "person_op_unsupported" } as const;
+
+/** The caps an app declares (spec 0.1.69): a value that is not an array of strings within APP_CAPS_LIMITS = none (fail closed). */
+export function declaredAppCaps(v: unknown): string[] {
+  if (!Array.isArray(v) || v.length > APP_CAPS_LIMITS.maxEntries) return [];
+  if (!v.every((x) => typeof x === "string" && x.length > 0 && x.length <= APP_CAPS_LIMITS.maxLength)) return [];
+  return v as string[];
+}
 /** Core → bridge pull and bridge → Core result paths (routes.ts bridge_api.person_ops / bridge_api.person_op_result). */
 export const PERSON_OPS_PATH = "/api/v1/bridge/person-ops";
 export const PERSON_OP_RESULT_PATH_RE = /^\/api\/v1\/bridge\/person-ops\/(pop_[0-9A-Za-z]{1,64})\/result$/;

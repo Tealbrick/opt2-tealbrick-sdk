@@ -8,7 +8,7 @@ import type { InstanceId } from "@opt2-tealbrick/spec/credentials";
 import { PERSON_OP_RELAY } from "@opt2-tealbrick/spec/routes";
 import type { OpAnswerSpec, Received } from "../fake-app.ts";
 import type { PersonOpResultSeen, QueuedPersonOp } from "../fake-portal.ts";
-import { bodyDigest, PERSON_OP_ROUTE, PERSON_OPS_CAP } from "../person-op.ts";
+import { APP_CAPS_LIMITS, bodyDigest, PERSON_OP_APP_CAP, PERSON_OP_BRIDGE_REFUSALS, PERSON_OP_ROUTE, PERSON_OPS_CAP } from "../person-op.ts";
 import { bad, na, notRun, type Outcome, ok, verdict } from "../suite.ts";
 import { newId, peek } from "../tokens.ts";
 import { reportedBridgeCaps } from "./bridge.ts";
@@ -33,7 +33,7 @@ export async function personOpChecks(c: BridgeCtx): Promise<void> {
       const polls = c.w.portal.captured.filter((r) => r.method === "GET" && r.path.split("?")[0] === "/api/v1/bridge/person-ops").length;
       return polls === 0 ? na(why) : bad(`${polls} GET /api/v1/bridge/person-ops from a bridge that does not declare ${PERSON_OPS_CAP} (caps ${JSON.stringify(caps)}): cap declared ⇔ relay implemented`);
     });
-    for (const id of ["R-PO-2", "R-PO-3", "R-PO-4", "R-PO-5", "R-PO-6"]) await c.run(id, title(id), "BRIDGE §16", () => na(why));
+    for (const id of ["R-PO-2", "R-PO-3", "R-PO-4", "R-PO-5", "R-PO-6", "R-PO-7", "R-PO-8"]) await c.run(id, title(id), "BRIDGE §16", () => na(why));
     return;
   }
 
@@ -64,6 +64,34 @@ export async function personOpChecks(c: BridgeCtx): Promise<void> {
     answerMarkers.push(m);
     return code ? { error: { code, message: `conformance ${m}`, requestId: "req_tbconf" } } : { status: "ok", output: { marker: m, ...extra } };
   };
+  /** the primary app's status push with these `caps` (spec 0.1.69 AppStatus.caps; raw, the pinned 0.1.64 type lacks it) */
+  const declare = async (caps: unknown): Promise<string> => {
+    const a = await app.status({ caps } as never, 0);
+    return a.status === 200 || a.status === 204 ? "" : `status push with caps ${JSON.stringify(caps)?.slice(0, 60)} → ${a.status}`;
+  };
+  const codeOf = (r: PersonOpResultSeen): string | null => {
+    try {
+      const e = (JSON.parse(r.body) as { error?: { code?: unknown } } | null)?.error;
+      return typeof e?.code === "string" ? e.code : null;
+    } catch {
+      return null;
+    }
+  };
+  /** one row for the primary app while it declares `caps`: the result and the number of forwards */
+  const relayWith = async (caps: unknown): Promise<{ shown: string; refused: boolean; forwarded: boolean }> => {
+    const problem = await declare(caps);
+    if (problem) return { shown: problem, refused: false, forwarded: false };
+    const row = await queue(app.ins, "items_list", `{"q":"tbconf-pocap-${ulid()}"}`, { status: 200, body: answer(null) });
+    const r = await portal.waitPersonOpResult(row.item.id, resultWait);
+    await sleep(300);
+    const fwd = forwardsOf(row).length;
+    const label = typeof caps === "string" ? JSON.stringify(caps) : Array.isArray(caps) && caps.length > 3 ? `[${caps.length} entries]` : JSON.stringify(caps ?? null);
+    return {
+      shown: `caps ${label}: ${describeRow(row, r)}${r ? `, code ${codeOf(r) ?? "(none)"}` : ""}, forwards ${fwd}`,
+      refused: r?.status === 409 && codeOf(r) === PERSON_OP_BRIDGE_REFUSALS.appUnsupported && fwd === 0,
+      forwarded: r?.status === 200 && fwd === 1,
+    };
+  };
   app.onPersonOp = (rec) => {
     const pop = String(peek(rec.headers["tb-person-op"] ?? "")?.pop ?? "");
     return plans.get(pop) ?? { status: 200, body: { status: "ok", output: {} } };
@@ -79,6 +107,12 @@ export async function personOpChecks(c: BridgeCtx): Promise<void> {
       return verdict(waitOk && portal.personOpPollsMaxOpen <= 1, `${polls.length} accepted polls; wait ${JSON.stringify(waits)}; at most ${portal.personOpPollsMaxOpen} open at once`);
     });
 
+    // spec 0.1.69 (C354): the bridge forwards only to an app whose latest claim / status declares person_op
+    const declared = await declare([PERSON_OP_APP_CAP]);
+    if (declared) {
+      for (const id of ["R-PO-2", "R-PO-3", "R-PO-5", "R-PO-6", "R-PO-7", "R-PO-8", "R-PO-4"]) await c.run(id, title(id), "the primary app declares person_op in a status push", () => bad(`the primary app's ${declared}`));
+      return;
+    }
     await c.run("R-PO-2", title("R-PO-2"), "a row for an instance id no config lists → the result post has status 409 and body {error: {code: instance_unknown}}; no fake app receives a person op for it", async () => {
       const row = await queue(newId("ins") as InstanceId, "items_list", "{}");
       const r = await portal.waitPersonOpResult(row.item.id, resultWait);
@@ -156,6 +190,28 @@ export async function personOpChecks(c: BridgeCtx): Promise<void> {
       );
     });
 
+    await c.run("R-PO-7", title("R-PO-7"), `the primary app pushes a status without caps → a row for it gets result 409 {error: {code: ${PERSON_OP_BRIDGE_REFUSALS.appUnsupported}}} and the app receives nothing; with caps [${PERSON_OP_APP_CAP}] again → forwarded`, async () => {
+      const none = await relayWith(undefined);
+      const back = await relayWith([PERSON_OP_APP_CAP]);
+      return verdict(none.refused && back.forwarded, `${none.shown}; ${back.shown}`);
+    });
+
+    await c.run("R-PO-8", title("R-PO-8"), `malformed caps (a string, ${APP_CAPS_LIMITS.maxEntries + 1} entries, a ${APP_CAPS_LIMITS.maxLength + 1}-char entry, each next to ${PERSON_OP_APP_CAP}) → refused like no caps; [${PERSON_OP_APP_CAP}, future_cap] → forwarded (an unknown entry is ignored)`, async () => {
+      const filler = Array.from({ length: APP_CAPS_LIMITS.maxEntries }, (_, i) => `tbconf_cap_${i}`);
+      const malformed: unknown[] = [PERSON_OP_APP_CAP, [PERSON_OP_APP_CAP, ...filler], [PERSON_OP_APP_CAP, "x".repeat(APP_CAPS_LIMITS.maxLength + 1)]];
+      const seen: string[] = [];
+      let pass = true;
+      for (const caps of malformed) {
+        const o = await relayWith(caps);
+        seen.push(o.shown);
+        pass &&= o.refused;
+      }
+      const extra = await relayWith([PERSON_OP_APP_CAP, "future_cap"]);
+      seen.push(extra.shown);
+      await declare([PERSON_OP_APP_CAP]);
+      return verdict(pass && extra.forwarded, seen.join("; "));
+    });
+
     await c.run("R-PO-4", title("R-PO-4"), "the bridge's captured stdout/stderr contain none of the relayed bodies (their markers), the app answers (their markers) or the K14s (whole token, payload or signature segment)", (): Outcome => {
       const logs = c.h.logs();
       if (logs === null) return notRun("this harness cannot capture the bridge's logs (run the bridge with --cmd or --start): R-PO-4 is not observable, so it is not run");
@@ -169,6 +225,7 @@ export async function personOpChecks(c: BridgeCtx): Promise<void> {
         : bad(`${hits.length} of ${needles.length} needles in the bridge's logs (e.g. ${hits[0]?.slice(0, 24)}…)`);
     });
   } finally {
+    await declare(undefined).catch(() => undefined);
     app.onPersonOp = null;
     if (!app.up) await app.start().catch(() => undefined);
   }

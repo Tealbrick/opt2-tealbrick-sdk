@@ -10,6 +10,8 @@ import { PERSON_OP_RELAY } from "@opt2-tealbrick/spec/routes";
 import type { Json, OperationView, TrustContext } from "@opt2-tealbrick/spec/sdk";
 
 export interface MiniPersonOpFaults {
+  /** declares no `person_op` capability in its claim and status pushes (spec 0.1.69, C354): the S-PO rows are not_applicable */
+  noCap?: boolean;
   /** never compares bd with the body (fails S-PO-4) */
   noBodyDigest?: boolean;
   /** spends the jti only after the body digest matched (fails S-PO-4: the same K14 with the right body then runs) */

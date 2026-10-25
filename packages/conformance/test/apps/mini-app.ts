@@ -458,7 +458,7 @@ export async function startMiniApp(released: Manifest, env: Record<string, strin
 
   // claim (once; again only after a refused identity with a NEW enrolment code, SDK-API §13 v0.1.12)
   async function claim(reclaim: boolean): Promise<void> {
-    const r = await bridge("POST", "/tb/v1/claim", { code: env.TB_ENROL_CODE, instancePublicKey: key.publicJwk, manifestDigest: mDigest, version: manifest.version, sdkVersion: faults.reportedSdkVersion ?? `${manifest.sdkMajor}.0.0`, ...(faults.noProofClaims ? {} : { proofClaims: ["bd"] }) }, undefined, {}, false);
+    const r = await bridge("POST", "/tb/v1/claim", { code: env.TB_ENROL_CODE, instancePublicKey: key.publicJwk, manifestDigest: mDigest, version: manifest.version, sdkVersion: faults.reportedSdkVersion ?? `${manifest.sdkMajor}.0.0`, ...(faults.noProofClaims ? {} : { proofClaims: ["bd"] }), ...(faults.personOp?.noCap ? {} : { caps: ["person_op"] }) }, undefined, {}, false);
     if (r.status !== 200 || !isObj(r.body) || r.body.ins !== ins) throw new Error(`claim failed: ${r.status}`);
     st.claimed = true;
     st.codeDigest = sha(env.TB_ENROL_CODE ?? "");
@@ -508,7 +508,7 @@ export async function startMiniApp(released: Manifest, env: Record<string, strin
         const r = await bridge(
           "POST",
           `/tb/v1/status?wait=${now ? 0 : 60}`,
-          { readiness: "ready", version: manifest.version, sdkVersion: `${manifest.sdkMajor}.0.0`, scopesRev: 0, sliceRevision: slice?.rev ?? 0, keysRev, pendingHolds: pending(), ...(faults.noProofClaims ? {} : { proofClaims: ["bd"] }) },
+          { readiness: "ready", version: manifest.version, sdkVersion: `${manifest.sdkMajor}.0.0`, scopesRev: 0, sliceRevision: slice?.rev ?? 0, keysRev, pendingHolds: pending(), ...(faults.noProofClaims ? {} : { proofClaims: ["bd"] }), ...(faults.personOp?.noCap ? {} : { caps: ["person_op"] }) },
           AbortSignal.any([stop.signal, poll.signal]),
         );
         first = false;
@@ -545,7 +545,7 @@ export async function startMiniApp(released: Manifest, env: Record<string, strin
       if (r.status === 200 || r.status === 202) return r.body as Json;
       const code = String(((r.body as { error?: { code?: string } } | null)?.error?.code) ?? "app_error");
       if (attempt === 0 && code === "grant_stale" && !faults.noCompanionRetry) {
-        const s0 = await bridge("POST", "/tb/v1/status?wait=0", { readiness: "ready", version: manifest.version, sdkVersion: `${manifest.sdkMajor}.0.0`, scopesRev: 0, sliceRevision: 0, keysRev, pendingHolds: pending(), ...(faults.noProofClaims ? {} : { proofClaims: ["bd"] }) });
+        const s0 = await bridge("POST", "/tb/v1/status?wait=0", { readiness: "ready", version: manifest.version, sdkVersion: `${manifest.sdkMajor}.0.0`, scopesRev: 0, sliceRevision: 0, keysRev, pendingHolds: pending(), ...(faults.noProofClaims ? {} : { proofClaims: ["bd"] }), ...(faults.personOp?.noCap ? {} : { caps: ["person_op"] }) });
         if (s0.status === 200 && isObj(s0.body) && typeof s0.body.slice === "string") installSlice(s0.body.slice);
         continue;
       }

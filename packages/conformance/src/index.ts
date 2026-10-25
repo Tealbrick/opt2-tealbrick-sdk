@@ -29,7 +29,7 @@ export { applyLevelCrud, LEVEL_CRUD_ENV, type LevelCrudChange, parseLevelCrud } 
 export { KeyAgent, McpSession, OAuthAgent, parseForms, pkcePair } from "./mcp-agent.ts";
 export { type AppDriver, DECOY_PRODUCT, type MultiAppDeps, PEER_SETTINGS_ENV, type PreparedPeer, preparePeers, runPeerChecks } from "./multi-app.ts";
 export { defaultCacheRoot, extractArchive, fetchVerifiedIndex, githubSource, INDEX_BASES, type LoadedPeer, loadPeer, PeerError, type PeerSourceOptions, peerCacheDir, RELEASE_KEYS, type ReleaseRecord, removePeerCaches, selectRecord } from "./peer-source.ts";
-export { bodyDigest, mintPersonOp, PERSON_OP_HEADER, PERSON_OP_ROUTE, PERSON_OP_SINCE, PERSON_OPS_CAP, type PersonOpMint } from "./person-op.ts";
+export { APP_CAPS_LIMITS, bodyDigest, declaredAppCaps, mintPersonOp, PERSON_OP_APP_CAP, PERSON_OP_BRIDGE_REFUSALS, PERSON_OP_HEADER, PERSON_OP_ROUTE, PERSON_OPS_CAP, type PersonOpMint } from "./person-op.ts";
 export { loadSdk, REAL_ENTRIES, REAL_OPS, type RealApp, type RealCompanion, type RealRunningApp, type RealStartContext, realAppManifest, type SdkModule, startRealApp } from "./real-app.ts";
 export {
   applyWaivers,

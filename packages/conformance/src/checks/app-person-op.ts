@@ -1,7 +1,7 @@
 // S-PO (conformance 0.1.31, spec 0.1.64, SDK-API §21, CREDENTIALS K14, C326): the app's private `POST /tb/v1/person-op`, driven
 // the way the workspace bridge forwards a relayed person op. The suite plays Core: every K14 is signed with the fake bridge's Portal
-// key (the key the app trusts for `iss tb:portal`). An app that reports an SDK older than the first release with the route
-// (PERSON_OP_SINCE) gets not_applicable by version. The probe op of the token rows is `tb.export`: it is on no product's
+// key (the key the app trusts for `iss tb:portal`). The rows apply to an app that DECLARES the `person_op` capability (spec 0.1.69,
+// C354) in its claim or its latest status push; any other app gets not_applicable (by capability, never by version). The probe op of the token rows is `tb.export`: it is on no product's
 // PERSON_OP_RELAY.allow entry, so a K14 that passes every token and digest check is answered 403 person_op_not_allowed (the
 // positive control), and a refusal at an earlier step is 401 person_op_invalid (CHECK ORDER of SDK-API §21).
 import { mkdirSync } from "node:fs";
@@ -10,11 +10,10 @@ import { ulid, withStandardOps } from "@opt2-tealbrick/manifest";
 import { PERSON_OP_RELAY } from "@opt2-tealbrick/spec/routes";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 import { errorCode, type HttpAnswer } from "../http.ts";
-import { mintPersonOp, newIdk, PERSON_OP_HEADER, PERSON_OP_ROUTE, PERSON_OP_SINCE, type PersonOpMint } from "../person-op.ts";
+import { declaredAppCaps, mintPersonOp, newIdk, PERSON_OP_APP_CAP, PERSON_OP_HEADER, PERSON_OP_ROUTE, type PersonOpMint } from "../person-op.ts";
 import { sampleInput } from "../sample.ts";
 import { bad, na, notRun, type Outcome, type Suite, verdict } from "../suite.ts";
 import { newId, nowS } from "../tokens.ts";
-import { versionBelow } from "../version.ts";
 import type { AppTargetContext } from "./app.ts";
 
 export const PERSON_OP_APP_TITLES = {
@@ -46,9 +45,16 @@ export async function personOpAppChecks(s: Suite, ctx: AppTargetContext, deps: P
   const m = ctx.manifest;
   const c = () => ctx.client();
   const T = ctx.timeoutMs;
-  const v = b.claims[0]?.request.sdkVersion;
-  const gate = (): Outcome | null =>
-    versionBelow(v, PERSON_OP_SINCE) ? na(`SDK ${v} (self-reported) predates ${PERSON_OP_SINCE} (POST ${PERSON_OP_ROUTE}, spec 0.1.64): not applicable by version`) : null;
+  // the raw `caps` member (spec 0.1.69 ClaimRequest.caps / AppStatus.caps; the pinned 0.1.64 types do not name it)
+  const rawCaps = (v: unknown): unknown => (v && typeof v === "object" ? (v as { caps?: unknown }).caps : undefined);
+  const gate = (): Outcome | null => {
+    const claim = rawCaps(b.claims.at(-1)?.request);
+    const status = rawCaps(b.statuses.filter((x) => x.ins === b.ids.ins).at(-1)?.status);
+    if (declaredAppCaps(claim).includes(PERSON_OP_APP_CAP) || declaredAppCaps(status).includes(PERSON_OP_APP_CAP)) return null;
+    return na(
+      `the app does not declare the ${PERSON_OP_APP_CAP} capability (claim caps ${JSON.stringify(claim ?? null)}, latest status caps ${JSON.stringify(status ?? null)}): POST ${PERSON_OP_ROUTE} is not announced, so this row does not apply (decided by capability, never by version, C354)`,
+    );
+  };
   const row = (id: Row, expected: string, fn: () => Promise<Outcome> | Outcome) => s.run(id, PERSON_OP_APP_TITLES[id], expected, async () => gate() ?? fn());
 
   const mint = (o: Partial<PersonOpMint> & { op: string; body: string }) => mintPersonOp({ key: b.activePortalKey(), ws: b.ids.ws, ins: b.ids.ins, person: b.ids.person, ...o });

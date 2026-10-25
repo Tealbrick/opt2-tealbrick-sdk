@@ -134,6 +134,8 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
     "R-PO-4": "no relayed body, app answer or K14 in the bridge's logs",
     "R-PO-5": "one forward per pop, never retried (app answers 500, or holds past the forward timeout)",
     "R-PO-6": "result status: app unreachable → -1; timeout after sending → 0; the app's status passed through",
+    "R-PO-7": "a row for an app that does not declare person_op (spec 0.1.69, C354) → result 409 person_op_unsupported; nothing reaches the app",
+    "R-PO-8": "malformed app caps (not an array of strings within APP_CAPS_LIMITS) count as none (→ 409 person_op_unsupported); an unknown entry next to person_op is ignored (→ forwarded)",
   }),
   // C91: a REAL @opt2-tealbrick/miniapp-sdk app behind the bridge (the fake apps cannot catch a binding the SDK refuses)
   real_app: ids({

@@ -3,6 +3,7 @@
 // posted to /api/v1/bridge/person-ops/{pop}/result. Each fault breaks exactly one rule so a test can prove the matching R-PO row fails.
 import type { WorkspaceConfig } from "@opt2-tealbrick/spec/bridge";
 import { type BridgePersonOp, PERSON_OP_RELAY } from "@opt2-tealbrick/spec/routes";
+import { declaredAppCaps, PERSON_OP_APP_CAP, PERSON_OP_BRIDGE_REFUSALS } from "../../src/person-op.ts";
 
 export interface MiniPersonOpFaults {
   /** forwards a re-serialisation of the body instead of its bytes (fails R-PO-3) */
@@ -15,11 +16,17 @@ export interface MiniPersonOpFaults {
   unknownInsNotDelivered?: boolean;
   /** maps a refused connection to 0 instead of -1 (fails R-PO-6) */
   zeroForUnreachable?: boolean;
+  /** forwards to an app whatever caps it declares (fails R-PO-7 and R-PO-8) */
+  ignoresAppCaps?: boolean;
+  /** reads caps leniently: a string or an over-long list still counts when it contains person_op (fails R-PO-8) */
+  lenientAppCaps?: boolean;
 }
 
 export interface MiniPersonOpDeps {
   portalCall(method: string, path: string, body?: unknown, timeoutMs?: number): Promise<Response>;
   config(): WorkspaceConfig | null;
+  /** the raw `caps` of the app's latest status push (undefined = none seen) */
+  appCaps(ins: string): unknown;
   stopped(): boolean;
   log(line: string): void;
   faults: MiniPersonOpFaults;
@@ -48,7 +55,10 @@ export function runMiniPersonOps(d: MiniPersonOpDeps): void {
   const handle = async (item: BridgePersonOp): Promise<void> => {
     const app = d.config()?.apps.find((a) => a.ins === item.ins);
     let result: { status: number; body: string };
-    if (!app) result = { status: f.unknownInsNotDelivered ? -1 : 409, body: JSON.stringify({ error: { code: "instance_unknown", message: "the app instance is not in this bridge's config", requestId: "req_mini" } }) };
+    const raw = d.appCaps(item.ins);
+    const declares = f.ignoresAppCaps || (f.lenientAppCaps ? (typeof raw === "string" || Array.isArray(raw)) && raw.includes(PERSON_OP_APP_CAP) : declaredAppCaps(raw).includes(PERSON_OP_APP_CAP));
+    if (!app) result = { status: f.unknownInsNotDelivered ? -1 : 409, body: JSON.stringify({ error: { code: PERSON_OP_BRIDGE_REFUSALS.instanceUnknown, message: "the app instance is not in this bridge's config", requestId: "req_mini" } }) };
+    else if (!declares) result = { status: 409, body: JSON.stringify({ error: { code: PERSON_OP_BRIDGE_REFUSALS.appUnsupported, message: "the app does not declare person_op", requestId: "req_mini" } }) };
     else {
       result = await forward(app.internalUrl, item);
       if (f.retries && (result.status >= 500 || result.status === 0)) result = await forward(app.internalUrl, item);
