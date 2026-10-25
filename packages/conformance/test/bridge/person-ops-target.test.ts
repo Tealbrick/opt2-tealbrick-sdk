@@ -53,7 +53,7 @@ describe("bridge target: person-op relay (R-PO, spec 0.1.64)", () => {
       [{ personOps: true, personOpFaults: { unknownInsNotDelivered: true } }, ["R-PO-2"]],
       [{ personOps: true, personOpFaults: { zeroForUnreachable: true } }, ["R-PO-6"]],
       [{ personOpsWithoutCap: true }, ["R-PO-1", "B9.portal_paths"]],
-      // spec 0.1.69 (C354): a bridge that forwards whatever the app declares, or that reads malformed caps as a declaration
+      // spec 0.1.70 (C354): a bridge that forwards whatever the app declares, or that reads malformed caps as a declaration
       [{ personOps: true, personOpFaults: { ignoresAppCaps: true } }, ["R-PO-7", "R-PO-8"]],
       [{ personOps: true, personOpFaults: { lenientAppCaps: true } }, ["R-PO-8"]],
     ];

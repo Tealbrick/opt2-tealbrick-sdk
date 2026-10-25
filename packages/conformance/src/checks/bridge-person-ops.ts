@@ -4,6 +4,7 @@
 // fake Portal queues rows with a K14 signed by its key and records the result posts) and the app (the primary fake app answers
 // `POST /tb/v1/person-op` as each row plans it and records the exact bytes it received).
 import { ulid } from "@opt2-tealbrick/manifest";
+import type { AppStatus } from "@opt2-tealbrick/spec/bridge";
 import type { InstanceId } from "@opt2-tealbrick/spec/credentials";
 import { PERSON_OP_RELAY } from "@opt2-tealbrick/spec/routes";
 import type { OpAnswerSpec, Received } from "../fake-app.ts";
@@ -64,9 +65,9 @@ export async function personOpChecks(c: BridgeCtx): Promise<void> {
     answerMarkers.push(m);
     return code ? { error: { code, message: `conformance ${m}`, requestId: "req_tbconf" } } : { status: "ok", output: { marker: m, ...extra } };
   };
-  /** the primary app's status push with these `caps` (spec 0.1.69 AppStatus.caps; raw, the pinned 0.1.64 type lacks it) */
+  /** the primary app's status push with these `caps` (spec 0.1.70 AppStatus.caps; malformed values on purpose in R-PO-8) */
   const declare = async (caps: unknown): Promise<string> => {
-    const a = await app.status({ caps } as never, 0);
+    const a = await app.status({ caps: caps as AppStatus["caps"] }, 0);
     return a.status === 200 || a.status === 204 ? "" : `status push with caps ${JSON.stringify(caps)?.slice(0, 60)} → ${a.status}`;
   };
   const codeOf = (r: PersonOpResultSeen): string | null => {
@@ -107,7 +108,7 @@ export async function personOpChecks(c: BridgeCtx): Promise<void> {
       return verdict(waitOk && portal.personOpPollsMaxOpen <= 1, `${polls.length} accepted polls; wait ${JSON.stringify(waits)}; at most ${portal.personOpPollsMaxOpen} open at once`);
     });
 
-    // spec 0.1.69 (C354): the bridge forwards only to an app whose latest claim / status declares person_op
+    // spec 0.1.70 (C354): the bridge forwards only to an app whose latest claim / status declares person_op
     const declared = await declare([PERSON_OP_APP_CAP]);
     if (declared) {
       for (const id of ["R-PO-2", "R-PO-3", "R-PO-5", "R-PO-6", "R-PO-7", "R-PO-8", "R-PO-4"]) await c.run(id, title(id), "the primary app declares person_op in a status push", () => bad(`the primary app's ${declared}`));

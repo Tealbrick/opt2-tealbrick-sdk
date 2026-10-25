@@ -1,6 +1,6 @@
 // S-PO (conformance 0.1.31, spec 0.1.64, SDK-API §21, CREDENTIALS K14, C326): the app's private `POST /tb/v1/person-op`, driven
 // the way the workspace bridge forwards a relayed person op. The suite plays Core: every K14 is signed with the fake bridge's Portal
-// key (the key the app trusts for `iss tb:portal`). The rows apply to an app that DECLARES the `person_op` capability (spec 0.1.69,
+// key (the key the app trusts for `iss tb:portal`). The rows apply to an app that DECLARES the `person_op` capability (spec 0.1.70,
 // C354) in its claim or its latest status push; any other app gets not_applicable (by capability, never by version). The probe op of the token rows is `tb.export`: it is on no product's
 // PERSON_OP_RELAY.allow entry, so a K14 that passes every token and digest check is answered 403 person_op_not_allowed (the
 // positive control), and a refusal at an earlier step is 401 person_op_invalid (CHECK ORDER of SDK-API §21).
@@ -45,11 +45,10 @@ export async function personOpAppChecks(s: Suite, ctx: AppTargetContext, deps: P
   const m = ctx.manifest;
   const c = () => ctx.client();
   const T = ctx.timeoutMs;
-  // the raw `caps` member (spec 0.1.69 ClaimRequest.caps / AppStatus.caps; the pinned 0.1.64 types do not name it)
-  const rawCaps = (v: unknown): unknown => (v && typeof v === "object" ? (v as { caps?: unknown }).caps : undefined);
+  // ClaimRequest.caps / AppStatus.caps (spec 0.1.70) as the app sent them: a malformed value counts as none (APP_CAPS_LIMITS)
   const gate = (): Outcome | null => {
-    const claim = rawCaps(b.claims.at(-1)?.request);
-    const status = rawCaps(b.statuses.filter((x) => x.ins === b.ids.ins).at(-1)?.status);
+    const claim: unknown = b.claims.at(-1)?.request.caps;
+    const status: unknown = b.statuses.filter((x) => x.ins === b.ids.ins).at(-1)?.status.caps;
     if (declaredAppCaps(claim).includes(PERSON_OP_APP_CAP) || declaredAppCaps(status).includes(PERSON_OP_APP_CAP)) return null;
     return na(
       `the app does not declare the ${PERSON_OP_APP_CAP} capability (claim caps ${JSON.stringify(claim ?? null)}, latest status caps ${JSON.stringify(status ?? null)}): POST ${PERSON_OP_ROUTE} is not announced, so this row does not apply (decided by capability, never by version, C354)`,

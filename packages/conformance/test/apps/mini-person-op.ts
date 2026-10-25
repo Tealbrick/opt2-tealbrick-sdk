@@ -10,7 +10,7 @@ import { PERSON_OP_RELAY } from "@opt2-tealbrick/spec/routes";
 import type { Json, OperationView, TrustContext } from "@opt2-tealbrick/spec/sdk";
 
 export interface MiniPersonOpFaults {
-  /** declares no `person_op` capability in its claim and status pushes (spec 0.1.69, C354): the S-PO rows are not_applicable */
+  /** declares no `person_op` capability in its claim and status pushes (spec 0.1.70, C354): the S-PO rows are not_applicable */
   noCap?: boolean;
   /** never compares bd with the body (fails S-PO-4) */
   noBodyDigest?: boolean;
@@ -122,7 +122,14 @@ export async function startMiniStandalone(manifest: Manifest, environment: Recor
     if (req.method === "POST" && path === "/tb/v1/person-op") return send(f.servedStandalone ? env(403, "person_op_not_allowed") : env(503, "person_op_unavailable"));
     send(env(404, "not_found"));
   });
-  await new Promise<void>((r) => server.listen(port || Number(environment.TBCONF_PORT ?? 0), "127.0.0.1", () => r()));
+  // a port taken meanwhile (EADDRINUSE) rejects instead of leaving the start pending forever
+  await new Promise<void>((r, j) => {
+    server.once("error", j);
+    server.listen(port || Number(environment.TBCONF_PORT ?? 0), "127.0.0.1", () => {
+      server.off("error", j);
+      r();
+    });
+  });
   const addr = server.address() as { port: number };
   return {
     url: `http://127.0.0.1:${addr.port}`,

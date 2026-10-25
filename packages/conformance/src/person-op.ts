@@ -3,6 +3,7 @@
 // a Portal key of the fake (the fake Portal in the bridge target, the fake bridge's Portal key in the app target). The manifest
 // package has no K14 signer yet (it pins a spec before 0.1.64), so the token is built with `rawSign` over the CLOSED claim set.
 import { type Ed25519KeyPair, sha256Bytes, ulid } from "@opt2-tealbrick/manifest";
+import { APP_CAPS_LIMITS, type AppCap, PERSON_OP_BRIDGE_REFUSALS } from "@opt2-tealbrick/spec/bridge";
 import { type InstanceId, LIFETIME_S, type PersonId, type PersonOpClaims, type Sha256Digest, TYP, type WorkspaceId } from "@opt2-tealbrick/spec/credentials";
 import type { PersonOpId } from "@opt2-tealbrick/spec/routes";
 import { newId, nowS, rawSign } from "./tokens.ts";
@@ -11,22 +12,17 @@ import { newId, nowS, rawSign } from "./tokens.ts";
 export const PERSON_OPS_CAP = "person_ops";
 /** The app's private route (SDK-API §21). */
 export const PERSON_OP_ROUTE = "/tb/v1/person-op";
-/** SPEC-GAP: spec 0.1.64 names the header in SDK-API §21 / BRIDGE §16 only (no constant in BRIDGE_HEADERS). */
+/** SPEC-GAP (spec 0.1.70): the spec names the header in SDK-API §21 / BRIDGE §16 only (no constant in BRIDGE_HEADERS). */
 export const PERSON_OP_HEADER = "TB-Person-Op";
-/**
- * spec 0.1.69 (C354): the app capability for `POST /tb/v1/person-op` (APP_CAPS), declared in ClaimRequest.caps and every
- * AppStatus.caps. Gates read it, never a version number. SPEC-GAP: the pinned spec is 0.1.64 (no APP_CAPS, APP_CAPS_LIMITS,
- * PERSON_OP_BRIDGE_REFUSALS yet), so the values are written here with the 0.1.69 numbers and the raw `caps` member is read; they
- * go when the pin moves to 0.1.69.
- */
-export const PERSON_OP_APP_CAP = "person_op";
-export const APP_CAPS_LIMITS = { maxEntries: 16, maxLength: 32 } as const;
-export const PERSON_OP_BRIDGE_REFUSALS = { instanceUnknown: "instance_unknown", appUnsupported: "person_op_unsupported" } as const;
+/** spec 0.1.70 (C354): the app capability for `POST /tb/v1/person-op` (APP_CAPS), declared in ClaimRequest.caps and every
+ *  AppStatus.caps. Gates read it, never a version number. */
+export const PERSON_OP_APP_CAP: AppCap = "person_op";
+export { APP_CAPS_LIMITS, PERSON_OP_BRIDGE_REFUSALS };
 
-/** The caps an app declares (spec 0.1.69): a value that is not an array of strings within APP_CAPS_LIMITS = none (fail closed). */
+/** The caps an app declares (spec 0.1.70; unknown entries pass through, readers ignore them): a value that is not an array of strings within APP_CAPS_LIMITS = none (fail closed). */
 export function declaredAppCaps(v: unknown): string[] {
   if (!Array.isArray(v) || v.length > APP_CAPS_LIMITS.maxEntries) return [];
-  if (!v.every((x) => typeof x === "string" && x.length > 0 && x.length <= APP_CAPS_LIMITS.maxLength)) return [];
+  if (!v.every((x) => typeof x === "string" && x.length <= APP_CAPS_LIMITS.maxLength)) return [];
   return v as string[];
 }
 /** Core → bridge pull and bridge → Core result paths (routes.ts bridge_api.person_ops / bridge_api.person_op_result). */

@@ -1105,7 +1105,14 @@ export async function startMiniApp(released: Manifest, env: Record<string, strin
   }
 
   const server = createServer((req, res) => void handle(req, res));
-  await new Promise<void>((r) => server.listen(port || Number(env.TBCONF_PORT ?? 0), "127.0.0.1", () => r()));
+  // a port taken meanwhile (EADDRINUSE) rejects instead of leaving the start pending forever
+  await new Promise<void>((r, j) => {
+    server.once("error", j);
+    server.listen(port || Number(env.TBCONF_PORT ?? 0), "127.0.0.1", () => {
+      server.off("error", j);
+      r();
+    });
+  });
   const addr = server.address() as { port: number };
   return {
     url: `http://127.0.0.1:${addr.port}`,

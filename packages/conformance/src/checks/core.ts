@@ -27,8 +27,14 @@ const OWNER_CLI_WRITES = ["owner_sessions.logout", "push_devices.register", "pus
 /**
  * R5 tokens a named row may carry, with the spec text that makes it a different op family: `person_ops.call` (PORTAL-API v0.1.64 B)
  * relays ONE allow-listed person op of one app instance for a tbm owner session (PERSON_OP_RELAY); it is not tool execution.
+ * `licences.staff_comp` is the exception PORTAL-API §6 itself names.
  */
-const R5_ALLOWED: Record<string, readonly string[]> = { "person_ops.call": ["call"] };
+const R5_ALLOWED: Record<string, readonly string[]> = {
+  "person_ops.call": ["call"],
+  // PORTAL-API §6 names it as the one exception to "admin/staff routes" (v0.1.67, C331 D1): a free licence for the staff member's
+  // OWN account on a non-live Core only
+  "licences.staff_comp": ["staff"],
+};
 /** RFC 8628 polling codes carried as `error.code` (CORE §8, C15). */
 const DEVICE_POLL_CODES = ["authorization_pending", "slow_down", "access_denied", "expired_token"] as const;
 

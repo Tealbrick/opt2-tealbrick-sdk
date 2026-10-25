@@ -13,6 +13,8 @@ export const SDK_COVERAGE: Readonly<Record<string, readonly string[]>> = {
   keySetFrom: ["C5.grant_unannounced_kid", "C5.proof_unannounced_kid", "C5.bridge_key_rotation"],
   manifestDigest: ["M3", "A1", "A1.manifest_served", "A1.health"],
   RECEIPT_STATUSES: ["A4.holds_list", "A10", "A4.mark_after_failed"],
+  // spec 0.1.70 (follow-up of specs#49): the TbError codes of the model-role helpers; same family as modelRole (sdk#52 adds its rows)
+  SDK_MODEL_ERROR_CODES: ["C8.keys_via_bridge"],
   renderSkill: ["B17.served_as_rendered", "B7.skills_resources"],
   isPrivateInternalUrl: ["B21.internal_url_external", "B21.own_infra_flag_required", "B21.own_infra_allowed", "B21.neighbour_url_refused"],
   portalRootKeys: ["A13.kss_pinned", "B20.kss_enrolled"],

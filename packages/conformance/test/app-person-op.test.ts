@@ -1,5 +1,5 @@
 // conformance 0.1.31 (spec 0.1.64, SDK-API §21): the S-PO rows pass against the mini app and the REAL miniapp-sdk, are
-// not_applicable for an app that does not declare the `person_op` capability (spec 0.1.69, C354; never by version), and FAIL against
+// not_applicable for an app that does not declare the `person_op` capability (spec 0.1.70, C354; never by version), and FAIL against
 // mini-app variants that break one rule each. The relayed write of S-PO-11 needs a product on PERSON_OP_RELAY.allow: the `inbox`
 // variant of the sample manifest declares the allow-listed person ops. The real-SDK case runs the workspace miniapp-sdk, or the
 // checkout named by TBCONF_SDK_DIR; it is skipped (with the reason) when that checkout has no person-op route at all.

@@ -17,5 +17,8 @@ const all = globSync("test/**/*.test.ts", { cwd: root }).sort();
 for (const f of CONFORMANCE) if (!all.includes(f)) throw new Error(`run-tests: conformance file ${f} not found`);
 const files = all.filter((f) => CONFORMANCE.has(f) === (group === "conformance"));
 console.log(`run-tests ${group}: ${files.length} file(s)`);
-const r = spawnSync(process.execPath, ["--test", ...files], { cwd: root, stdio: "inherit" });
+// --test-timeout: a test without its own timeout that waits on something no handle will ever settle fails with "timed out" and its
+// name (the per-test timer keeps the loop alive), instead of the whole file ending as an unnamed cancel ("Promise resolution is still
+// pending but the event loop has already resolved"). Tests that need longer set their own { timeout }.
+const r = spawnSync(process.execPath, ["--test", "--test-timeout=600000", ...files], { cwd: root, stdio: "inherit" });
 process.exit(r.status ?? 1);

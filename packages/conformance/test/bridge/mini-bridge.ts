@@ -185,7 +185,15 @@ const read = async (req: IncomingMessage) => {
   for await (const c of req) chunks.push(c as Buffer);
   return Buffer.concat(chunks);
 };
-const listen = (srv: Server, port: number) => new Promise<void>((r) => srv.listen(port, "127.0.0.1", () => r()));
+/** a port taken meanwhile (EADDRINUSE) rejects instead of leaving the start pending forever */
+const listen = (srv: Server, port: number) =>
+  new Promise<void>((r, j) => {
+    srv.once("error", j);
+    srv.listen(port, "127.0.0.1", () => {
+      srv.off("error", j);
+      r();
+    });
+  });
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const peekJwt = (t: string): Record<string, unknown> => {
   try {
@@ -319,7 +327,7 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     }
   })();
 
-  // spec 0.1.64 (BRIDGE §16): the person-op relay; spec 0.1.69 (C354): the caps of each app's latest status push
+  // spec 0.1.64 (BRIDGE §16): the person-op relay; spec 0.1.70 (C354): the caps of each app's latest status push
   const appCaps = new Map<string, unknown>();
   if (flags.personOps || flags.personOpsWithoutCap) runMiniPersonOps({ portalCall, config: () => cfg, appCaps: (ins) => appCaps.get(ins), stopped: () => stopped, log: (l) => logLines.push(l), faults: flags.personOpFaults ?? {} });
 
@@ -777,7 +785,7 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
       if (!ins) return send(res, 401, { error: { code: "unauthenticated", message: "instance assertion refused", requestId: "req_mini" } });
       const pushedBody = JSON.parse(raw.toString() || "{}") as { sliceRevision?: number; caps?: unknown };
       const pushed = pushedBody.sliceRevision;
-      // spec 0.1.69 (C354): every push states the app's current caps (the relay forwards only to an app that declares person_op)
+      // spec 0.1.70 (C354): every push states the app's current caps (the relay forwards only to an app that declares person_op)
       appCaps.set(ins, pushedBody.caps);
       const wait = Math.min(10, Number(new URL(req.url ?? "/", "http://x").searchParams.get("wait") ?? 0) || 0);
       const end = Date.now() + wait * 1000;
