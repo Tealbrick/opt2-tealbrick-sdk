@@ -159,21 +159,30 @@ describe("kit", () => {
   });
 
   test("QA-SDK48-5/-7/-8: lazy pair as the bridge lists it; tb-gen check honours --package-name; the skills tool schema", (t) => {
-    assert.deepEqual(lazyPairDefs("knowledge", "Knowledge", []), []);
-    const pair = lazyPairDefs("knowledge", "Knowledge", [
+    assert.deepEqual(lazyPairDefs("knowledge", "Knowledge", [], [{ effect: "destructive" }]), []);
+    const lazy = [
       { id: "a1", effect: "read" },
       { id: "a2", effect: "write" },
       { id: "a3", effect: "destructive" },
       { id: "a4", effect: "read" },
       { id: "a5", effect: "read" },
       { id: "a6", effect: "outward" },
-    ]);
+    ];
+    const pair = lazyPairDefs("knowledge", "Knowledge", lazy, lazy);
     assert.deepEqual(pair.map((d) => d.name), ["knowledge__tb_more_search", "knowledge__tb_more_call"]);
     assert.equal(pair[0]?.effect, "read");
     assert.match(pair[0]?.description ?? "", /6 not listed here \(e\.g\. a1, a2, a3, a4, a5, …\)/u);
-    assert.equal(pair[1]?.effect, "destructive", "widest effect of the lazy ops");
+    assert.equal(pair[1]?.effect, "destructive", "widest effect of the reachable ops");
     assert.deepEqual(pair[1]?.annotations, { readOnlyHint: false, destructiveHint: true, openWorldHint: true });
-    assert.deepEqual(lazyPairDefs("k", "K", [{ id: "r", effect: "read" }])[1]?.annotations, { readOnlyHint: true, destructiveHint: false, openWorldHint: false });
+    assert.deepEqual(lazyPairDefs("k", "K", [{ id: "r", effect: "read" }], [{ effect: "read" }])[1]?.annotations, { readOnlyHint: true, destructiveHint: false, openWorldHint: false });
+    // QA-SDK47D-1: a LISTED destructive op + a lazy read → tb_more_call is not read-only (it reaches the listed op too)
+    const hotDel = lazyPairDefs("k", "K", [{ id: "lazy_find", effect: "read" }], [{ effect: "destructive" }, { effect: "read" }]);
+    assert.equal(hotDel[1]?.effect, "destructive");
+    assert.deepEqual(hotDel[1]?.annotations, { readOnlyHint: false, destructiveHint: true, openWorldHint: false });
+    assert.match(hotDel[0]?.description ?? "", /1 not listed here \(e\.g\. lazy_find\)/u, "the search text names lazy ops only");
+    // a listed money op → openWorld (and money is the widest effect)
+    assert.deepEqual(lazyPairDefs("k", "K", [{ id: "r", effect: "read" }], [{ effect: "money" }])[1]?.annotations, { readOnlyHint: false, destructiveHint: false, openWorldHint: true });
+    assert.equal(lazyPairDefs("k", "K", [{ id: "r", effect: "read" }], [{ effect: "money" }, { effect: "destructive" }])[1]?.effect, "money");
     // -7: `check` with and without the flag
     const dir = temp(t);
     writeRepo(dir, notesJson());

@@ -71,6 +71,7 @@ export const CORE_LIVE_CHECKS: readonly PendingCheck[] = [
   { id: "R10.live_replay", title: "replay of a bodyLog: none request → 409 idempotency_conflict, nothing stored" },
   { id: "R11.flow", title: "onboarding order: bridge enrolled, agent authorised before any app; licence-last; webhook → grants" },
   { id: "R12", title: "pairing approval: principal check, redirect host, unverified client name" },
+  { id: "R-LZ-1", title: "a release with a listing lazy op onto a bridge without the lazy_tools cap → 409 bridge_cap_missing (details.cap), nothing deployed; decided by the cap only" },
   { id: "C7", title: "no issued token exceeds its kind's lifetime" },
   { id: "P2", title: "owner CLI session revoked → next CLI call refused; agents keep working" },
 ];

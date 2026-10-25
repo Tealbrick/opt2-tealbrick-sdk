@@ -836,6 +836,12 @@ function backupArtifactRouteRules(m: Manifest, add: Add): void {
   m.operations.forEach((op, i) => {
     if (op.listing !== undefined && op.audience !== "agent") add("M-OP-11", "listing_invalid", ptr("operations", i, "listing"), "listing applies to agent ops only");
   });
+  // v0.1.31 (spec 0.1.76, M4b, C354): `listing: "lazy"` only on STATIC agent ops. Whether the workspace bridge can serve it is a
+  // capability question (`lazy_tools`, checked by Core and the bridge), never a version minimum here
+  m.operations.forEach((op, i) => {
+    if ((op.listing as string | undefined) === "lazy" && op.dynamic !== undefined) add("M-OP-13", "listing_invalid", ptr("operations", i, "listing"), "lazy applies to static agent ops only (a dynamic family is already one search away)");
+  });
+
 }
 
 // ───────────────────────────── public surface ─────────────────────────────

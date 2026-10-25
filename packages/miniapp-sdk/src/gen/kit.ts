@@ -32,20 +32,22 @@ export interface KitToolDefGen {
   inputSchema: unknown;
   effect: string;
   listing?: "workflow";
-  /** the lazy pair's call tool carries the widest annotations of the lazy ops (BRIDGE §7.5) */
+  /** the lazy pair's call tool carries the widest annotations over EVERY static agent op it reaches, lazy and listed (BRIDGE §7.5) */
   annotations?: { readOnlyHint: boolean; destructiveHint: boolean; openWorldHint: boolean };
 }
 
 /**
- * QA-SDK48-5: the spec 0.1.66 BRIDGE §7.5 lazy pair, exactly as the bridge lists it for a product with lazy ops: names
+ * QA-SDK48-5: the spec 0.1.76 BRIDGE §7.5 lazy pair, exactly as the bridge lists it for a product with lazy ops: names
  * `<product>__tb_more_search` / `<product>__tb_more_call`, the bridge's texts, and on the call tool the widest effect and
- * annotations of the lazy ops. Empty when no op is lazy.
+ * annotations over `reachOps` = every static agent op tb_more_call can reach with a full grant (lazy AND listed, workflow
+ * ops too: TOOLS is the full-grant list). QA-SDK47D-1: lazy ops alone gave readOnlyHint true next to a listed destructive op.
+ * The search tool's text names lazy ops only. Empty when no op is lazy.
  */
-export function lazyPairDefs(productId: string, name: string, lazyOps: readonly { id: string; effect: string }[]): KitToolDefGen[] {
+export function lazyPairDefs(productId: string, name: string, lazyOps: readonly { id: string; effect: string }[], reachOps: readonly { effect: string }[]): KitToolDefGen[] {
   if (lazyOps.length === 0) return [];
   const more = { search: "tb_more_search", call: "tb_more_call", hintIds: 5 };
   const ids = lazyOps.slice(0, more.hintIds).map((o) => o.id).join(", ");
-  const effects = lazyOps.map((o) => o.effect);
+  const effects = [...lazyOps, ...reachOps].map((o) => o.effect);
   const rank = ["read", "write", "outward", "destructive", "money"];
   const widestEffect = effects.reduce((a, b) => (rank.indexOf(b) > rank.indexOf(a) ? b : a), "read");
   const sep = TOOL_NAME_RULE.separator;
@@ -165,6 +167,8 @@ function kitIndex(lm: LoadedManifest): string {
   // register them without an MCP round trip. Dynamic list-mode entries are per agent and are not listed here.
   const toolDefs: KitToolDefGen[] = [];
   const lazyOps: { id: string; effect: string }[] = [];
+  /** every static agent op (lazy and listed): what tb_more_call reaches with a full grant */
+  const staticOps: { id: string; effect: string }[] = [];
   const addMethod = (meth: Method) => {
     if (methods.some((x) => x.name === meth.name)) throw new GenError("name_collision", `client method ${meth.name} is derived twice`);
     methods.push(meth);
@@ -217,8 +221,9 @@ function kitIndex(lm: LoadedManifest): string {
       });
     } else {
       const P = pascal(op.id);
-      // QA-SDK48-5 (forward, spec ≥ 0.1.66 `listing: "lazy"`): a lazy op is not listed; the bridge's more_search/more_call reach it
+      // QA-SDK48-5 (forward, spec ≥ 0.1.76 `listing: "lazy"`): a lazy op is not listed; the bridge's more_search/more_call reach it
       const listing = (op as { listing?: string }).listing;
+      staticOps.push({ id: op.id, effect: op.effect });
       if (listing === "lazy") lazyOps.push({ id: op.id, effect: op.effect });
       else toolDefs.push({ name: mcpToolName(m.id, op.id), title: op.title, description: op.description, inputSchema: op.input ?? { type: "object" }, effect: op.effect, ...(listing === "workflow" ? { listing: "workflow" } : {}) });
       addMethod({
@@ -231,7 +236,7 @@ function kitIndex(lm: LoadedManifest): string {
     }
   }
 
-  toolDefs.push(...lazyPairDefs(m.id, m.name, lazyOps));
+  toolDefs.push(...lazyPairDefs(m.id, m.name, lazyOps, staticOps));
   // QA-SDK48-2: the bridge lists a skills tool for every app (BRIDGE tools.ts `tb_skills`)
   toolDefs.push({ name: `${m.id}${TOOL_NAME_RULE.separator}${TOOL_NAME_RULE.skillsOp}`, title: "Skills", description: `How to use ${m.name}. Without skillId: the skill index. With skillId: that skill's text.`, inputSchema: { type: "object", additionalProperties: false, properties: { skillId: { type: "string", maxLength: 64 } } }, effect: "read" });
   const skills = (m.skills ?? []).map((s) => {
@@ -310,7 +315,7 @@ export type KitToolDef = {
   inputSchema: Record<string, unknown>;
   effect: "read" | "write" | "outward" | "destructive" | "money";
   listing?: "workflow";
-  /** set on \`<product>__tb_more_call\`: the widest annotations of the lazy ops; otherwise use \`toolAnnotations(effect)\` */
+  /** set on \`<product>__tb_more_call\`: the widest annotations over every static agent op it reaches (lazy and listed); otherwise use \`toolAnnotations(effect)\` */
   annotations?: { readOnlyHint: boolean; destructiveHint: boolean; openWorldHint: boolean };
 };
 
