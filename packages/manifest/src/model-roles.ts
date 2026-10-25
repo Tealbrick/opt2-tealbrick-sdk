@@ -33,3 +33,10 @@ export const MODEL_ROLE_ENV_FIELDS = ["provider", "model", "baseUrl", "key", "di
 export function declaredModelRoles(manifest: Manifest): readonly ModelRoleRequirement[] {
   return manifest.settings?.modelRoles ?? [];
 }
+
+/**
+ * M-MR-4 (QA S4-3): env names a model role must not set, because they change how the service connects or loads code: any `*_PROXY`
+ * (a proxy resolves the endpoint itself), `npm_config_*proxy`, `NODE_OPTIONS`, `NODE_EXTRA_CA_CERTS`, `LD_PRELOAD`, `LD_LIBRARY_PATH`,
+ * `PATH`, `DYLD_*`. `tb-exec` also strips proxy names from the env of a role-bound service.
+ */
+export const MODEL_ROLE_ENV_REFUSED = /_proxy$|^proxy$|^npm_config_.*proxy$|^(NODE_OPTIONS|NODE_EXTRA_CA_CERTS|LD_PRELOAD|LD_LIBRARY_PATH|PATH)$|^DYLD_/i;

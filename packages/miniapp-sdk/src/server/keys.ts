@@ -55,13 +55,15 @@ export function createKeys(opts: {
   emit: (names: string[]) => Promise<void>;
   /** v0.1.63: what readiness knows about the model roles changed: push a status */
   rolesChanged?: () => void;
+  /** the verified slice shows the workspace or this instance paused (C349): `getKey` and `modelRole` throw `paused` */
+  paused?: () => boolean;
 }): KeysInternals {
   const { db, manifest, sealer, secrets } = opts;
   const declared = new Map<string, KeyRequirement>((manifest.settings?.keys ?? []).filter((k) => k.usedBy.includes("app")).map((k) => [k.name, k]));
   const cache = new Map<string, string | null>();
   const listeners = new Set<(names: string[]) => void>();
   let rev = 0;
-  const roles = createModelRoles({ manifest, env: opts.env, secrets, log: opts.log, bridge: opts.bridge, rev: () => rev, changed: opts.rolesChanged });
+  const roles = createModelRoles({ manifest, env: opts.env, secrets, log: opts.log, bridge: opts.bridge, rev: () => rev, changed: opts.rolesChanged, paused: opts.paused });
 
   const req = (name: string): KeyRequirement => {
     const k = declared.get(name);
@@ -112,6 +114,7 @@ export function createKeys(opts: {
 
   return {
     async getKey(name) {
+      if (opts.paused?.()) throw new TbError("paused", "this workspace or instance is paused", 403);
       const k = req(name);
       const own = appOwn(name);
       if (own !== null) {

@@ -262,6 +262,18 @@ describe("modelRole() (SDK-API v0.1.63 additions)", T, () => {
       off();
     }
   });
+  test("S3-3 (C349): with the workspace paused in the slice, modelRole() and getKey() throw `paused` although the bridge would answer 200; readiness never says `not set` then; released → works", T, async () => {
+    assert.ok(await modelRole("reasoning"), "resolves before the pause");
+    b.bridge.push(await slice(b.w, PRODUCT, { pause: { workspace: true, agents: [], instances: [] } }));
+    await until(async () => (await modelRole("reasoning").then(() => null, (e: unknown) => (e instanceof TbError && e.code === "paused" ? true : null))) ?? false);
+    await assert.rejects(getKey("DEMO_API_KEY"), (e: unknown) => e instanceof TbError && e.code === "paused");
+    const viaOp = await roleOp(b, s, { role: "reasoning" });
+    assert.equal(viaOp.body.output.threw, "paused");
+    assert.notEqual(lastStatus(b)?.attention?.code, "model_role_missing", "no `Model role not set` text while paused");
+    b.bridge.push(await slice(b.w, PRODUCT, { pause: { workspace: false, agents: [], instances: [] } }));
+    await until(async () => (await modelRole("reasoning").then(() => true, () => null)) ?? false);
+    assert.equal((await modelRole("reasoning"))?.model, "gpt-5.1");
+  });
 });
 
 describe("model role readiness (MANIFEST §7.1)", T, () => {

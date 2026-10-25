@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { after, before, describe, test } from "node:test";
+import { after, afterEach, before, describe, test } from "node:test";
 import { type Ed25519KeyPair, generateKeyPair, manifestDigest, signInstanceAssertion, validateManifest } from "@opt2-tealbrick/manifest";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import { DEFAULT_MANIFEST_PATH, parseArgs } from "../../src/exec/args.ts";
@@ -30,13 +30,34 @@ describe("parseArgs", () => {
   });
 });
 
+test("childEnv: stripProxy removes proxy names AFTER the key and role env went in (an env name cannot bring one back); loader names stay (M-MR-4 refuses them)", () => {
+  const env = childEnv({ PATH: "/bin", HTTPS_PROXY: "http://p", npm_config_proxy: "http://p", NODE_USE_ENV_PROXY: "1", GRPC_PROXY: "x", PROXYLESS: "keep" }, new Map([["ENGINE_KEY", "v"], ["KN_HTTP_PROXY", "http://evil"]]), { stripProxy: true });
+  assert.deepEqual(Object.keys(env).sort(), ["ENGINE_KEY", "PATH", "PROXYLESS"]);
+  assert.equal(childEnv({ HTTPS_PROXY: "http://p" }, new Map(), {}).HTTPS_PROXY, "http://p", "no roles: untouched");
+});
+
 test("childEnv strips every TB_* name and adds the keys", () => {
   const env = childEnv({ PATH: "/bin", TB_KEK: "k", TB_ENROL_CODE: "c", HOME: "/h" }, new Map([["ENGINE_KEY", "v"]]));
   assert.deepEqual(env, { PATH: "/bin", HOME: "/h", ENGINE_KEY: "v" });
 });
 
+/** the tb-exec handles of the model-role tests (`autoStop`): stopped after each test, a failing one included, so its upstream child never outlives it */
+const live = new Set<TbExecHandle>();
+let autoStop = false;
+const track = (h: TbExecHandle): TbExecHandle => {
+  if (autoStop) live.add(h);
+  return h;
+};
+async function stopLive(): Promise<void> {
+  for (const h of live) {
+    h.signal("SIGTERM");
+    await Promise.race([h.exited, new Promise((r) => setTimeout(r, 15_000).unref())]);
+  }
+  live.clear();
+}
+
 function run(w: ExecWorld, extra: string[] = [], controlPort?: number, env: Record<string, string> = {}): TbExecHandle {
-  return startTbExec({ argv: [...extra, "--manifest", w.manifestPath, "--", process.execPath, UPSTREAM, w.outFile], env: { ...w.env, ...env }, host: "127.0.0.1", controlPort, logSink: w.sink });
+  return track(startTbExec({ argv: [...extra, "--manifest", w.manifestPath, "--", process.execPath, UPSTREAM, w.outFile], env: { ...w.env, ...env }, host: "127.0.0.1", controlPort, logSink: w.sink }));
 }
 
 describe("tb-exec with helper and backup", () => {
@@ -407,6 +428,13 @@ describe("tb-exec claim guard (v0.1.12, spine S1)", () => {
 
 // v0.1.39 (spec 0.1.63, BRIDGE §15.4, MANIFEST §7.1): model roles → env of a service started by tb-exec.
 describe("tb-exec model roles (BRIDGE §15.4)", () => {
+  before(() => {
+    autoStop = true;
+  });
+  after(() => {
+    autoStop = false;
+  });
+  afterEach(stopLive);
   const ENV = { provider: "ROLE_PROVIDER", model: "ROLE_MODEL", baseUrl: "ROLE_URL", key: "ROLE_KEY", dims: "ROLE_DIMS" };
   const ROLE_KEY = "role-key-fixture-not-a-secret";
   const emb = (over: Record<string, unknown> = {}) => ({
@@ -502,8 +530,10 @@ describe("tb-exec model roles (BRIDGE §15.4)", () => {
     }
   });
 
-  test("RM-20: a role-bound service never sees HTTP_PROXY, HTTPS_PROXY, ALL_PROXY or NO_PROXY (any case); a service without roles keeps them", { timeout: 40_000 }, async () => {
-    const proxies = { HTTP_PROXY: "http://proxy:3128", https_proxy: "http://proxy:3128", All_Proxy: "socks5://proxy:1080", NO_PROXY: "localhost", no_proxy: "localhost" };
+  test("RM-20: a role-bound service never sees ANY proxy variable (every name ending in _proxy in any case, npm_config_*proxy, NODE_USE_ENV_PROXY); a service without roles keeps them", { timeout: 40_000 }, async () => {
+    const proxies = Object.fromEntries(
+      ["HTTP_PROXY", "https_proxy", "All_Proxy", "NO_PROXY", "no_proxy", "GRPC_PROXY", "grpc_proxy", "PIP_PROXY", "npm_config_proxy", "npm_config_https_proxy", "NODE_USE_ENV_PROXY", "FTP_PROXY", "SOCKS_PROXY", "WSS_PROXY", "GLOBAL_AGENT_HTTP_PROXY"].map((k) => [k, "http://proxy:3128"]),
+    );
     const bound = await execWorld({ helper: false, backup: false, modelRoles: [{ role: "embeddings", required: false, usedBy: [SERVICE], env: ENV }] });
     const plain = await execWorld({ helper: false, backup: false });
     try {
@@ -511,7 +541,7 @@ describe("tb-exec model roles (BRIDGE §15.4)", () => {
       const h2 = run(plain, [], undefined, proxies);
       await until(() => bound.starts().length === 1 && plain.starts().length === 1);
       assert.deepEqual(bound.starts()[0]?.proxyEnv, [], "stripped for a role-bound service");
-      assert.deepEqual(plain.starts()[0]?.proxyEnv, ["All_Proxy", "HTTP_PROXY", "NO_PROXY", "https_proxy", "no_proxy"].sort());
+      assert.deepEqual(plain.starts()[0]?.proxyEnv, Object.keys(proxies).sort(), "a service without roles keeps them");
       await stop(h1);
       await stop(h2);
     } finally {
@@ -555,7 +585,7 @@ describe("tb-exec model roles (BRIDGE §15.4)", () => {
     });
     w.bridge.setRole("vision", emb({ role: "vision", model: "gpt-vision" }));
     try {
-      const h = startTbExec({ argv: ["--manifest", w.manifestPath, "--", process.execPath, UPSTREAM, w.outFile], env: { ...w.env, JOTTER_VISION: "false" }, host: "127.0.0.1", logSink: w.sink });
+      const h = track(startTbExec({ argv: ["--manifest", w.manifestPath, "--", process.execPath, UPSTREAM, w.outFile], env: { ...w.env, JOTTER_VISION: "false" }, host: "127.0.0.1", logSink: w.sink }));
       await until(() => w.starts().length === 1);
       assert.deepEqual(w.starts()[0]?.roleEnv, {});
       assert.deepEqual(w.bridge.roleFetches, [], "no role is fetched");

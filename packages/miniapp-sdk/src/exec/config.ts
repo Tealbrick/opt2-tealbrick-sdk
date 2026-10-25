@@ -8,8 +8,12 @@ import { TbError } from "../server/errors.ts";
 
 export const SDK_VERSION: string = (JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
-/** Proxy variables of a role-bound service's env: a proxy would resolve the name itself and skip the endpoint check (BRIDGE §15.3). */
-export const PROXY_ENV = /^(http_proxy|https_proxy|all_proxy|no_proxy)$/i;
+/**
+ * Proxy variables of a role-bound service's env: a proxy would resolve the name itself and skip the endpoint check (BRIDGE §15.3).
+ * EVERY name ending in `_proxy` (any case: HTTP_PROXY, GRPC_PROXY, PIP_PROXY, SOCKS_PROXY, GLOBAL_AGENT_HTTP_PROXY, NODE_USE_ENV_PROXY,
+ * npm_config_proxy, npm_config_https_proxy ...), `proxy`, and `npm_config_*proxy`.
+ */
+export const PROXY_ENV = /_proxy$|^proxy$|^npm_config_.*proxy$/i;
 
 export interface ExecConfig {
   env: SdkConfig;
@@ -43,7 +47,9 @@ export function loadExecConfig(env: Record<string, string | undefined>, manifest
 /** Child env: the container env minus every TB_* name (KEK, enrolment code stay with tb-exec), plus the keys. `stripProxy` (a role-bound service): minus HTTP(S)_PROXY, ALL_PROXY, NO_PROXY in any case. */
 export function childEnv(base: Record<string, string | undefined>, keys: ReadonlyMap<string, string>, opts: { stripProxy?: boolean } = {}): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(base)) if (v !== undefined && !k.startsWith("TB_") && !(opts.stripProxy && PROXY_ENV.test(k))) out[k] = v;
+  for (const [k, v] of Object.entries(base)) if (v !== undefined && !k.startsWith("TB_")) out[k] = v;
   for (const [k, v] of keys) out[k] = v;
+  // after the key and role env went in: a role env name can no more bring a proxy back (M-MR-4 refuses such names too)
+  if (opts.stripProxy) for (const k of Object.keys(out)) if (PROXY_ENV.test(k)) delete out[k];
   return out;
 }

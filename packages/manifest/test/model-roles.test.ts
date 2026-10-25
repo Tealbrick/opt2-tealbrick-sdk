@@ -124,6 +124,13 @@ describe("RM-1 settings.modelRoles (MANIFEST §7.1)", () => {
     "M-MR-4 env name used twice inside one role",
     refuses("M-MR-4", "model_role_invalid", (m) => (m.settings.modelRoles[1].env.dims = "EMB_KEY"), "/settings/modelRoles/1/env/dims"),
   );
+  for (const name of ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "GRPC_PROXY", "PIP_PROXY", "SOCKS_PROXY", "GLOBAL_AGENT_HTTP_PROXY", "NODE_USE_ENV_PROXY", "NPM_CONFIG_PROXY", "NPM_CONFIG_HTTPS_PROXY", "NODE_OPTIONS", "NODE_EXTRA_CA_CERTS", "LD_PRELOAD", "LD_LIBRARY_PATH", "PATH", "DYLD_INSERT_LIBRARIES"]) {
+    test(`M-MR-4 role env name ${name} (proxy, loader, search path) is refused`, refuses("M-MR-4", "model_role_invalid", (m) => (m.settings.modelRoles[1].env.provider = name), "/settings/modelRoles/1/env/provider"));
+  }
+  test("M-MR-4 ordinary role env names still pass (MODEL, KEY, URL, PROXYLESS_MODE)", () => {
+    const r = mutate((m) => (m.settings.modelRoles[1].env = { provider: "KN_PROVIDER", model: "KN_MODEL", baseUrl: "KN_BASE_URL", key: "KN_API_KEY", dims: "PROXYLESS_DIMS" }));
+    assert.equal(r.ok, true, JSON.stringify(r.ok ? [] : r.errors));
+  });
   test("M-MR-4 the same env name on two different services is fine", () => {
     const r = mutate((m) => {
       const other = structuredClone(m.runtime.services[0]);

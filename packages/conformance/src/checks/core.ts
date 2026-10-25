@@ -186,6 +186,12 @@ export function runCoreStatic(input: CoreStaticInput): CheckResult[] {
   const mixed = routes.filter((r) => r.auth.some((a) => PERSON.has(a)) && r.auth.some((a) => !PERSON.has(a))).map((r) => `${r.opId}: ${r.auth.join("+")}`);
   rec("R1.table.p1_disjoint", "person and non-person classes never on one row (PORTAL-API §1.2 P1)", clean("no row mixes person and non-person auth", mixed));
 
+  // RT9 (PORTAL-API §1.2, spec 0.1.58): the `host` class (K13) is only for `host.*` rows, and a `host.*` row accepts nothing else
+  const rt9 = routes
+    .filter((r) => r.auth.includes("host") !== r.opId.startsWith("host.") || (r.auth.includes("host") && r.auth.some((a) => a !== "host")))
+    .map((r) => `${r.opId}: auth ${r.auth.join("+")}`);
+  rec("R1.table.rt9", "`host` auth only on host.* rows, and host.* rows only host (PORTAL-API §1.2 RT9)", clean("host auth only on host.* rows; host.* rows host only", rt9));
+
   // ── R2: owner native session (K3) = reads + drafts.* (+ logout) ──
   // v0.1.64 (C326, C332): + the session's own push device and the allow-listed person-op relay (PORTAL-API §1.2)
   const ocBad = ownerCli.filter((r) => r.method !== "GET" && !r.opId.startsWith("drafts.") && !r.opId.startsWith("push_devices.") && r.opId !== "person_ops.call" && r.opId !== "owner_sessions.logout").map((r) => `${r.opId} (${r.method})`);

@@ -48,6 +48,8 @@ export function createModelRoles(opts: {
   rev: () => number;
   /** what readiness knows about the roles changed: push a status */
   changed?: () => void;
+  /** the verified slice shows the workspace or this instance paused: pause always wins (C349), whatever the bridge would answer */
+  paused?: () => boolean;
 }): ModelRolesInternals {
   const { manifest } = opts;
   const declared = new Map<string, ModelRoleRequirement>(declaredModelRoles(manifest).filter((r) => r.usedBy.includes("app")).map((r) => [r.role, r]));
@@ -95,6 +97,8 @@ export function createModelRoles(opts: {
   };
 
   const resolve = (role: ModelRole): Promise<ResolvedModelRole | null> => {
+    // no bridge client yet (before the claim): nothing is known, so nothing is cached and nothing is marked resolved; asked again later
+    if (!opts.bridge()) return Promise.resolve(null);
     const rev = opts.rev();
     // a key or base URL of an earlier revision is dropped at once, not only replaced when its role is asked for again
     for (const [r, e] of cache) if (e.rev !== rev) cache.delete(r);
@@ -121,6 +125,7 @@ export function createModelRoles(opts: {
     async modelRole(role) {
       const r = declared.get(role);
       if (!r) throw new TbError("role_undeclared", `model role not declared in settings.modelRoles with usedBy "app": ${String(role)}`, 500);
+      if (opts.paused?.()) throw new TbError("paused", "this workspace or instance is paused", 403);
       // `when` false: the role is not in force for this deployment (the bridge holds no requirement for it)
       if (!inForce().some((x) => x.role === role)) return null;
       const v = await resolve(role);
@@ -145,6 +150,8 @@ export function createModelRoles(opts: {
     },
     missing,
     attention() {
+      // while paused the owner text must not say "not set" (the role may be set; the bridge refuses everything)
+      if (opts.paused?.()) return null;
       const roles = missing();
       if (roles.length === 0) return null;
       return { code: "model_role_missing", reason: `Model role not set: ${roles.join(", ")}. Set it on the Keys and models page.` };

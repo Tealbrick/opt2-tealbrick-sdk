@@ -491,6 +491,10 @@ export async function startApp(
     log,
     bridge: () => (state.claimed ? bridge : null),
     rolesChanged: () => statusChanged(),
+    paused: () => {
+      const p = trust.paused(null);
+      return p.workspace || p.instance;
+    },
     emit: async (names) => {
       try {
         await def.events?.keysChanged?.(names, eventContext());
