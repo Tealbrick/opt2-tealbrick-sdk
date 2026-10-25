@@ -53,6 +53,10 @@ export interface MiniAppFaults {
   skipProofVerify?: boolean;
   skipGrantVerify?: boolean;
   ignorePause?: boolean;
+  /** QA-SPEC49-25 (P4): an app that decides "agent paused" from `slice.pause.agents` only, never from `agents[].status` */
+  pauseAgentsListOnly?: boolean;
+  /** RM-17 (A23): a required model role the bridge cannot serve (404, no route) is taken as resolved: a guess */
+  modelRoleGuess?: boolean;
   ticketReusable?: boolean;
   noIdempotencyConflict?: boolean;
   servesClaimRoute?: boolean;
@@ -448,12 +452,26 @@ export async function startMiniApp(released: Manifest, env: Record<string, strin
     return { status: res.status, body: text ? JSON.parse(text) : null };
   }
 
+  /** model roles (spec 0.1.63): required roles of the app the bridge cannot serve (unset, below policy, no route) keep it needs_keys */
+  const requiredRoles = ((manifest.settings as { modelRoles?: { role: string; required: boolean; usedBy: string[] }[] } | undefined)?.modelRoles ?? []).filter((r) => r.required && r.usedBy.includes("app"));
+  let roleMissing: string[] = [];
+  async function refreshRoles(): Promise<void> {
+    const missing: string[] = [];
+    for (const r of requiredRoles) {
+      const a = await bridge("GET", `/tb/v1/model-roles/${r.role}`);
+      // 404 (role_not_set, or no route at all) and 403 role_policy_too_low = not resolved; a guess takes the 404 for resolved
+      if (!(a.status === 200 || (faults.modelRoleGuess && a.status === 404))) missing.push(r.role);
+    }
+    roleMissing = missing;
+  }
+  const roleStatus = () => (roleMissing.length > 0 ? { readiness: "needs_keys", attention: { code: "model_role_missing", reason: `Model role not set: ${roleMissing.join(", ")}.` } } : { readiness: "ready" });
   async function fetchKeys(): Promise<void> {
     keyCache.clear();
     for (const k of declaredKeys) {
       const r = await bridge("GET", `/tb/v1/keys/${k.name}`);
       if (r.status === 200 && isObj(r.body)) keyCache.set(k.name, String(r.body.value));
     }
+    await refreshRoles();
   }
 
   // claim (once; again only after a refused identity with a NEW enrolment code, SDK-API §13 v0.1.12)
@@ -503,12 +521,13 @@ export async function startMiniApp(released: Manifest, env: Record<string, strin
       try {
         background();
         poll = new AbortController();
+        if (first) await refreshRoles().catch(() => undefined);
         const now = first || dirty;
         dirty = false;
         const r = await bridge(
           "POST",
           `/tb/v1/status?wait=${now ? 0 : 60}`,
-          { readiness: "ready", version: manifest.version, sdkVersion: `${manifest.sdkMajor}.0.0`, scopesRev: 0, sliceRevision: slice?.rev ?? 0, keysRev, pendingHolds: pending(), ...(faults.noProofClaims ? {} : { proofClaims: ["bd"] }), ...(faults.personOp?.noCap ? {} : { caps: ["person_op"] }) },
+          { ...roleStatus(), version: manifest.version, sdkVersion: `${manifest.sdkMajor}.0.0`, scopesRev: 0, sliceRevision: slice?.rev ?? 0, keysRev, pendingHolds: pending(), ...(faults.noProofClaims ? {} : { proofClaims: ["bd"] }), ...(faults.personOp?.noCap ? {} : { caps: ["person_op"] }) },
           AbortSignal.any([stop.signal, poll.signal]),
         );
         first = false;
@@ -545,7 +564,7 @@ export async function startMiniApp(released: Manifest, env: Record<string, strin
       if (r.status === 200 || r.status === 202) return r.body as Json;
       const code = String(((r.body as { error?: { code?: string } } | null)?.error?.code) ?? "app_error");
       if (attempt === 0 && code === "grant_stale" && !faults.noCompanionRetry) {
-        const s0 = await bridge("POST", "/tb/v1/status?wait=0", { readiness: "ready", version: manifest.version, sdkVersion: `${manifest.sdkMajor}.0.0`, scopesRev: 0, sliceRevision: 0, keysRev, pendingHolds: pending(), ...(faults.noProofClaims ? {} : { proofClaims: ["bd"] }), ...(faults.personOp?.noCap ? {} : { caps: ["person_op"] }) });
+        const s0 = await bridge("POST", "/tb/v1/status?wait=0", { ...roleStatus(), version: manifest.version, sdkVersion: `${manifest.sdkMajor}.0.0`, scopesRev: 0, sliceRevision: 0, keysRev, pendingHolds: pending(), ...(faults.noProofClaims ? {} : { proofClaims: ["bd"] }), ...(faults.personOp?.noCap ? {} : { caps: ["person_op"] }) });
         if (s0.status === 200 && isObj(s0.body) && typeof s0.body.slice === "string") installSlice(s0.body.slice);
         continue;
       }
@@ -566,7 +585,7 @@ export async function startMiniApp(released: Manifest, env: Record<string, strin
   const fail = (res: ServerResponse, e: E) => json(res, e.status, { error: { code: e.code, message: e.code, requestId: `req_${randomBytes(6).toString("hex")}` } });
   const pausedFor = (agent: string | null) => {
     if (faults.ignorePause || !slice) return { workspace: false, instance: false, agent: false };
-    return { workspace: slice.pause.workspace, instance: slice.pause.instances.includes(ins), agent: agent !== null && slice.pause.agents.includes(agent as never) };
+    return { workspace: slice.pause.workspace, instance: slice.pause.instances.includes(ins), agent: agent !== null && (slice.pause.agents.includes(agent as never) || (!faults.pauseAgentsListOnly && slice.agents.some((a) => a.id === agent && a.status === "paused"))) };
   };
   const levelCrud = (type: string, level: string) => manifest.scopes?.find((s) => s.type === type)?.access.find((a) => a.id === level)?.crud ?? [];
   type ScopeRow = State["scopes"][number];

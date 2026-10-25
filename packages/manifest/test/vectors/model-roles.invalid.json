@@ -1,0 +1,344 @@
+{
+  "source": "Copy of packages/spec/examples/model-roles.invalid.json of Tealbrick/opt2-tealbrick-specs PR #54 (head dfdbef2, QA-SPEC54-4: M-MR-4 deny list): not released yet. Replace with the import of @opt2-tealbrick/spec/examples/model-roles.invalid.json after the spec release. Do not edit.",
+  "description": "v0.1.63 (QA-SPEC42-3): invalid settings.modelRoles cases for MANIFEST §7.1 cross-field rules M-MR-1..5. Each case is merged into examples/notes.manifest.json (`settings` replaced, `services` added to runtime.services when given) and must be refused with `code`. The manifest package (sdk repo) tests against this file.",
+  "cases": [
+    {
+      "rule": "M-MR-1",
+      "code": "model_role_invalid",
+      "what": "same role twice",
+      "modelRoles": [
+        {
+          "role": "reasoning",
+          "required": true,
+          "usedBy": [
+            "app"
+          ]
+        },
+        {
+          "role": "reasoning",
+          "required": false,
+          "usedBy": [
+            "app"
+          ]
+        }
+      ]
+    },
+    {
+      "rule": "M-MR-1",
+      "code": "model_role_invalid",
+      "what": "unknown role",
+      "modelRoles": [
+        {
+          "role": "chat",
+          "required": true,
+          "usedBy": [
+            "app"
+          ]
+        }
+      ]
+    },
+    {
+      "rule": "M-MR-2",
+      "code": "model_role_invalid",
+      "what": "unknown minPolicy",
+      "modelRoles": [
+        {
+          "role": "reasoning",
+          "required": true,
+          "minPolicy": "private",
+          "usedBy": [
+            "app"
+          ]
+        }
+      ]
+    },
+    {
+      "rule": "M-MR-3",
+      "code": "model_role_invalid",
+      "what": "usedBy names an undeclared service",
+      "modelRoles": [
+        {
+          "role": "embeddings",
+          "required": false,
+          "usedBy": [
+            "engine"
+          ]
+        }
+      ]
+    },
+    {
+      "rule": "M-MR-4",
+      "code": "model_role_invalid",
+      "what": "env on a role used by the app",
+      "modelRoles": [
+        {
+          "role": "embeddings",
+          "required": false,
+          "usedBy": [
+            "app"
+          ],
+          "env": {
+            "model": "EMB_MODEL"
+          }
+        }
+      ]
+    },
+    {
+      "rule": "M-MR-4",
+      "code": "model_role_invalid",
+      "what": "env name repeats another role's env name",
+      "services": [
+        {
+          "id": "engine",
+          "build": true
+        }
+      ],
+      "modelRoles": [
+        {
+          "role": "embeddings",
+          "required": false,
+          "usedBy": [
+            "engine"
+          ],
+          "env": {
+            "key": "ENGINE_KEY"
+          }
+        },
+        {
+          "role": "reasoning",
+          "required": false,
+          "usedBy": [
+            "engine"
+          ],
+          "env": {
+            "key": "ENGINE_KEY"
+          }
+        }
+      ]
+    },
+    {
+      "rule": "M-MR-4",
+      "code": "model_role_invalid",
+      "what": "env on a service without build (no tb-exec)",
+      "services": [
+        {
+          "id": "engine",
+          "build": false
+        }
+      ],
+      "modelRoles": [
+        {
+          "role": "reasoning",
+          "required": false,
+          "usedBy": [
+            "engine"
+          ],
+          "env": {
+            "model": "ENGINE_MODEL"
+          }
+        }
+      ]
+    },
+    {
+      "rule": "M-MR-5",
+      "code": "condition_invalid",
+      "what": "when names an unknown setting",
+      "modelRoles": [
+        {
+          "role": "reasoning",
+          "required": false,
+          "usedBy": [
+            "app"
+          ],
+          "when": {
+            "no_such_setting": "x"
+          }
+        }
+      ]
+    },
+    {
+      "rule": "M-MR-4",
+      "code": "model_role_invalid",
+      "what": "env name is a proxy variable",
+      "services": [
+        {
+          "id": "engine",
+          "build": true
+        }
+      ],
+      "modelRoles": [
+        {
+          "role": "reasoning",
+          "required": false,
+          "usedBy": [
+            "engine"
+          ],
+          "env": {
+            "baseUrl": "HTTPS_PROXY"
+          }
+        }
+      ]
+    },
+    {
+      "rule": "M-MR-4",
+      "code": "model_role_invalid",
+      "what": "env name is a loader variable",
+      "services": [
+        {
+          "id": "engine",
+          "build": true
+        }
+      ],
+      "modelRoles": [
+        {
+          "role": "reasoning",
+          "required": false,
+          "usedBy": [
+            "engine"
+          ],
+          "env": {
+            "model": "NODE_OPTIONS"
+          }
+        }
+      ]
+    },
+    {
+      "rule": "M-MR-4",
+      "code": "model_role_invalid",
+      "what": "env name NODE_TLS_REJECT_UNAUTHORIZED (TLS trust)",
+      "services": [
+        {
+          "id": "engine",
+          "build": true
+        }
+      ],
+      "modelRoles": [
+        {
+          "role": "reasoning",
+          "required": false,
+          "usedBy": [
+            "engine"
+          ],
+          "env": {
+            "model": "NODE_TLS_REJECT_UNAUTHORIZED"
+          }
+        }
+      ]
+    },
+    {
+      "rule": "M-MR-4",
+      "code": "model_role_invalid",
+      "what": "env name NPM_CONFIG_REGISTRY (package-manager config)",
+      "services": [
+        {
+          "id": "engine",
+          "build": true
+        }
+      ],
+      "modelRoles": [
+        {
+          "role": "reasoning",
+          "required": false,
+          "usedBy": [
+            "engine"
+          ],
+          "env": {
+            "model": "NPM_CONFIG_REGISTRY"
+          }
+        }
+      ]
+    },
+    {
+      "rule": "M-MR-4",
+      "code": "model_role_invalid",
+      "what": "env name PYTHONPATH (code loading)",
+      "services": [
+        {
+          "id": "engine",
+          "build": true
+        }
+      ],
+      "modelRoles": [
+        {
+          "role": "reasoning",
+          "required": false,
+          "usedBy": [
+            "engine"
+          ],
+          "env": {
+            "model": "PYTHONPATH"
+          }
+        }
+      ]
+    },
+    {
+      "rule": "M-MR-4",
+      "code": "model_role_invalid",
+      "what": "env name LD_AUDIT (library injection (LD_*))",
+      "services": [
+        {
+          "id": "engine",
+          "build": true
+        }
+      ],
+      "modelRoles": [
+        {
+          "role": "reasoning",
+          "required": false,
+          "usedBy": [
+            "engine"
+          ],
+          "env": {
+            "model": "LD_AUDIT"
+          }
+        }
+      ]
+    },
+    {
+      "rule": "M-MR-4",
+      "code": "model_role_invalid",
+      "what": "env name GRPC_PROXY (proxy (*_PROXY))",
+      "services": [
+        {
+          "id": "engine",
+          "build": true
+        }
+      ],
+      "modelRoles": [
+        {
+          "role": "reasoning",
+          "required": false,
+          "usedBy": [
+            "engine"
+          ],
+          "env": {
+            "model": "GRPC_PROXY"
+          }
+        }
+      ]
+    },
+    {
+      "rule": "M-MR-4",
+      "code": "model_role_invalid",
+      "what": "env name GIT_SSH_COMMAND (git config)",
+      "services": [
+        {
+          "id": "engine",
+          "build": true
+        }
+      ],
+      "modelRoles": [
+        {
+          "role": "reasoning",
+          "required": false,
+          "usedBy": [
+            "engine"
+          ],
+          "env": {
+            "model": "GIT_SSH_COMMAND"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -550,7 +550,8 @@ export class BridgeWorld {
     }
     const standalone = this.standalone ? { issuer: this.standalone.issuer, kid: this.standalone.kid, ownerKeys: this.standalone.ownerKeys } : undefined;
     const rev = ++this.#sliceRev;
-    const pause = { workspace: p.pause.workspace, agents: [...p.pause.agents], instances: [...p.pause.instances] };
+    // C353 (specs#49): `pause.agents: []` always; a paused agent is marked by `agents[].status` only (below)
+    const pause = { workspace: p.pause.workspace, agents: [] as AgentId[], instances: [...p.pause.instances] };
     const revoked = { jtis: p.revoked.map((r) => ({ jti: r.jti, exp: r.exp })) };
     const apps: AppEntry[] = [];
     const entries: { ins: InstanceId; product: string; manifest: Manifest; digest: string; url: string }[] = [...this.apps, ...this.listedEventApps(), ...(real ? [{ ...real, product: real.manifest.id }] : [])];

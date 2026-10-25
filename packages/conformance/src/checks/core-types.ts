@@ -25,7 +25,7 @@ export interface FieldInfo {
   depth: number;
 }
 
-/** spec 0.1.58: + host (server / host-agent route types, HOST.md) */
+// v0.1.58 (spec 0.1.58..0.1.64): the host rows take their input types from host.d.ts
 const SPEC_DTS = ["routes", "bridge", "credentials", "manifest", "host"] as const;
 
 /** Index of every declaration in the installed @opt2-tealbrick/spec declaration files (routes first on clashes). */

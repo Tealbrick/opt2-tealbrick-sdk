@@ -46,9 +46,9 @@ export const SDK_COVERAGE: Readonly<Record<string, readonly string[]>> = {
   familyAllowedFor: ["S-PO-8"],
   defineApp: ["A1.manifest_served", "M4.openapi", "A1.no_claim_route", "A17.pending_count"], // gitleaks:allow (check ids, not secrets)
   getKey: ["C8.keys_via_bridge"],
-  // v0.1.63: `modelRole` (the bridge route and its declared-role rule are exercised by the same check as keys; the model-roles
-  // release, sdk#52, adds its own rows)
-  modelRole: ["C8.keys_via_bridge"],
+  // v0.1.63 (RM-17): the app calls modelRole() against a bridge with and without the route (A23 reads the result black-box: status +
+  // the route request on the wire); the fake bridge's role route has its own tests (test/fake-bridge.test.ts)
+  modelRole: ["A23.model_role_no_route"],
   onKeysChanged: ["C8.keys_via_bridge"],
   SESSION_COOKIE: ["A6"],
   startApp: ["A1", "A1.health", "A7.restart", "A16.call_outside_handler", "A17.status_changed"],
@@ -62,4 +62,11 @@ export const SDK_COVERAGE: Readonly<Record<string, readonly string[]>> = {
   useHolds: ["A4.holds_list", "A10"],
   useScopes: ["A8.applied_once"],
   useSession: ["A6.principal", "A6.logout"],
+};
+
+/**
+ * Exports the suite does NOT cover yet, with the reason (A11 lists them; an entry for an export that is mapped above, or that the spec
+ * does not export, is stale). A false mapping to a row that never calls the export is worse than this list.
+ */
+export const SDK_UNCOVERED: Readonly<Record<string, string>> = {
 };

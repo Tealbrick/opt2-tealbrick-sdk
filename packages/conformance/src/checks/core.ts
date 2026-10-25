@@ -202,6 +202,12 @@ export function runCoreStatic(input: CoreStaticInput): CheckResult[] {
   const mixed = routes.filter((r) => r.auth.some((a) => PERSON.has(a)) && r.auth.some((a) => !PERSON.has(a))).map((r) => `${r.opId}: ${r.auth.join("+")}`);
   rec("R1.table.p1_disjoint", "person and non-person classes never on one row (PORTAL-API §1.2 P1)", clean("no row mixes person and non-person auth", mixed));
 
+  // RT9 (PORTAL-API §1.2, spec 0.1.58): the `host` class (K13) is only for `host.*` rows, and a `host.*` row accepts nothing else
+  const rt9 = routes
+    .filter((r) => r.auth.includes("host") !== r.opId.startsWith("host.") || (r.auth.includes("host") && r.auth.some((a) => a !== "host")))
+    .map((r) => `${r.opId}: auth ${r.auth.join("+")}`);
+  rec("R1.table.rt9", "`host` auth only on host.* rows, and host.* rows only host (PORTAL-API §1.2 RT9)", clean("host auth only on host.* rows; host.* rows host only", rt9));
+
   // ── R2: owner native session (K3) = reads + drafts.* (+ logout) ──
   const ocBad = ownerCli.filter((r) => r.method !== "GET" && !r.opId.startsWith("drafts.") && !(OWNER_CLI_WRITES as readonly string[]).includes(r.opId)).map((r) => `${r.opId} (${r.method})`);
   rec("R2.owner_cli_rows", `owner-cli ⊆ GET ∪ drafts.* ∪ {${OWNER_CLI_WRITES.join(", ")}} (RT1, spec 0.1.64)`, clean(`${ownerCli.length} owner-cli rows: reads + drafts.* + ${OWNER_CLI_WRITES.join(" + ")} only`, ocBad));
@@ -259,6 +265,8 @@ export function runCoreStatic(input: CoreStaticInput): CheckResult[] {
   const forbidden: string[] = [];
   for (const r of routes) {
     for (const t of new Set([...tokens(r.opId), ...tokens(r.path)])) {
+      // v0.1.64 (C326): `person_ops.call` is the allow-listed person-op relay, not tool execution (PORTAL-API §1.2)
+      if (r.opId === "person_ops.call" && t === "call") continue;
       const why = FORBIDDEN_TOKENS[t];
       if (why && !R5_ALLOWED[r.opId]?.includes(t)) forbidden.push(`${r.opId} ${r.method} ${r.path}: "${t}" (${why})`);
     }

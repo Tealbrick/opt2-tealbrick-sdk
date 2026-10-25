@@ -187,6 +187,8 @@ export const APP_CHECK_IDS = [
   "A22.bridge_caps_equal",
   "A22.bridge_caps_absent",
   "A22.bridge_caps_expired",
+  // conformance 0.1.30 (spec 0.1.63, RM-17): the app against a bridge without the model-roles route
+  "A23.model_role_no_route",
   // conformance 0.1.28 (C274c/C274d, spec 0.1.57): app events (eventsProbe fixture, SDK >= 0.1.38)
   "A-EV-1",
   "A-EV-2",

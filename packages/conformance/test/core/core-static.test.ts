@@ -45,6 +45,13 @@ describe("core static checks", () => {
     assert.ok(failing(edit("workspaces.get", { path: "/workspaces/{id}" })).includes("R1.table.bindings"));
   });
 
+  it("R1 RT9: host auth on a non-host row, a host.* row without host, or a host.* row that also takes another class", () => {
+    assert.ok(failing(edit("workspaces.list", { auth: ["host"] })).includes("R1.table.rt9"));
+    assert.ok(failing(edit("host.plans", { auth: ["bridge"] })).includes("R1.table.rt9"));
+    assert.ok(failing(edit("host.plans", { auth: ["host", "bridge"] })).includes("R1.table.rt9"));
+    assert.ok(!failing(ROUTES).includes("R1.table.rt9"), "the spec's own table passes");
+  });
+
   it("R2: owner-cli on a non-draft mutation, on a confirm row, on drafts.apply", () => {
     const mutation = ROUTES.find((r) => r.method !== "GET" && r.auth.join() === "browser" && !r.opId.startsWith("drafts.")) as RouteOp;
     assert.ok(failing(edit(mutation.opId, { auth: ["browser", "owner-cli"] })).includes("R2.owner_cli_rows"));

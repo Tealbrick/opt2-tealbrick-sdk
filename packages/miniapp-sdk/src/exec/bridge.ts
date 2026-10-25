@@ -1,6 +1,6 @@
 // tb-exec's client of the bridge internal API (BRIDGE §9.4, §10): claim as a service, key fetch, status long-poll.
 // Every request after the claim carries a service instance assertion (`TB-Assert`, `svc` = TB_SERVICE, htm/htu/bd).
-import { type Ed25519KeyPair, signInstanceAssertion } from "@opt2-tealbrick/manifest";
+import { DATA_POLICIES, type Ed25519KeyPair, MODEL_ROLES_PATH, type ModelRole, type ModelRoleFetchResponse, signInstanceAssertion } from "@opt2-tealbrick/manifest";
 import { type AppStatus, type AppStatusResponse, BRIDGE_HEADERS, BRIDGE_INTERNAL_PATHS, type ClaimRequest, type ClaimResponse, type KeyFetchResponse } from "@opt2-tealbrick/spec/bridge";
 import type { BridgeId, InstanceId } from "@opt2-tealbrick/spec/credentials";
 import { TbError } from "../server/errors.ts";
@@ -53,6 +53,30 @@ export class ServiceBridge {
     }
     if (r.status === 404) return null;
     throw replyError(r, "key_fetch_failed");
+  }
+
+  /** `GET /tb/v1/model-roles/<role>` (BRIDGE §15.4); 404 (`role_not_set`) and 403 `role_policy_too_low` → null; other refusals throw. */
+  async fetchModelRole(role: ModelRole, signal?: AbortSignal): Promise<ModelRoleFetchResponse | null> {
+    const r = await this.#send("GET", MODEL_ROLES_PATH.replace("{role}", encodeURIComponent(role)), undefined, signal, true);
+    if (r.status === 200) {
+      const b = r.body as Partial<Record<keyof ModelRoleFetchResponse, unknown>> | null;
+      if (b?.role !== role || typeof b.provider !== "string" || typeof b.model !== "string" || typeof b.keysRev !== "number" || !(DATA_POLICIES as readonly unknown[]).includes(b.dataPolicy)) {
+        throw new TbError("bridge_invalid", "model role answer is malformed", 502);
+      }
+      return {
+        role,
+        provider: b.provider,
+        model: b.model,
+        baseUrl: typeof b.baseUrl === "string" ? b.baseUrl : null,
+        key: typeof b.key === "string" ? b.key : null,
+        dataPolicy: b.dataPolicy as ModelRoleFetchResponse["dataPolicy"],
+        dims: typeof b.dims === "number" ? b.dims : null,
+        keysRev: b.keysRev,
+      };
+    }
+    if (r.status === 404) return null;
+    if (r.status === 403 && replyError(r, "model_role_fetch_failed").code === "role_policy_too_low") return null;
+    throw replyError(r, "model_role_fetch_failed");
   }
 
   /** `POST /tb/v1/status?wait=60`: 200 → new slice/keysRev, 204 → nothing changed. */

@@ -53,6 +53,27 @@ function speedScale(page: string): number {
   return scale;
 }
 
+/**
+ * (a) per case, interleaved (CI pipelines 341/350/352/353, sdk#51): the case and the calibration job run in alternation, one
+ * of each per round, so both medians see the same machine load. A run-start calibration followed by a case measured seconds
+ * later failed whenever the shared runner's load changed in between (e.g. 128.2 ms against a ceiling of 79 ms). Returns the
+ * case median and the scale from the calibration median of the same rounds (same rule as speedScale).
+ */
+function measureScaled(f: () => void, calibrationPage: string, runs = 7): { ms: number; scale: number } {
+  const ts: number[] = [];
+  const bs: number[] = [];
+  for (let r = 0; r < runs; r++) {
+    let t = performance.now();
+    serialize(parse(calibrationPage, { scriptingEnabled: true }));
+    bs.push(performance.now() - t);
+    t = performance.now();
+    f();
+    ts.push(performance.now() - t);
+  }
+  const median = (xs: number[]) => xs.sort((a, b) => a - b)[Math.floor(xs.length / 2)] as number;
+  return { ms: median(ts), scale: Math.min(SCALE_CAP, Math.max(1, median(bs) / BASELINE_DEV_MS)) };
+}
+
 function expectInertResult(r: SanitizeAgentDocumentResult, why: string): void {
   assert.equal(r.ok, false, why);
   assert.equal(r.html, AGENT_DOCUMENT_UNAVAILABLE_HTML, why);
@@ -62,10 +83,13 @@ function expectInertResult(r: SanitizeAgentDocumentResult, why: string): void {
 
 describe("C259 timing (runs alone)", () => {
   test("(a) worst cases just under the limits sanitise end to end within a measured ceiling", () => {
-    // Ceiling 50 ms on the dev Mac (x the same-run calibration scale, see speedScale) per sanitizeAgentDocument call (median of 5): every page below needs three parse5 passes, two linear scans
+    // Ceiling 50 ms on the dev Mac (x the calibration scale measured interleaved with the case, see measureScaled) per sanitizeAgentDocument call (median of 5): every page below needs three parse5 passes, two linear scans
     // and the walk. Measured on the dev Mac under load (median): 2,048 attributes 15-26 ms, depth 600 3-6 ms, 256 KiB rich page
     // 34 ms. The 1,024 × 64 page (cost exactly at the budget, 254 KB of attributes) is parse5-bound: 3 × 11 ms of parse plus
-    // 2 × 3 ms of scan, 55 ms median measured; its ceiling is 120 ms. Over a ceiling = the bounds no longer bound the work.
+    // 2 × 3 ms of scan, 55 ms median measured; its ceiling is 120 ms. The 256 KiB rich page is parse5-bound the same way (three
+    // passes over 256 KiB, 34 ms on the dev Mac); its ceiling was 50 ms (1.5x), which the CI runner exceeded by a hair at the
+    // same calibration (58.3 vs 58, 62.4 vs 62: three DOMs of 256 KiB cost relatively more on that box), so it gets the
+    // 1,024 × 64 page's margin (2.2x): 75 ms. Over a ceiling = the bounds no longer bound the work.
     const kib256 = rich256();
     const one = page(`<p ${names(MAX_ATTRIBUTES_PER_TAG)}>x</p>`);
     const many = page(`<p ${names(64)}>x</p>`.repeat(1024));
@@ -73,19 +97,18 @@ describe("C259 timing (runs alone)", () => {
     assert.equal(1024 * 64 * 64, MAX_ATTRIBUTE_BUDGET);
     assert.equal(cost(many), MAX_ATTRIBUTE_BUDGET, "1,024 × 64² is AT the budget, and the rule is <=");
     assert.ok(Buffer.byteLength(kib256) <= 256 * 1024 && Buffer.byteLength(kib256) > 250 * 1024);
-    const scale = speedScale(kib256);
     const cases: [string, string, number][] = [
       ["one tag × 2,048 attributes", one, 50],
       ["1,024 tags × 64 attributes", many, 120],
       [`depth ${R.maxDepth} (the limit)`, nest(R.maxDepth - 2), 50],
-      ["256 KiB rich document", kib256, 50],
+      ["256 KiB rich document", kib256, 75],
     ];
     for (const [name, h, devCeiling] of cases) {
-      const ceiling = devCeiling * scale;
       const r = sanitizeAgentDocument(h, on);
       assert.equal(r.ok, true, name);
-      const ms = medianMs(() => sanitizeAgentDocument(h, on));
-      console.log(`# C259 (a) ${name}: ${ms.toFixed(1)} ms (ceiling ${ceiling.toFixed(0)} ms = ${devCeiling} ms x ${scale.toFixed(2)})`);
+      const { ms, scale } = measureScaled(() => sanitizeAgentDocument(h, on), kib256);
+      const ceiling = devCeiling * scale;
+      console.log(`# C259 (a) ${name}: ${ms.toFixed(1)} ms (ceiling ${ceiling.toFixed(0)} ms = ${devCeiling} ms x ${scale.toFixed(2)}, interleaved calibration)`);
       assert.ok(ms < ceiling, `${name}: ${ms.toFixed(1)} ms (ceiling ${ceiling.toFixed(0)} ms)`);
     }
   });
