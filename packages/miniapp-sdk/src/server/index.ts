@@ -98,6 +98,7 @@ export type {
 } from "./jobs.ts";
 export { JOB_DEFAULTS, OP_JOB_KIND, OP_JOB_MAX_ATTEMPTS } from "./jobs.ts";
 // v0.1.23 (SDK-HV-1): dynamic hold view budget and the fallback line (SDK-API §4.6)
-export { HOLD_VIEW_BUDGET_MS, HOLD_VIEW_UNREADABLE } from "./ops.ts";
+// spec 0.1.74 (C354a): a resolution with the hold-family set (`holdFamilies`), until the spec pin moves
+export { type DynamicResolutionV074, HOLD_VIEW_BUDGET_MS, HOLD_VIEW_UNREADABLE } from "./ops.ts";
 export { CSRF_HEADER, SESSION_COOKIE } from "./person.ts";
 export { TB_EXEC_CONTROL_PORT } from "./service-helper.ts";

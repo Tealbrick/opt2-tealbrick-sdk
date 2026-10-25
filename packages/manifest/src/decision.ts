@@ -2,8 +2,15 @@
 import type { CrudAction } from "@opt2-tealbrick/spec/manifest";
 import type { AdmittedBy, AuthorizeInput, Decision, GateDecision, GateInput } from "@opt2-tealbrick/spec/sdk";
 import { verifyGrant } from "./tokens.ts";
+import { type HoldFamilyFields, holdFamilySet } from "./variants.ts";
 
 export type { AdmittedBy, AuthorizeInput, Decision, GateDecision, GateInput };
+
+/**
+ * spec 0.1.74 (C354a), copied until the spec pin moves: `AuthorizeInput` whose effective `op` may carry `holdFamilies` (a
+ * dynamic resolution's hold-family SET; the call is held when ANY member is held). Accepts every 0.1.57 `AuthorizeInput`.
+ */
+export type AuthorizeInputV074 = Omit<AuthorizeInput, "op"> & { op: AuthorizeInput["op"] & HoldFamilyFields };
 
 /** The one standard agent op that needs only a valid grant (CORE §7, I4). */
 export const HOLD_STATUS_OP = "tb.hold_status";
@@ -91,12 +98,13 @@ export function gate(input: GateInput): GateDecision {
  * grant; a narrower owner row still narrows), else (bounded or absent) `op.crud ⊆ grant.crud ∩ access.crud`; failing → `scope_denied`.
  * A scoped op that passed (2) carries `admittedBy` (`app_owner_row` for an owner row, `portal_grant` otherwise) on every
  * later decision (hold, run), never on a refusal. (2b, v0.1.13 G1) a hook hold verdict (proof `hv`) → hold with its family,
- * `heldBy`; (3) effect `money` (always) or `holdFamily ∈ grant.held` → hold; (4) Free caps:
+ * `heldBy`; (3) effect `money` (always) or any member of the op's hold-family set (`holdFamilySet`: `holdFamilies` ∪
+ * {`holdFamily`}, spec 0.1.74) `∈ grant.held` → hold, recording the FIRST held member as `holdFamily`; (4) Free caps:
  * `usage[effect] ≥ caps[effect].max` → hold `caps` (v0.1.19 C111a: in ANY mode, whenever `caps` has the effect); (5) run. An approved hold for this exact call (C8: once per call)
  * skips (2b), (3) and (4). `tb.hold_status` and `tb.holds_pending` skip (2) (I4). Pause, grant validity, holds, caps and `money` are
  * Portal-grant rules an owner row never overrides.
  */
-export function authorize(input: AuthorizeInput): Decision {
+export function authorize(input: AuthorizeInputV074): Decision {
   const p = input.paused;
   if (p.workspace || p.instance || p.agent) return { decision: "refuse", reason: DECISION_REASON.paused };
   const g = verifyGrant(input.grant, input.trust);
@@ -121,7 +129,9 @@ export function authorize(input: AuthorizeInput): Decision {
   const hv = input.holdVerdict ?? null;
   if (hv) return { decision: "hold", reason: DECISION_REASON.heldByHook, holdFamily: hv.family, heldBy: hv.by, ...admitted };
   if (op.effect === "money") return { decision: "hold", reason: DECISION_REASON.heldMoney, holdFamily: "money", ...admitted };
-  if (op.holdFamily !== undefined && grant.held.includes(op.holdFamily)) return { decision: "hold", reason: DECISION_REASON.heldFamily, holdFamily: op.holdFamily, ...admitted };
+  // spec 0.1.74 (C354a): held when ANY member of the set is held (an empty holdFamilies falls back to holdFamily)
+  const heldFamily = [...holdFamilySet(op)].find((f) => grant.held.includes(f));
+  if (heldFamily !== undefined) return { decision: "hold", reason: DECISION_REASON.heldFamily, holdFamily: heldFamily, ...admitted };
   if (op.effect === "write" || op.effect === "outward" || op.effect === "destructive") {
     const cap = grant.caps[op.effect];
     if (cap && (input.usage[op.effect] ?? 0) >= cap.max) return { decision: "hold", reason: DECISION_REASON.capsExceeded, holdFamily: "caps", ...admitted };

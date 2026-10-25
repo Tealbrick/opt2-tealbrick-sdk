@@ -5,7 +5,9 @@
 import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  DYNAMIC_CATALOG_NAME_RE,
   digest,
+  dynamicVariantBase,
   type Ed25519KeyPair,
   EVENT_KEY_RE,
   eventDecl,
@@ -22,6 +24,7 @@ import {
   ulid,
   validateEventPayload,
   validateInput,
+  variantNarrowerOrEqual,
   withStandardOps,
 } from "@opt2-tealbrick/manifest";
 import type { AgentId } from "@opt2-tealbrick/spec/credentials";
@@ -1305,7 +1308,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   // v0.1.18: `dynamic.<op>.resolveTools` (tealbrick-conformance.json) names the tools to resolve instead of the catalog
   // (an app whose catalog is empty without its engine makes them resolvable in its conformance start module); a listed
   // tool that does not resolve FAILS (the app promised it).
-  await s.run("A11.resolve_family", "resolve answers with effect outward or money carry a holdFamily (C107)", "for every dynamic op: each catalog entry (or each configured dynamic.<op>.resolveTools name) resolved through the bridge op resolve {op, tool}; a resolution with effect outward|money has a known holdFamily (money → money); a configured tool that does not resolve fails", async () => {
+  await s.run("A11.resolve_family", "resolve answers with effect outward or money carry a holdFamily (C107)", "for every dynamic op: each catalog entry (or each configured dynamic.<op>.resolveTools name) resolved through the bridge op resolve {op, tool}; a resolution with effect outward|money has a known holdFamily (money → money); a configured tool that does not resolve fails; (spec 0.1.74) catalog names match DYNAMIC_CATALOG_NAME_RE, holdFamilies (when present) lists known families and contains holdFamily, and a variant <base>__<suffix> is never broader than its base (variantNarrowerOrEqual)", async () => {
     const dyn = m.operations.filter((o) => o.audience === "agent" && o.dynamic);
     const configured = ctx.dynamic ?? {};
     const strays = Object.keys(configured).filter((id) => !dyn.some((o) => o.id === id));
@@ -1327,6 +1330,9 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
           continue;
         }
         names = list.filter(isObj).slice(0, 50).map((e) => String(e.name));
+        // spec 0.1.74 (C354a, B29.catalog_name_invalid): a catalog answer never lists a name that fails DYNAMIC_CATALOG_NAME_RE
+        const badNames = names.filter((n) => !DYNAMIC_CATALOG_NAME_RE.test(n));
+        if (badNames.length) problems.push(`${op.id}: catalog lists names that fail DYNAMIC_CATALOG_NAME_RE: ${badNames.slice(0, 4).join(", ")}`);
       }
       for (const name of names) {
         const r = await c().callBridgeOp("resolve", { op: op.id, tool: name });
@@ -1338,6 +1344,27 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
         resolved++;
         const eff = String(r.body.effect);
         const hf = r.body.holdFamily;
+        // spec 0.1.74 (C354a): `holdFamilies`, when present, lists known families and contains `holdFamily`
+        const hfs = r.body.holdFamilies;
+        if (hfs !== undefined && (!Array.isArray(hfs) || hfs.some((f) => !(KNOWN_HOLD_FAMILIES as readonly unknown[]).includes(f)) || (hf !== undefined && !hfs.includes(hf)))) {
+          problems.push(`${op.id}/${name}: holdFamilies ${JSON.stringify(hfs)} (must list known families and contain holdFamily ${String(hf)})`);
+          continue;
+        }
+        // spec 0.1.74 (QA-SPEC56-1): a variant `<base>__<suffix>` is never broader than its base (crud ⊆, effect ≤, families ⊇)
+        const vbase = name.includes("__") ? dynamicVariantBase(name) : null;
+        if (vbase !== null) {
+          const b0 = await c().callBridgeOp("resolve", { op: op.id, tool: vbase });
+          const bb = b0.body;
+          if (b0.status !== 200 || !isObj(bb) || !Array.isArray(r.body.crud) || !Array.isArray(bb.crud)) {
+            problems.push(`${op.id}/${name}: variant base ${vbase} resolve ${show(b0)}`);
+            continue;
+          }
+          if (!variantNarrowerOrEqual(r.body as never, bb as never)) {
+            problems.push(`${op.id}/${name}: variant broader than its base ${vbase} (crud ⊆, effect ≤, hold families ⊇ required): ${JSON.stringify(r.body)} vs ${JSON.stringify(bb)}`);
+            continue;
+          }
+          seen.push(`${op.id}/${name}: variant of ${vbase}`);
+        }
         if (eff !== "outward" && eff !== "money") continue;
         const known = typeof hf === "string" && (KNOWN_HOLD_FAMILIES as readonly string[]).includes(hf);
         if (!known || (eff === "money" && hf !== "money")) problems.push(`${op.id}/${name}: effect ${eff}, holdFamily ${hf === undefined ? "MISSING" : String(hf)}`);

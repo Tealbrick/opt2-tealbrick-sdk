@@ -10,6 +10,7 @@ import {
   authorize,
   bridgeOpBinding,
   digest,
+  dynamicVariantBase,
   type Ed25519KeyPair,
   exportPrivateKey,
   generateKeyPair,
@@ -99,6 +100,8 @@ export interface MiniAppFaults {
   appCallerNoHold?: boolean;
   /** v0.1.16 (C107): resolve answers drop holdFamily (outward / money entries; fails A11.resolve_family) */
   resolveNoFamily?: boolean;
+  /** spec 0.1.74 (C354a): a variant `<entry>__<suffix>` resolves without its base's hold family (fails A11.resolve_family) */
+  variantDropsBaseFamily?: boolean;
   /** pre-C108 strict reader: a grant whose held names an unknown family is refused grant_invalid (fails C3.grant_held_unknown) */
   strictHeld?: boolean;
   /** pre-C111a: caps ignored when a Free grant carries a non-empty wf (fails A3.free_wf_caps) */
@@ -1046,6 +1049,13 @@ export async function startMiniApp(released: Manifest, env: Record<string, strin
                 return mark ? { ...e, admitted: "owner" } : e;
               }),
             );
+          }
+          // spec 0.1.74 (C354a): a variant `<entry>__<suffix>` of an entry with a hold family (first_contact, money) keeps that family and adds outward
+          const vb = typeof b.tool === "string" ? dynamicVariantBase(b.tool) : null;
+          const ve = vb === null ? undefined : DYN_ENTRIES.find((x) => x.name === vb);
+          if (ve && "holdFamily" in ve) {
+            const fam = faults.variantDropsBaseFamily ? { holdFamily: "outward" } : { holdFamily: ve.holdFamily, holdFamilies: [...new Set([ve.holdFamily, "outward"])] };
+            return json(res, 200, { tool: b.tool, crud: ve.crud, effect: ve.effect, ...fam });
           }
           const e = DYN_ENTRIES.find((x) => x.name === b.tool);
           if (!e && faults.emptyCatalog) return json(res, 200, null);

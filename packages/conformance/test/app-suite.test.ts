@@ -328,6 +328,16 @@ describe("app target", () => {
     assert.match(bf?.asserted ?? "", /item_lookup\/dyn_nope: listed in dynamic\.item_lookup\.resolveTools but resolve answered null/);
   });
 
+  it("spec 0.1.74 (C354a): a configured variant <entry>__<suffix> passes A11.resolve_family when it keeps its base's hold family (holdFamilies ⊇ base); one that drops it fails", async () => {
+    const runVar = (faults: MiniAppFaults) => runApp({ manifest: c107, config: parseConformanceConfig({ dynamic: { item_lookup: { resolveTools: ["dyn_send", "dyn_send__review"] } } }, "test config"), start: (env) => startMiniApp(c107, env, { emptyCatalog: true, ...faults }), deployTemplate: template, timeoutMs: 8000 });
+    const good = statusOf(await runVar({}), "A11.resolve_family");
+    assert.equal(good?.status, "pass", good?.asserted);
+    assert.match(good?.asserted ?? "", /item_lookup\/dyn_send__review: variant of dyn_send/);
+    const bad = statusOf(await runVar({ variantDropsBaseFamily: true }), "A11.resolve_family");
+    assert.equal(bad?.status, "fail", bad?.asserted);
+    assert.match(bad?.asserted ?? "", /item_lookup\/dyn_send__review: variant broader than its base dyn_send/);
+  });
+
   // ── v0.1.23 (C115, conformance 0.1.14): rules.narrowing — an empty anyOf passes NOTHING ──
   const nr = structuredClone(manifest) as Manifest;
   nr.operations.push({

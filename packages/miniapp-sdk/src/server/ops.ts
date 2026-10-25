@@ -3,7 +3,22 @@
 // → authorize() (step 0 = slice pause) → handler. Holds and receipts are rows of the one receipts table.
 import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { authorize, canonicalize, DECISION_REASON, digest, EFFECTS, HOLDS_PENDING_OP, opInGrantWorkflow, validateAgainstSchema, validateInput, verifyCallProof, verifyGrant } from "@opt2-tealbrick/manifest";
+import {
+  authorize,
+  canonicalize,
+  DECISION_REASON,
+  digest,
+  dynamicVariantBase,
+  EFFECTS,
+  HOLDS_PENDING_OP,
+  holdFamilySet,
+  opInGrantWorkflow,
+  validateAgainstSchema,
+  validateInput,
+  variantNarrowerOrEqual,
+  verifyCallProof,
+  verifyGrant,
+} from "@opt2-tealbrick/manifest";
 import { BRIDGE_HEADERS, type CompanionCaller, type OpCallBody, type OpResult } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, CallId, InstanceId, PersonId, Sha256Digest } from "@opt2-tealbrick/spec/credentials";
 import type { CrudAction, DynamicResolution, Effect, HoldFamily, Operation } from "@opt2-tealbrick/spec/manifest";
@@ -52,8 +67,13 @@ interface EffectiveOp {
   crud: CrudAction[];
   effect: Effect;
   holdFamily?: HoldFamily;
+  /** spec 0.1.74 (C354a), copied until the spec pin moves: a dynamic resolution's hold-family set (held when ANY member is held) */
+  holdFamilies?: HoldFamily[];
   scopeType?: string;
 }
+
+/** spec 0.1.74 (C354a), copied until the spec pin moves: `DynamicResolution` with the optional hold-family set. */
+export type DynamicResolutionV074 = DynamicResolution & { holdFamilies?: HoldFamily[] };
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -434,25 +454,54 @@ function toTbError(e: unknown, rt: Runtime): TbError {
   return new TbError("app_error", "the operation failed", 500);
 }
 
-/** Dynamic ops (MANIFEST §5.3): crud/effect/holdFamily come from the app's own `resolve`, never from the agent. */
-async function resolveDynamic(rt: Runtime, op: ManifestOp, input: Json): Promise<{ eff: EffectiveOp; tool: string; args: Record<string, unknown> }> {
-  if (!isObj(input) || typeof input.tool !== "string" || !isObj(input.arguments)) throw new TbError("input_invalid", "dynamic call input must be { tool, arguments }", 400);
+/**
+ * THE resolution of one requested dynamic tool (MANIFEST §5.3; the op path and bridge op `resolve` share it): the app's own
+ * `resolve(tool)` within the op's ceiling. spec 0.1.74 (C354a): a name with `__` must be a valid variant
+ * (`dynamicVariantBase`), and a variant is checked against the app's own `resolve(base)`: it is refused unless
+ * `variantNarrowerOrEqual(variant, base)` (crud ⊆, effect ≤, hold families ⊇ the base's) — a variant never drops a base hold.
+ */
+export async function resolveTool(rt: Runtime, op: Operation, tool: string, hctx: SdkHookContext): Promise<DynamicResolutionV074> {
   const d = rt.def.dynamic?.[op.id];
-  const hctx: SdkHookContext = { log: rt.log, db: rt.appDb, getKey: (n) => rt.keys.getKey(n), signal: AbortSignal.timeout(2000), secrets: rt.secretsStore };
-  const res: DynamicResolution | null = d ? await d.resolve(input.tool, hctx) : null;
+  const variantOf = tool.includes("__") ? dynamicVariantBase(tool) : null;
+  if (tool.includes("__") && variantOf === null) throw new TbError("dynamic_resolve_failed", "not a valid tool variant", 404, { reason: "variant_invalid" });
+  const res = (d ? await d.resolve(tool, hctx) : null) as DynamicResolutionV074 | null;
   if (!res) throw new TbError("dynamic_resolve_failed", "unknown dynamic tool", 404);
   if (!withinCeiling(op, res)) throw new TbError("dynamic_ceiling_exceeded", "resolved tool exceeds the operation's ceiling", 403);
+  if (variantOf !== null) {
+    const base = (d ? await d.resolve(variantOf, hctx) : null) as DynamicResolutionV074 | null;
+    if (!base) throw new TbError("dynamic_resolve_failed", "the base tool of this variant does not resolve", 404, { reason: "variant_base_unknown" });
+    if (!variantNarrowerOrEqual(res, base)) throw new TbError("dynamic_resolve_failed", "the variant is broader than its base tool", 403, { reason: "variant_broader" });
+  }
+  return res;
+}
+
+/** Dynamic ops (MANIFEST §5.3): crud/effect/holdFamily (and spec 0.1.74 holdFamilies) come from the app's own `resolve`, never from the agent. */
+async function resolveDynamic(rt: Runtime, op: ManifestOp, input: Json): Promise<{ eff: EffectiveOp; tool: string; args: Record<string, unknown> }> {
+  if (!isObj(input) || typeof input.tool !== "string" || !isObj(input.arguments)) throw new TbError("input_invalid", "dynamic call input must be { tool, arguments }", 400);
+  const hctx: SdkHookContext = { log: rt.log, db: rt.appDb, getKey: (n) => rt.keys.getKey(n), signal: AbortSignal.timeout(2000), secrets: rt.secretsStore };
+  const res = await resolveTool(rt, op, input.tool, hctx);
+  const families = [...holdFamilySet(res)];
   return {
-    eff: { id: op.id, crud: res.crud, effect: res.effect, ...(res.holdFamily ? { holdFamily: res.holdFamily } : {}), ...(op.scopeType ? { scopeType: op.scopeType } : {}) },
+    eff: {
+      id: op.id,
+      crud: res.crud,
+      effect: res.effect,
+      ...(res.holdFamily ? { holdFamily: res.holdFamily } : {}),
+      // spec 0.1.74: the full set flows with the effective op into authorize() (held when ANY member is held)
+      ...(families.length > 0 ? { holdFamilies: families } : {}),
+      ...(op.scopeType ? { scopeType: op.scopeType } : {}),
+    },
     tool: input.tool,
     args: input.arguments,
   };
 }
 
+/** The resolution is within the dynamic op's ceiling. An effect outside EFFECTS is never within it (fail closed). */
 export function withinCeiling(op: Operation, r: { crud: CrudAction[]; effect: Effect }): boolean {
   const c = op.dynamic;
   if (!c) return false;
-  return r.crud.length > 0 && r.crud.every((x) => c.crudCeiling.includes(x)) && EFFECTS.indexOf(r.effect) <= EFFECTS.indexOf(c.effectCeiling);
+  const e = EFFECTS.indexOf(r.effect);
+  return r.crud.length > 0 && r.crud.every((x) => c.crudCeiling.includes(x)) && e >= 0 && e <= EFFECTS.indexOf(c.effectCeiling);
 }
 
 // ── Hold view of a dynamic tool call (v0.1.23, SDK-HV-1, SDK-API §4.6) ─────
