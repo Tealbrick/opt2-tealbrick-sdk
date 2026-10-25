@@ -51,6 +51,7 @@ import { type AgentId, BRIDGE_OP_PATH, type BridgeOp, type Ed25519PublicJwk, typ
 import type { DynamicCatalogEntry, Manifest, Operation } from "@opt2-tealbrick/spec/manifest";
 import type { Json, OperationView } from "@opt2-tealbrick/spec/sdk";
 import { EventLog, type EventLogFaults } from "../../src/event-log.ts";
+import { type MiniPersonOpFaults, runMiniPersonOps } from "./mini-person-ops.ts";
 
 export interface MiniFlags {
   /** pre-C98: a required op without a _meta key is refused input_invalid, a supported one is forwarded keyless (no derived key) */
@@ -150,6 +151,12 @@ export interface MiniFlags {
   ignoreHookEnabled?: boolean;
   /** C117: a hook whose app refuses the connection (down) is skipped instead of hook_failed (fails B27.hook_app_down) */
   skipDownHookApp?: boolean;
+  /** spec 0.1.64 (BRIDGE §16, conformance 0.1.31): runs the person-op relay (mini-person-ops.ts) and DECLARES the `person_ops` cap */
+  personOps?: boolean;
+  /** conformance 0.1.31: one §16 rule broken (R-PO sensitivity) */
+  personOpFaults?: MiniPersonOpFaults;
+  /** runs the relay WITHOUT declaring the cap (fails R-PO-1 and B9.portal_paths) */
+  personOpsWithoutCap?: boolean;
 }
 
 /** Identity kept across restarts of one mini bridge (same volume): a restart does not enrol again. */
@@ -250,13 +257,13 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
   const boot = randomUUID();
   let stopped = false;
 
-  const portalCall = async (method: string, path: string, body?: unknown) => {
+  const portalCall = async (method: string, path: string, body?: unknown, timeoutMs = 5000) => {
     const raw = body === undefined ? undefined : new TextEncoder().encode(JSON.stringify(body));
     const assertion = await signAssertion("tb-bridge-assert+jwt", { iss: brg, sub: brg, aud: "tb:portal", iat: nowS() }, key, { method, pathAndQuery: path, body: raw });
-    return fetch(`${portal}${path}`, { method, headers: { "content-type": "application/json", "TB-Assert": assertion }, body: raw, signal: AbortSignal.timeout(5000) });
+    return fetch(`${portal}${path}`, { method, headers: { "content-type": "application/json", "TB-Assert": assertion }, body: raw, signal: AbortSignal.timeout(timeoutMs) });
   };
   /** spec 0.1.54 (C292): StatusReport.bridge.caps of every ack */
-  const declaredCaps: string[] = flags.declaredCaps ?? [...(flags.ownerRows || flags.events ? ["owner_rows"] : []), ...(flags.events ? ["events"] : [])];
+  const declaredCaps: string[] = flags.declaredCaps ?? [...(flags.ownerRows || flags.events ? ["owner_rows"] : []), ...(flags.events ? ["events"] : []), ...(flags.personOps ? ["person_ops"] : [])];
   const ack = (extra: Record<string, unknown> = {}) =>
     cfg &&
     portalCall("POST", enrol.ackPath, {
@@ -311,6 +318,9 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
       }
     }
   })();
+
+  // spec 0.1.64 (BRIDGE §16): the person-op relay
+  if (flags.personOps || flags.personOpsWithoutCap) runMiniPersonOps({ portalCall, config: () => cfg, stopped: () => stopped, log: (l) => logLines.push(l), faults: flags.personOpFaults ?? {} });
 
   /** an app that is not up yet (a real SDK app deployed before it claims) is fetched again later */
   async function fetchManifest(a: { ins: string; internalUrl: string }): Promise<void> {

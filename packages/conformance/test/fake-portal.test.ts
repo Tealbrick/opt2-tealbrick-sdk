@@ -1,8 +1,10 @@
 // Fake Portal: bridge-auth + device-auth rows only (default deny), enrolment, config long-poll, ack, device flow.
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
-import { type Ed25519KeyPair, generateKeyPair, keySetFrom, signAssertion, verifyConfig } from "@opt2-tealbrick/manifest";
+import { type Ed25519KeyPair, generateKeyPair, keySetFrom, signAssertion, ulid, verifyConfig, verifySignedCompact } from "@opt2-tealbrick/manifest";
+import { LIFETIME_S, MAX_JWS_BYTES, TYP } from "@opt2-tealbrick/spec/credentials";
 import { createFakePortal, FAKE_PORTAL_ROUTES, type FakePortal } from "../src/index.ts";
+import { bodyDigest } from "../src/person-op.ts";
 
 const now = () => Math.floor(Date.now() / 1000);
 
@@ -27,7 +29,8 @@ describe("fake portal", () => {
   after(() => p.close());
 
   it("serves only bridge/device rows (+ their public starts); everything else 404", async () => {
-    assert.deepEqual(FAKE_PORTAL_ROUTES.map((r) => r.opId).sort(), ["bridge_api.ack", "bridge_api.config", "bridge_api.enrol", "device.start", "device.token"]);
+    // spec 0.1.64 (BRIDGE §16): + the person-op pull and its result post
+    assert.deepEqual(FAKE_PORTAL_ROUTES.map((r) => r.opId).sort(), ["bridge_api.ack", "bridge_api.config", "bridge_api.enrol", "bridge_api.person_op_result", "bridge_api.person_ops", "device.start", "device.token"]);
     for (const [m, path] of [["GET", "/api/v1/workspaces"], ["GET", "/internal/routes"], ["POST", "/api/v1/device/approve"], ["GET", "/api/v1/me"]]) {
       assert.equal((await call(m, path, undefined, false)).status, 404, path);
     }
@@ -66,6 +69,49 @@ describe("fake portal", () => {
     const r = await call("POST", "/api/v1/bridge/ack", report);
     assert.deepEqual(r.body, { accepted: true, configRevision: p.rev });
     assert.equal(p.acks.length, 1);
+  });
+
+  it("person-op relay (spec 0.1.64): the long-poll hands each row out once with a Portal-signed K14 over the exact body; results are recorded; untaken rows expire", async () => {
+    const ins = `ins_${ulid()}`;
+    assert.equal((await call("GET", "/api/v1/bridge/person-ops?wait=0", undefined, false)).status, 401, "bridge assertion required");
+    assert.deepEqual((await call("GET", "/api/v1/bridge/person-ops?wait=0")).body, { items: [] });
+    const pending = call("GET", "/api/v1/bridge/person-ops?wait=1");
+    await new Promise((r) => setTimeout(r, 100));
+    const body = '{"q": "Grüße ✓"}';
+    const row = await p.queuePersonOp({ ins: ins as never, op: "items_list", body });
+    const got = await pending;
+    assert.equal(got.status, 200);
+    assert.deepEqual(got.body.items, [row.item], "the waiting poll is woken with the row");
+    assert.equal(got.body.items[0].body, body);
+    const v = verifySignedCompact(row.item.jws, keySetFrom({ keys: [p.activeKey().publicJwk] }, "tb:portal"), TYP.personOp, MAX_JWS_BYTES);
+    assert.ok(v.ok, "K14 signed by the Portal key, typ tb-person-op+jwt");
+    const c = (v as { payload: Record<string, unknown> }).payload;
+    assert.deepEqual(Object.keys(c).sort(), ["aud", "bd", "cli", "exp", "iat", "idk", "iss", "jti", "op", "pop", "sub", "ws"]);
+    assert.equal(c.iss, "tb:portal");
+    assert.equal(c.sub, `tb:per:${p.owner}`);
+    assert.equal(c.aud, `tb:ins:${ins}`);
+    assert.equal(c.ws, p.ws);
+    assert.equal(c.cli, "tbm");
+    assert.equal(c.pop, row.item.id);
+    assert.equal(c.bd, bodyDigest(body));
+    assert.match(String(c.bd), /^sha256:[0-9a-f]{64}$/);
+    assert.equal(Number(c.exp) - Number(c.iat), LIFETIME_S.personOp);
+    assert.match(String(c.jti), /^[0-9A-HJKMNP-TV-Z]{26}$/);
+    assert.deepEqual((await call("GET", "/api/v1/bridge/person-ops?wait=0")).body, { items: [] }, "handed out once");
+    const res = await call("POST", `/api/v1/bridge/person-ops/${row.item.id}/result`, { pop: row.item.id, status: 200, body: "{}" });
+    assert.deepEqual(res.body, { ok: true });
+    assert.deepEqual(p.personOpResults.map((x) => [x.pop, x.status, x.body]), [[row.item.id, 200, "{}"]]);
+    assert.equal((await call("POST", `/api/v1/bridge/person-ops/pop_${ulid()}/result`, { status: 0, body: "" })).status, 404, "unknown pop");
+    p.personOpTtlMs = 50;
+    try {
+      const late = await p.queuePersonOp({ ins: ins as never, op: "items_list", body: "{}" });
+      await new Promise((r) => setTimeout(r, 120));
+      assert.deepEqual((await call("GET", "/api/v1/bridge/person-ops?wait=0")).body, { items: [] }, "an untaken row expires");
+      assert.equal(late.expired, true);
+    } finally {
+      p.personOpTtlMs = 4000;
+    }
+    assert.equal(p.personOpPollsMaxOpen, 1);
   });
 
   it("device flow: kit cannot get owner; pending → approved → one-time; agent scope creates connections", async () => {

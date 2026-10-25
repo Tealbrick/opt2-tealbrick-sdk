@@ -15,10 +15,20 @@ export interface CoreStaticInput {
   productIds: readonly string[];
 }
 
-const AUTH_CLASSES = ["browser", "owner-cli", "bridge", "device", "public", "stripe-webhook"] as const;
+/** spec 0.1.58 (S1-0, PORTAL-API v0.1.58): + `host` (K13 host assertion), only on host.* rows and host.* rows only it (RT9). */
+const AUTH_CLASSES = ["browser", "owner-cli", "bridge", "device", "public", "stripe-webhook", "host"] as const;
 const PERSON = new Set(["browser", "owner-cli"]);
-/** PORTAL-API §1.1 "Explicit public rows": nothing else is reachable without a credential. */
-const EXPLICIT_PUBLIC = ["device.start", "device.token", "bridge_api.enrol", "stripe.webhook", "clerk.webhook", "portal.signing_keys"] as const;
+/** non-person credential classes: a row with one of them is not credential-free */
+const MACHINE_CREDENTIAL = new Set(["bridge", "host"]);
+/** PORTAL-API §1.1 "Explicit public rows": nothing else is reachable without a credential. v0.1.64 (C332a(3)): + `portal.info`. */
+const EXPLICIT_PUBLIC = ["device.start", "device.token", "bridge_api.enrol", "stripe.webhook", "clerk.webhook", "portal.signing_keys", "portal.info"] as const;
+/** RT1 as amended by spec 0.1.64 (C326, C332; routes.ts InvariantOwnerCli): K3 non-GET rows beyond drafts.* and the logout. */
+const OWNER_CLI_WRITES = ["owner_sessions.logout", "push_devices.register", "push_devices.unregister", "person_ops.call"] as const;
+/**
+ * R5 tokens a named row may carry, with the spec text that makes it a different op family: `person_ops.call` (PORTAL-API v0.1.64 B)
+ * relays ONE allow-listed person op of one app instance for a tbm owner session (PERSON_OP_RELAY); it is not tool execution.
+ */
+const R5_ALLOWED: Record<string, readonly string[]> = { "person_ops.call": ["call"] };
 /** RFC 8628 polling codes carried as `error.code` (CORE §8, C15). */
 const DEVICE_POLL_CODES = ["authorization_pending", "slow_down", "access_denied", "expired_token"] as const;
 
@@ -146,6 +156,8 @@ export function runCoreStatic(input: CoreStaticInput): CheckResult[] {
   for (const r of routes) {
     if (r.auth.length === 0) fieldIssues.push(`${r.opId}: no auth class`);
     for (const a of r.auth) if (!(AUTH_CLASSES as readonly string[]).includes(a)) fieldIssues.push(`${r.opId}: unknown auth ${a}`);
+    // RT9 (spec 0.1.58): the host class only on host.* rows, and host.* rows only that class
+    if ((r.auth as readonly string[]).includes("host") !== r.opId.startsWith("host.") || (r.opId.startsWith("host.") && r.auth.length !== 1)) fieldIssues.push(`${r.opId}: RT9 (host class ⇔ host.* row) broken: auth ${r.auth.join("+")}`);
     if (r.exposure !== "gateway" && r.exposure !== "internal") fieldIssues.push(`${r.opId}: exposure ${String(r.exposure)}`);
     if (!(r.transport in TRANSPORTS)) fieldIssues.push(`${r.opId}: transport ${r.transport}`);
     if (!(r.rate in RATE_CLASSES)) fieldIssues.push(`${r.opId}: rate ${r.rate}`);
@@ -173,7 +185,7 @@ export function runCoreStatic(input: CoreStaticInput): CheckResult[] {
   }
   rec("R1.table.bindings", "`{name}` and query keys bind to same-named input fields (PORTAL-API §1.3)", clean("every path param and query key binds to an input field", bindIssues));
 
-  const credentialFree = routes.filter((r) => r.exposure === "gateway" && !r.auth.some((a) => PERSON.has(a) || a === "bridge")).map((r) => r.opId);
+  const credentialFree = routes.filter((r) => r.exposure === "gateway" && !r.auth.some((a) => PERSON.has(a) || MACHINE_CREDENTIAL.has(a))).map((r) => r.opId);
   const extra = credentialFree.filter((id) => !(EXPLICIT_PUBLIC as readonly string[]).includes(id));
   const missing = EXPLICIT_PUBLIC.filter((id) => !credentialFree.includes(id));
   rec(
@@ -185,8 +197,8 @@ export function runCoreStatic(input: CoreStaticInput): CheckResult[] {
   rec("R1.table.p1_disjoint", "person and non-person classes never on one row (PORTAL-API §1.2 P1)", clean("no row mixes person and non-person auth", mixed));
 
   // ── R2: owner native session (K3) = reads + drafts.* (+ logout) ──
-  const ocBad = ownerCli.filter((r) => r.method !== "GET" && !r.opId.startsWith("drafts.") && r.opId !== "owner_sessions.logout").map((r) => `${r.opId} (${r.method})`);
-  rec("R2.owner_cli_rows", "owner-cli ⊆ GET ∪ drafts.* ∪ owner_sessions.logout", clean(`${ownerCli.length} owner-cli rows: reads + drafts.* + logout only`, ocBad));
+  const ocBad = ownerCli.filter((r) => r.method !== "GET" && !r.opId.startsWith("drafts.") && !(OWNER_CLI_WRITES as readonly string[]).includes(r.opId)).map((r) => `${r.opId} (${r.method})`);
+  rec("R2.owner_cli_rows", `owner-cli ⊆ GET ∪ drafts.* ∪ {${OWNER_CLI_WRITES.join(", ")}} (RT1, spec 0.1.64)`, clean(`${ownerCli.length} owner-cli rows: reads + drafts.* + ${OWNER_CLI_WRITES.join(" + ")} only`, ocBad));
   rec(
     "R2.owner_cli_no_confirm",
     "no owner-cli row has confirm: true",
@@ -216,7 +228,9 @@ export function runCoreStatic(input: CoreStaticInput): CheckResult[] {
   for (const r of routes) {
     for (const f of fields(r.input)) {
       const n = normName(f.name);
-      if (KEY_VALUE_NAMES.has(n)) keyInputs.push(`${r.opId}: ${r.input}.${f.path}`);
+      // a field typed as a closed set of string literals (e.g. PushEnvironment "sandbox" | "production") cannot hold a key value
+      const literals = /^\s*"[^"]*"(\s*\|\s*"[^"]*")*\s*$/.test(f.type) || stringUnion(types, f.type.trim()).length > 0;
+      if (KEY_VALUE_NAMES.has(n) && !literals) keyInputs.push(`${r.opId}: ${r.input}.${f.path}`);
       if (CREDENTIAL_INPUT_NAMES.has(n) && r.bodyLog !== "none") credInputs.push(`${r.opId}: ${r.input}.${f.path} on bodyLog ${r.bodyLog}`);
     }
   }
@@ -240,7 +254,7 @@ export function runCoreStatic(input: CoreStaticInput): CheckResult[] {
   for (const r of routes) {
     for (const t of new Set([...tokens(r.opId), ...tokens(r.path)])) {
       const why = FORBIDDEN_TOKENS[t];
-      if (why) forbidden.push(`${r.opId} ${r.method} ${r.path}: "${t}" (${why})`);
+      if (why && !R5_ALLOWED[r.opId]?.includes(t)) forbidden.push(`${r.opId} ${r.method} ${r.path}: "${t}" (${why})`);
     }
     const ss = segs(r.path);
     const last = ss.at(-1);

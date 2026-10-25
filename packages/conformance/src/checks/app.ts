@@ -45,6 +45,7 @@ import { bad, na, notRun, type Outcome, ok, refusedWith, type Suite, verdict } f
 import { Mint, newId, nowS, peek } from "../tokens.ts";
 import { versionBelow } from "../version.ts";
 import { type BridgeCapsFixture, CAPS_AGENT_PLACEHOLDER, type CallerListedFixture, type CompanionCallersFixture, type ConformanceConfig, type EventsProbeFixture, type HookCallerProductFixture, type InputCaller, type NarrowingFixture, type ScopeGrantFixture, type SetupStep } from "../waivers.ts";
+import { personOpAppChecks } from "./app-person-op.ts";
 import { CHECK_IDS } from "./catalog.ts";
 
 export interface AppTargetContext {
@@ -3086,6 +3087,8 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
         });
       }
     : undefined;
+  // ── S-PO person-op relay (conformance 0.1.31, spec 0.1.64, SDK-API §21; SDK >= 0.1.39): before A13, which leaves the app on new keys ──
+  await personOpAppChecks(s, ctx, { fixture: (id) => fixtureFor({ id }, "") });
   await keySetChecks(s, ctx, hs, multi);
 
   // ── A16 app-initiated calls (SDK-API v0.1.13 C85; observed only) ──
@@ -3103,6 +3106,11 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     }
     return verdict(problems.length === 0, problems.length ? problems.slice(0, 4).join("; ") : `${seen.length} app-initiated calls (e.g. ${String(seen[0]?.envelope?.target)}.${String(seen[0]?.envelope?.op)}), assertion and slice companion grant ok`);
   });
+
+  // ── RM-17 (spec 0.1.63, SDK-API v0.1.63 modelRole): catalogued so A11 maps the export; the row lands with the model-roles release ──
+  await s.run("RM-17", "modelRole() → null on a 404 without refuse code (bridge without model_roles); a required role gives needs_keys", "not checked by conformance 0.1.31", () =>
+    na("modelRole (spec 0.1.63) is not checked by conformance 0.1.31: the export is catalogued so A11 stays complete; RM-17 is covered by the miniapp-sdk tests of the release that ships modelRole, and its conformance row comes with the model-roles release"),
+  );
 
   // ── A11 SDK coverage ──
   await s.run("A11", "every exported function of types/sdk.ts has a check", "each generated SDK export maps to ≥ 1 catalogued check id", () => coverageOutcome());

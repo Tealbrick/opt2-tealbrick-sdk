@@ -40,7 +40,11 @@ export const SDK_COVERAGE: Readonly<Record<string, readonly string[]>> = {
   CSRF_HEADER: ["A6.csrf"],
   decideHold: ["A4.decide_person_only", "A10"],
   defineApp: ["A1.manifest_served", "M4.openapi", "A1.no_claim_route", "A17.pending_count"], // gitleaks:allow (check ids, not secrets)
+  // conformance 0.1.31 (spec 0.1.64, SDK-API §21): the family rule of relayed hold decisions (not observable in the generic suite)
+  familyAllowedFor: ["S-PO-8"],
   getKey: ["C8.keys_via_bridge"],
+  // conformance 0.1.31 (spec 0.1.63): catalogued only (RM-17 is not_applicable until the model-roles release)
+  modelRole: ["RM-17"],
   onKeysChanged: ["C8.keys_via_bridge"],
   SESSION_COOKIE: ["A6"],
   startApp: ["A1", "A1.health", "A7.restart", "A16.call_outside_handler", "A17.status_changed"],
