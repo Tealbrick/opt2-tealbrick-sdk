@@ -248,6 +248,13 @@ describe("POST /tb/v1/person-op (K14, SDK-API §21)", () => {
     await b.cleanup();
   });
 
+  test("C354: the claim and every status push declare caps [\"person_op\"] (gate by capability, never by version)", async () => {
+    assert.ok(b.bridge.claimBodies.length >= 1);
+    for (const c of b.bridge.claimBodies) assert.deepEqual(c.caps, ["person_op"], "claim");
+    await until(async () => b.bridge.statuses.length > 0);
+    for (const s of b.bridge.statuses) assert.deepEqual(s.caps, ["person_op"], "status");
+  });
+
   test("happy path: an allow-listed read op runs and returns its output; the person caller carries via tbm; no cookie, no CSRF", async () => {
     const r = await call(b, "items_list", {}, { idk: "idk_happy_path_0001" });
     assert.equal(r.status, 200, JSON.stringify(r.body));

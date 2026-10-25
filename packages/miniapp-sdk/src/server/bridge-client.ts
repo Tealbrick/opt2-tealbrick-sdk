@@ -19,6 +19,14 @@ const REQUEST_TIMEOUT_MS = 35_000;
  */
 export const SDK_PROOF_CLAIMS: readonly ProofClaimCap[] = ["bd"];
 
+/**
+ * v0.1.39 (C354, spec 0.1.69 `APP_CAPS` / `ClaimRequest.caps` / `AppStatus.caps`): what this SDK SERVES. Gate by capability, never by
+ * version: `person_op` = `POST /tb/v1/person-op` (SDK-API §21); Core and the bridge relay person ops only to an app that declares it.
+ * The app instance sends it in its claim and in every status push of a running app. Failed mode sends NO caps: it serves no ops, so
+ * it does not serve the relay either. SPEC-GAP: the committed spec pin (0.1.64) has no `AppCap` type yet; the values are spec 0.1.69's.
+ */
+export const SDK_APP_CAPS: readonly "person_op"[] = ["person_op"];
+
 async function readBody(res: Response): Promise<unknown> {
   const text = await res.text();
   if (text === "") return null;

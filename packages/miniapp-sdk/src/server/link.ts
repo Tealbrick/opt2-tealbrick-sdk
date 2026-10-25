@@ -12,7 +12,7 @@ import {
 import type { BridgeId, Ed25519PublicJwk, InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { CompanionResult, HealthStatus, Json, Logger } from "@opt2-tealbrick/spec/sdk";
 import type { BridgeClient } from "./bridge-client.ts";
-import { errorFrom, SDK_PROOF_CLAIMS } from "./bridge-client.ts";
+import { errorFrom, SDK_APP_CAPS, SDK_PROOF_CLAIMS } from "./bridge-client.ts";
 import { enrolCodeDigest, identityRefused, reclaimCode, waitForMountedDataDir } from "./claim-guard.ts";
 import { TbError } from "./errors.ts";
 import type { JobsSummary } from "./jobs.ts";
@@ -115,6 +115,8 @@ export class BridgeLink {
       version: rt.manifest.version,
       sdkVersion: rt.sdkVersion,
       proofClaims: [...SDK_PROOF_CLAIMS],
+      // v0.1.39 (C354): the capabilities this app serves (person_op = POST /tb/v1/person-op)
+      caps: [...SDK_APP_CAPS],
       scopesRev: rt.scopes.rev(),
       sliceRevision: rt.trust.slice?.rev ?? 0,
       keysRev: rt.keys.keysRev(),
@@ -162,10 +164,9 @@ export class BridgeLink {
       return false;
     }
     if (!(await this.#mounted())) return false;
-    const r = await this.#client.claim(
-      { code, instancePublicKey: rt.instanceKey.publicJwk, manifestDigest: rt.digest, version: rt.manifest.version, sdkVersion: rt.sdkVersion, proofClaims: [...SDK_PROOF_CLAIMS] },
-      this.#stop.signal,
-    );
+    // v0.1.39 (C354): `caps` = what this app serves (spec 0.1.69 ClaimRequest.caps; not in the 0.1.64 type, so not a literal here)
+    const request = { code, instancePublicKey: rt.instanceKey.publicJwk, manifestDigest: rt.digest, version: rt.manifest.version, sdkVersion: rt.sdkVersion, proofClaims: [...SDK_PROOF_CLAIMS], caps: [...SDK_APP_CAPS] };
+    const r = await this.#client.claim(request, this.#stop.signal);
     if (r.status !== 200) throw errorFrom(r, "claim_failed");
     const body = r.body as ClaimResponse;
     if (body?.ins !== rt.instanceId) {
