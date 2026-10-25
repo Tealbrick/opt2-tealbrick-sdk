@@ -34,9 +34,20 @@ export function declaredModelRoles(manifest: Manifest): readonly ModelRoleRequir
   return manifest.settings?.modelRoles ?? [];
 }
 
-/**
- * M-MR-4 (QA S4-3): env names a model role must not set, because they change how the service connects or loads code: any `*_PROXY`
- * (a proxy resolves the endpoint itself), `npm_config_*proxy`, `NODE_OPTIONS`, `NODE_EXTRA_CA_CERTS`, `LD_PRELOAD`, `LD_LIBRARY_PATH`,
- * `PATH`, `DYLD_*`. `tb-exec` also strips proxy names from the env of a role-bound service.
- */
-export const MODEL_ROLE_ENV_REFUSED = /_proxy$|^proxy$|^npm_config_.*proxy$|^(NODE_OPTIONS|NODE_EXTRA_CA_CERTS|LD_PRELOAD|LD_LIBRARY_PATH|PATH)$|^DYLD_/i;
+// ── spec follow-up #54 (UNRELEASED, Tealbrick/opt2-tealbrick-specs#54 head dfdbef2): M-MR-4 deny list ──────────────────────────────
+
+/** spec follow-up #54: `HOST_DENIED_ENV` of spec host.ts (code loading, library injection, egress redirection); a trailing `*` is a prefix. */
+export const HOST_DENIED_ENV = [
+  "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "LD_*", "DYLD_*", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
+  "PYTHONUSERBASE", "PERL5OPT", "PERL5LIB", "PERLLIB", "RUBYOPT", "RUBYLIB", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS",
+  "JDK_JAVA_OPTIONS", "CLASSPATH", "BASH_ENV", "ENV", "PATH", "HOME", "SHELL", "IFS", "GCONV_PATH", "OPENSSL_CONF",
+  "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "DOCKER_*", "BUN_*", "DENO_*",
+] as const;
+/** spec follow-up #54: env names no model role may set (M-MR-4): the host deny list plus TLS trust, CA bundles, package-manager and git config. A trailing `*` is a prefix; any name ending in `_PROXY` is refused too. */
+export const MODEL_ROLE_DENIED_ENV = [...HOST_DENIED_ENV, "NODE_TLS_REJECT_UNAUTHORIZED", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "NPM_CONFIG_*", "PYTHON*", "GIT_*"] as const;
+
+/** M-MR-4: true when a role env name is in `MODEL_ROLE_DENIED_ENV` (exact, or by prefix for an entry ending in `*`) or ends in `_PROXY`. */
+export function modelRoleEnvDenied(name: string): boolean {
+  if (name.endsWith("_PROXY")) return true;
+  return MODEL_ROLE_DENIED_ENV.some((d) => (d.endsWith("*") ? name.startsWith(d.slice(0, -1)) : name === d));
+}

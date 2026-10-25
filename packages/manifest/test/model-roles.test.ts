@@ -10,9 +10,11 @@ import {
   MODEL_ID_PATTERN,
   MODEL_PROVIDERS,
   MODEL_ROLE_ATTENTION,
+  MODEL_ROLE_DENIED_ENV,
   MODEL_ROLE_HINTS_MAX,
   MODEL_ROLES,
   MODEL_ROLES_CAP,
+  modelRoleEnvDenied,
   PROVIDER_ID_PATTERN,
   settingsFromEnv,
   validateManifest,
@@ -124,12 +126,15 @@ describe("RM-1 settings.modelRoles (MANIFEST §7.1)", () => {
     "M-MR-4 env name used twice inside one role",
     refuses("M-MR-4", "model_role_invalid", (m) => (m.settings.modelRoles[1].env.dims = "EMB_KEY"), "/settings/modelRoles/1/env/dims"),
   );
-  for (const name of ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "GRPC_PROXY", "PIP_PROXY", "SOCKS_PROXY", "GLOBAL_AGENT_HTTP_PROXY", "NODE_USE_ENV_PROXY", "NPM_CONFIG_PROXY", "NPM_CONFIG_HTTPS_PROXY", "NODE_OPTIONS", "NODE_EXTRA_CA_CERTS", "LD_PRELOAD", "LD_LIBRARY_PATH", "PATH", "DYLD_INSERT_LIBRARIES"]) {
+  for (const name of ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "GRPC_PROXY", "PIP_PROXY", "SOCKS_PROXY", "GLOBAL_AGENT_HTTP_PROXY", "NODE_USE_ENV_PROXY", "NPM_CONFIG_PROXY", "NPM_CONFIG_REGISTRY", "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH", "PATH", "HOME", "ENV", "DYLD_INSERT_LIBRARIES", "PYTHONPATH", "PYTHONWARNINGS", "GIT_SSH_COMMAND", "GIT_CONFIG_GLOBAL", "DOCKER_HOST", "JAVA_TOOL_OPTIONS", "CLASSPATH"]) {
     test(`M-MR-4 role env name ${name} (proxy, loader, search path) is refused`, refuses("M-MR-4", "model_role_invalid", (m) => (m.settings.modelRoles[1].env.provider = name), "/settings/modelRoles/1/env/provider"));
   }
-  test("M-MR-4 ordinary role env names still pass (MODEL, KEY, URL, PROXYLESS_MODE)", () => {
+  test("M-MR-4 ordinary role env names still pass (MODEL, KEY, URL, PROXYLESS_*, PATHWAY, ENVIRONMENT_NAME, GITHUB-like names)", () => {
     const r = mutate((m) => (m.settings.modelRoles[1].env = { provider: "KN_PROVIDER", model: "KN_MODEL", baseUrl: "KN_BASE_URL", key: "KN_API_KEY", dims: "PROXYLESS_DIMS" }));
     assert.equal(r.ok, true, JSON.stringify(r.ok ? [] : r.errors));
+    for (const name of ["PATHWAY", "ENVIRONMENT_NAME", "HOMEPAGE", "GITHUB_MODEL", "NODE_MODEL", "PYTHON_MODEL"]) {
+      assert.equal(modelRoleEnvDenied(name), name === "PYTHON_MODEL", name); // PYTHON* is a prefix on purpose
+    }
   });
   test("M-MR-4 the same env name on two different services is fine", () => {
     const r = mutate((m) => {
@@ -163,6 +168,7 @@ describe("mirror constants of spec 0.1.63", () => {
     assert.ok(!new RegExp(MODEL_ID_PATTERN).test("two words") && !new RegExp(MODEL_ID_PATTERN).test("https://x"));
     assert.equal(MODEL_ROLE_HINTS_MAX, 8);
     assert.equal(MODEL_ROLES_CAP, "model_roles");
+    assert.ok(MODEL_ROLE_DENIED_ENV.includes("NODE_TLS_REJECT_UNAUTHORIZED") && MODEL_ROLE_DENIED_ENV.includes("GIT_*") && MODEL_ROLE_DENIED_ENV.includes("HTTPS_PROXY"), "spec follow-up #54");
     assert.deepEqual(MODEL_ROLE_ATTENTION, ["model_role_missing", "model_role_optional", "embeddings_changed"]);
   });
 });

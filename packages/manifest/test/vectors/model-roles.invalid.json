@@ -1,6 +1,6 @@
 {
-  "source": "Copy of packages/spec/examples/model-roles.invalid.json of Tealbrick/opt2-tealbrick-specs PR #42 (spec 0.1.63, branch spec/model-roles-persona, QA-SPEC42-3). Not released yet: replace with the import of @opt2-tealbrick/spec/examples/model-roles.invalid.json after the spec release. Do not edit.",
-  "description": "v0.1.63 (QA-SPEC42-3): invalid settings.modelRoles cases for MANIFEST \u00a77.1 cross-field rules M-MR-1..5. Each case is merged into examples/notes.manifest.json (`settings` replaced, `services` added to runtime.services when given) and must be refused with `code`. The manifest package (sdk repo) tests against this file.",
+  "source": "Copy of packages/spec/examples/model-roles.invalid.json of Tealbrick/opt2-tealbrick-specs PR #54 (head dfdbef2, QA-SPEC54-4: M-MR-4 deny list): not released yet. Replace with the import of @opt2-tealbrick/spec/examples/model-roles.invalid.json after the spec release. Do not edit.",
+  "description": "v0.1.63 (QA-SPEC42-3): invalid settings.modelRoles cases for MANIFEST §7.1 cross-field rules M-MR-1..5. Each case is merged into examples/notes.manifest.json (`settings` replaced, `services` added to runtime.services when given) and must be refused with `code`. The manifest package (sdk repo) tests against this file.",
   "cases": [
     {
       "rule": "M-MR-1",
@@ -152,6 +152,190 @@
           ],
           "when": {
             "no_such_setting": "x"
+          }
+        }
+      ]
+    },
+    {
+      "rule": "M-MR-4",
+      "code": "model_role_invalid",
+      "what": "env name is a proxy variable",
+      "services": [
+        {
+          "id": "engine",
+          "build": true
+        }
+      ],
+      "modelRoles": [
+        {
+          "role": "reasoning",
+          "required": false,
+          "usedBy": [
+            "engine"
+          ],
+          "env": {
+            "baseUrl": "HTTPS_PROXY"
+          }
+        }
+      ]
+    },
+    {
+      "rule": "M-MR-4",
+      "code": "model_role_invalid",
+      "what": "env name is a loader variable",
+      "services": [
+        {
+          "id": "engine",
+          "build": true
+        }
+      ],
+      "modelRoles": [
+        {
+          "role": "reasoning",
+          "required": false,
+          "usedBy": [
+            "engine"
+          ],
+          "env": {
+            "model": "NODE_OPTIONS"
+          }
+        }
+      ]
+    },
+    {
+      "rule": "M-MR-4",
+      "code": "model_role_invalid",
+      "what": "env name NODE_TLS_REJECT_UNAUTHORIZED (TLS trust)",
+      "services": [
+        {
+          "id": "engine",
+          "build": true
+        }
+      ],
+      "modelRoles": [
+        {
+          "role": "reasoning",
+          "required": false,
+          "usedBy": [
+            "engine"
+          ],
+          "env": {
+            "model": "NODE_TLS_REJECT_UNAUTHORIZED"
+          }
+        }
+      ]
+    },
+    {
+      "rule": "M-MR-4",
+      "code": "model_role_invalid",
+      "what": "env name NPM_CONFIG_REGISTRY (package-manager config)",
+      "services": [
+        {
+          "id": "engine",
+          "build": true
+        }
+      ],
+      "modelRoles": [
+        {
+          "role": "reasoning",
+          "required": false,
+          "usedBy": [
+            "engine"
+          ],
+          "env": {
+            "model": "NPM_CONFIG_REGISTRY"
+          }
+        }
+      ]
+    },
+    {
+      "rule": "M-MR-4",
+      "code": "model_role_invalid",
+      "what": "env name PYTHONPATH (code loading)",
+      "services": [
+        {
+          "id": "engine",
+          "build": true
+        }
+      ],
+      "modelRoles": [
+        {
+          "role": "reasoning",
+          "required": false,
+          "usedBy": [
+            "engine"
+          ],
+          "env": {
+            "model": "PYTHONPATH"
+          }
+        }
+      ]
+    },
+    {
+      "rule": "M-MR-4",
+      "code": "model_role_invalid",
+      "what": "env name LD_AUDIT (library injection (LD_*))",
+      "services": [
+        {
+          "id": "engine",
+          "build": true
+        }
+      ],
+      "modelRoles": [
+        {
+          "role": "reasoning",
+          "required": false,
+          "usedBy": [
+            "engine"
+          ],
+          "env": {
+            "model": "LD_AUDIT"
+          }
+        }
+      ]
+    },
+    {
+      "rule": "M-MR-4",
+      "code": "model_role_invalid",
+      "what": "env name GRPC_PROXY (proxy (*_PROXY))",
+      "services": [
+        {
+          "id": "engine",
+          "build": true
+        }
+      ],
+      "modelRoles": [
+        {
+          "role": "reasoning",
+          "required": false,
+          "usedBy": [
+            "engine"
+          ],
+          "env": {
+            "model": "GRPC_PROXY"
+          }
+        }
+      ]
+    },
+    {
+      "rule": "M-MR-4",
+      "code": "model_role_invalid",
+      "what": "env name GIT_SSH_COMMAND (git config)",
+      "services": [
+        {
+          "id": "engine",
+          "build": true
+        }
+      ],
+      "modelRoles": [
+        {
+          "role": "reasoning",
+          "required": false,
+          "usedBy": [
+            "engine"
+          ],
+          "env": {
+            "model": "GIT_SSH_COMMAND"
           }
         }
       ]

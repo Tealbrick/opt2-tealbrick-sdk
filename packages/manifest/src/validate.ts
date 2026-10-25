@@ -18,7 +18,7 @@ import type { ErrorObject, ValidateFunction } from "ajv/dist/2020.js";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { HOLDS_PENDING_OP } from "./decision.ts";
 import { canonicalize, digest } from "./jcs.ts";
-import { DATA_POLICIES, declaredModelRoles, MODEL_ROLE_ENV_REFUSED, MODEL_ROLES } from "./model-roles.ts";
+import { DATA_POLICIES, declaredModelRoles, MODEL_ROLES, modelRoleEnvDenied } from "./model-roles.ts";
 import { DYNAMIC_CALL_INPUT_SCHEMA, derivedToolNames, standardOpInputSchema, toolNameFits } from "./ops.ts";
 import { parseSkillFile, parseVariable, skillTextViolation, VARIABLE_RE } from "./skill-text.ts";
 
@@ -746,8 +746,8 @@ function modelRoleRules(m: Manifest, idx: SettingsIndex, add: Add): void {
       if (!r.usedBy.includes(id) || r.env === undefined) return;
       for (const [field, name] of Object.entries(r.env)) {
         if (typeof name !== "string") continue;
-        if (MODEL_ROLE_ENV_REFUSED.test(name)) {
-          add("M-MR-4", "model_role_invalid", ptr("settings", "modelRoles", i, "env", field), `env name ${name} changes how the service connects or loads code (proxy, loader and search-path names are refused)`);
+        if (modelRoleEnvDenied(name)) {
+          add("M-MR-4", "model_role_invalid", ptr("settings", "modelRoles", i, "env", field), `env name ${name} changes how the service connects or loads code (MODEL_ROLE_DENIED_ENV and *_PROXY names are refused)`);
           continue;
         }
         const first = owner.get(name);
