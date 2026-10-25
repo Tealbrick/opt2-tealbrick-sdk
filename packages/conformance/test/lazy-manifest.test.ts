@@ -1,4 +1,4 @@
-// conformance 0.1.30 (spec 0.1.75, BRIDGE §7.5): the lazy-tools app of group `lazy` (B30.*) and the rows' wiring.
+// conformance 0.1.30 (spec 0.1.76, BRIDGE §7.5): the lazy-tools app of group `lazy` (B30.*) and the rows' wiring.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { validateManifest } from "@opt2-tealbrick/manifest";
@@ -27,7 +27,7 @@ test("lazyManifest: null exactly while the suite's validator refuses listing laz
   (op as { listing?: string }).listing = "lazy";
   const accepts = validateManifest(probe).ok;
   if (!accepts) {
-    assert.equal(m, null, "a validator before spec 0.1.75 refuses the derived app: group lazy reports not_run with the cap");
+    assert.equal(m, null, "a validator before spec 0.1.76 refuses the derived app: group lazy reports not_run with the cap");
     return;
   }
   assert.ok(m);

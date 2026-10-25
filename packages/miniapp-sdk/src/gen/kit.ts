@@ -37,7 +37,7 @@ export interface KitToolDefGen {
 }
 
 /**
- * QA-SDK48-5: the spec 0.1.75 BRIDGE §7.5 lazy pair, exactly as the bridge lists it for a product with lazy ops: names
+ * QA-SDK48-5: the spec 0.1.76 BRIDGE §7.5 lazy pair, exactly as the bridge lists it for a product with lazy ops: names
  * `<product>__tb_more_search` / `<product>__tb_more_call`, the bridge's texts, and on the call tool the widest effect and
  * annotations over `reachOps` = every static agent op tb_more_call can reach with a full grant (lazy AND listed, workflow
  * ops too: TOOLS is the full-grant list). QA-SDK47D-1: lazy ops alone gave readOnlyHint true next to a listed destructive op.
@@ -221,7 +221,7 @@ function kitIndex(lm: LoadedManifest): string {
       });
     } else {
       const P = pascal(op.id);
-      // QA-SDK48-5 (forward, spec ≥ 0.1.75 `listing: "lazy"`): a lazy op is not listed; the bridge's more_search/more_call reach it
+      // QA-SDK48-5 (forward, spec ≥ 0.1.76 `listing: "lazy"`): a lazy op is not listed; the bridge's more_search/more_call reach it
       const listing = (op as { listing?: string }).listing;
       staticOps.push({ id: op.id, effect: op.effect });
       if (listing === "lazy") lazyOps.push({ id: op.id, effect: op.effect });
