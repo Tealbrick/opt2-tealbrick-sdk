@@ -163,7 +163,7 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
     "B-EV-17": "\"events\" in every StatusReport of a bridge that passes all of these, never otherwise",
     "B-EV-18": "a bridge without the events capability answers tealbrick/events/* with JSON-RPC -32601 (method not found)",
   }),
-  // conformance 0.1.30 (spec 0.1.71, BRIDGE §7.5): lazy tools; gated by the reported `lazy_tools` cap, never by version
+  // conformance 0.1.30 (spec 0.1.73, BRIDGE §7.5): lazy tools; gated by the reported `lazy_tools` cap, never by version
   lazy: ids({
     "B30.lazy_hidden": "tools/list has the hot op and <product>__tb_more_search + tb_more_call, none of the lazy ops",
     "B30.lazy_annotations": "tb_more_call annotations = the widest over the ops this agent reaches through it (lazy and listed); tb_more_search is read-only",

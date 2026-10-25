@@ -37,7 +37,7 @@ export interface KitToolDefGen {
 }
 
 /**
- * QA-SDK48-5: the spec 0.1.71 BRIDGE §7.5 lazy pair, exactly as the bridge lists it for a product with lazy ops: names
+ * QA-SDK48-5: the spec 0.1.73 BRIDGE §7.5 lazy pair, exactly as the bridge lists it for a product with lazy ops: names
  * `<product>__tb_more_search` / `<product>__tb_more_call`, the bridge's texts, and on the call tool the widest effect and
  * annotations of the lazy ops. Empty when no op is lazy.
  */
@@ -217,7 +217,7 @@ function kitIndex(lm: LoadedManifest): string {
       });
     } else {
       const P = pascal(op.id);
-      // QA-SDK48-5 (forward, spec ≥ 0.1.71 `listing: "lazy"`): a lazy op is not listed; the bridge's more_search/more_call reach it
+      // QA-SDK48-5 (forward, spec ≥ 0.1.73 `listing: "lazy"`): a lazy op is not listed; the bridge's more_search/more_call reach it
       const listing = (op as { listing?: string }).listing;
       if (listing === "lazy") lazyOps.push({ id: op.id, effect: op.effect });
       else toolDefs.push({ name: mcpToolName(m.id, op.id), title: op.title, description: op.description, inputSchema: op.input ?? { type: "object" }, effect: op.effect, ...(listing === "workflow" ? { listing: "workflow" } : {}) });

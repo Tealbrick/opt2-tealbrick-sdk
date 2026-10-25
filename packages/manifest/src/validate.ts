@@ -837,7 +837,7 @@ function backupArtifactRouteRules(m: Manifest, add: Add): void {
   m.operations.forEach((op, i) => {
     if (op.listing !== undefined && op.audience !== "agent") add("M-OP-11", "listing_invalid", ptr("operations", i, "listing"), "listing applies to agent ops only");
   });
-  // v0.1.31 (spec 0.1.71, M4b; QA-SPEC48-2): `listing: "lazy"` only on STATIC agent ops, and the manifest states
+  // v0.1.31 (spec 0.1.73, M4b; QA-SPEC48-2): `listing: "lazy"` only on STATIC agent ops, and the manifest states
   // requires.bridge >= the first bridge with `lazy_tools` (an older bridge has no fallback: the app would lose every tool)
   let lazy = false;
   m.operations.forEach((op, i) => {

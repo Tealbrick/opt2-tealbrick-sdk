@@ -1,4 +1,4 @@
-// manifest 0.1.31 (spec 0.1.71, C330(1), M4b; QA-SPEC48-2/-3): `listing: "lazy"` — M-OP-13 and the requiredBridgeVersion row.
+// manifest 0.1.31 (spec 0.1.73, C330(1), M4b; QA-SPEC48-2/-3): `listing: "lazy"` — M-OP-13 and the requiredBridgeVersion row.
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import example from "@opt2-tealbrick/spec/examples/notes.manifest.json" with { type: "json" };
@@ -16,10 +16,10 @@ const withLazy = (requires?: string): M => {
   return m;
 };
 const codes = (r: ReturnType<typeof validateManifest>) => (r.ok ? [] : r.errors.map((e) => `${e.rule}:${e.code}:${e.path}`));
-/** does the pinned spec schema know `lazy`? (false until the pin moves to spec >= 0.1.71) */
+/** does the pinned spec schema know `lazy`? (false until the pin moves to spec >= 0.1.73) */
 const schemaKnowsLazy = !codes(validateManifest(withLazy(LAZY_LISTING_MIN_BRIDGE))).some((c) => c.startsWith("schema:"));
 
-describe("listing lazy (spec 0.1.71)", () => {
+describe("listing lazy (spec 0.1.73)", () => {
   test("requiredBridgeVersion: any lazy op → at least LAZY_LISTING_MIN_BRIDGE, with the reason; none → no lazy row", () => {
     const r = requiredBridgeVersion(withLazy() as never);
     assert.ok(r.bridge !== null && compareSemver(r.bridge, LAZY_LISTING_MIN_BRIDGE) >= 0);
@@ -27,7 +27,7 @@ describe("listing lazy (spec 0.1.71)", () => {
     assert.ok(!requiredBridgeVersion(base() as never).reasons.some((x) => x.includes("lazy_tools")));
   });
 
-  test("M-OP-13: requires.bridge absent or below the minimum → listing_invalid; at the minimum → valid; lazy on a dynamic op → listing_invalid", { skip: schemaKnowsLazy ? false : "the pinned spec schema (before 0.1.71) refuses listing lazy itself (schema_invalid)" }, () => {
+  test("M-OP-13: requires.bridge absent or below the minimum → listing_invalid; at the minimum → valid; lazy on a dynamic op → listing_invalid", { skip: schemaKnowsLazy ? false : "the pinned spec schema (before 0.1.73) refuses listing lazy itself (schema_invalid)" }, () => {
     for (const rb of [undefined, "0.2.7"]) {
       assert.ok(codes(validateManifest(withLazy(rb))).includes("M-OP-13:listing_invalid:/requires/bridge"), String(rb));
     }
