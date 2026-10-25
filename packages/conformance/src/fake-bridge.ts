@@ -442,7 +442,8 @@ export class FakeBridge {
       portalKeys: [...this.portalKeys.map((k) => ({ jwk: k.key.publicJwk, status: k.status })), ...(over?.extraPortalKeys ?? [])],
       ...(portalKeySet ? { portalKeySet } : {}),
       bridge: { id: this.ids.bridge, keys: this.bridgeKeys.slice(0, 4).map((k) => k.publicJwk), ...(this.#sliceCaps() !== undefined ? { caps: this.#sliceCaps() as string[] } : {}) },
-      pause: { workspace: this.pause.workspace, agents: [...this.pause.agents], instances: [...this.pause.instances] },
+      // C353 (specs#49): an app slice carries `pause.agents: []` ALWAYS; a paused edge agent is marked by `agents[].status` only, so a row can fail for an app that reads only `pause.agents`
+      pause: { workspace: this.pause.workspace, agents: [], instances: [...this.pause.instances] },
       revoked: { jtis: this.revoked.map((r) => ({ jti: r.jti, exp: r.exp })) },
       personNbf: this.personNbf,
       grants: await this.companionGrants(),
