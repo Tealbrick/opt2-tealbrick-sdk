@@ -13,6 +13,8 @@ export const SDK_COVERAGE: Readonly<Record<string, readonly string[]>> = {
   keySetFrom: ["C5.grant_unannounced_kid", "C5.proof_unannounced_kid", "C5.bridge_key_rotation"],
   manifestDigest: ["M3", "A1", "A1.manifest_served", "A1.health"],
   RECEIPT_STATUSES: ["A4.holds_list", "A10", "A4.mark_after_failed"],
+  // spec 0.1.70 (follow-up of specs#49): the TbError codes of the model-role helpers; same family as modelRole (sdk#52 adds its rows)
+  SDK_MODEL_ERROR_CODES: ["C8.keys_via_bridge"],
   renderSkill: ["B17.served_as_rendered", "B7.skills_resources"],
   isPrivateInternalUrl: ["B21.internal_url_external", "B21.own_infra_flag_required", "B21.own_infra_allowed", "B21.neighbour_url_refused"],
   portalRootKeys: ["A13.kss_pinned", "B20.kss_enrolled"],
@@ -39,6 +41,9 @@ export const SDK_COVERAGE: Readonly<Record<string, readonly string[]>> = {
   // @opt2-tealbrick/miniapp-sdk (server)
   CSRF_HEADER: ["A6.csrf"],
   decideHold: ["A4.decide_person_only", "A10"],
+  // conformance 0.1.31 (spec 0.1.64, SDK-API §21, C332a(4)): the family rule of relayed hold decisions (S-PO-8; not observable in the
+  // generic suite, covered by the miniapp-sdk tests)
+  familyAllowedFor: ["S-PO-8"],
   defineApp: ["A1.manifest_served", "M4.openapi", "A1.no_claim_route", "A17.pending_count"], // gitleaks:allow (check ids, not secrets)
   getKey: ["C8.keys_via_bridge"],
   // v0.1.63 (RM-17): the app calls modelRole() against a bridge with and without the route (A23 reads the result black-box: status +
@@ -64,5 +69,4 @@ export const SDK_COVERAGE: Readonly<Record<string, readonly string[]>> = {
  * does not export, is stale). A false mapping to a row that never calls the export is worse than this list.
  */
 export const SDK_UNCOVERED: Readonly<Record<string, string>> = {
-  familyAllowedFor: "v0.1.64 (C332a(4)), the person-op relay lane: declared by the spec, not implemented in this repo; the lane that implements it adds the row",
 };

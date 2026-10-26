@@ -46,6 +46,7 @@ import { bad, na, notRun, type Outcome, ok, refusedWith, type Suite, verdict } f
 import { Mint, newId, nowS, peek } from "../tokens.ts";
 import { versionBelow } from "../version.ts";
 import { type BridgeCapsFixture, CAPS_AGENT_PLACEHOLDER, type CallerListedFixture, type CompanionCallersFixture, type ConformanceConfig, type EventsProbeFixture, type HookCallerProductFixture, type InputCaller, type NarrowingFixture, type ScopeGrantFixture, type SetupStep } from "../waivers.ts";
+import { personOpAppChecks } from "./app-person-op.ts";
 import { CHECK_IDS } from "./catalog.ts";
 
 export interface AppTargetContext {
@@ -3133,6 +3134,8 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
         });
       }
     : undefined;
+  // ── S-PO person-op relay (conformance 0.1.31, spec 0.1.64, SDK-API §21; app cap person_op, C354): before A13, which leaves the app on new keys ──
+  await personOpAppChecks(s, ctx, { fixture: (id) => fixtureFor({ id }, "") });
   await keySetChecks(s, ctx, hs, multi);
 
   // ── A16 app-initiated calls (SDK-API v0.1.13 C85; observed only) ──

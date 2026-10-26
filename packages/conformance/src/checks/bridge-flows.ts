@@ -12,6 +12,7 @@ import type { Json } from "@opt2-tealbrick/spec/sdk";
 import type { CapturedPayload } from "../fake-bridge.ts";
 import { errorCode, type HttpAnswer, listen, request } from "../http.ts";
 import { type HtmlForm, type OAuthClient, parseForms, pkcePair, redirectParams } from "../mcp-agent.ts";
+import { PERSON_OP_RESULT_PATH_RE, PERSON_OPS_CAP, PERSON_OPS_PATH } from "../person-op.ts";
 import type { PayloadScan } from "../report.ts";
 import { type ScanNeedle, scanPayloads } from "../scan.ts";
 import { bad, notRun, type Outcome, ok, verdict } from "../suite.ts";
@@ -1077,10 +1078,18 @@ export async function scanChecks(c: BridgeCtx): Promise<PayloadScan> {
     { label: "call id", values: callIds },
     { label: "key value", values: [...c.secrets.keyValues] },
   ];
-  await c.run("B9.portal_paths", "only enrol / config / ack traffic to Portal", "every captured Portal request is POST enrol, GET config or POST ack", () => {
-    const allowed = (m: string, path: string) => (m === "POST" && path === "/api/v1/bridge/enrol") || (m === "GET" && path === "/api/v1/bridge/config") || (m === "POST" && path === "/api/v1/bridge/ack");
+  // conformance 0.1.31 (spec 0.1.64, BRIDGE §16): the person-op pull and result posts are bridge→Portal paths ONLY for a bridge that
+  // declares `person_ops` in its StatusReports (any report of the run: the reference bridge drops the cap after the standalone
+  // handover, and polls before its first report); a bridge that never declares it and calls them still fails
+  const relay = c.w.portal.acks.some((a) => Array.isArray(a.bridge?.caps) && (a.bridge.caps as unknown[]).includes(PERSON_OPS_CAP));
+  await c.run("B9.portal_paths", "only enrol / config / ack traffic to Portal", "every captured Portal request is POST enrol, GET config or POST ack; with the person_ops cap also GET /bridge/person-ops and POST /bridge/person-ops/{pop}/result", () => {
+    const allowed = (m: string, path: string) =>
+      (m === "POST" && path === "/api/v1/bridge/enrol") ||
+      (m === "GET" && path === "/api/v1/bridge/config") ||
+      (m === "POST" && path === "/api/v1/bridge/ack") ||
+      (relay && ((m === "GET" && path === PERSON_OPS_PATH) || (m === "POST" && PERSON_OP_RESULT_PATH_RE.test(path))));
     const off = portal.filter((r) => !allowed(r.method, r.path.split("?")[0] ?? ""));
-    return verdict(off.length === 0 && portal.length > 0, `${portal.length} requests; other [${[...new Set(off.map((r) => `${r.method} ${r.path.split("?")[0]}`))].join(",")}]`);
+    return verdict(off.length === 0 && portal.length > 0, `${portal.length} requests; person_ops cap ${relay ? "declared" : "not declared"}; other [${[...new Set(off.map((r) => `${r.method} ${r.path.split("?")[0]}`))].join(",")}]`);
   });
   const asPayload = (where: string, r: { method: string; path: string; headers: Record<string, string>; body: string; at?: number }): CapturedPayload => ({ dir: "app-out", method: r.method, path: `${where} ${r.path}`, headers: r.headers, body: r.body, at: r.at ?? 0 });
   const portalPayloads = portal.map((r) => asPayload("portal", r));

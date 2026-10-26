@@ -39,7 +39,7 @@ export interface FakeAppWorld {
   bridgeInternalUrl(): string;
 }
 
-export type ReceivedKind = "op" | "hook" | "bridge_op" | "ui" | "public" | "manifest" | "health" | "other";
+export type ReceivedKind = "op" | "hook" | "bridge_op" | "ui" | "public" | "manifest" | "health" | "person_op" | "other";
 
 export interface Received {
   seq: number;
@@ -59,6 +59,8 @@ export interface Received {
   /** verified claims (grant for ops) */
   grant?: Record<string, unknown>;
   proof?: Record<string, unknown>;
+  /** conformance 0.1.31 (BRIDGE §16): the exact body bytes of a relayed person op (`kind: "person_op"`) */
+  raw?: Buffer;
 }
 
 export interface OpInfo {
@@ -76,6 +78,11 @@ export interface OpInfo {
 }
 export type OpAnswerSpec = { status: number; body: unknown };
 export type OpHandler = (info: OpInfo) => Promise<OpAnswerSpec> | OpAnswerSpec;
+/**
+ * conformance 0.1.31 (BRIDGE §16): answer to a relayed person op (`POST /tb/v1/person-op`). The fake does not verify K14 (the
+ * bridge rows check what the bridge forwards); `holdMs` = answer only after that long (a forward that times out).
+ */
+export type PersonOpHandler = (rec: Received) => Promise<OpAnswerSpec & { holdMs?: number }> | (OpAnswerSpec & { holdMs?: number });
 /** `null` = never answer (timeout test); otherwise status + JSON body */
 export type HookHandler = (hookId: string, phase: HookPhase, body: Record<string, unknown>) => Promise<OpAnswerSpec | null> | OpAnswerSpec | null;
 
@@ -102,6 +109,8 @@ export class FakeApp {
   onOp: OpHandler | null = null;
   /** per-hook behaviour; default: before allows, context adds nothing, after passes */
   onHook: HookHandler | null = null;
+  /** conformance 0.1.31: relayed person ops; default answers 200 ok with an empty output */
+  onPersonOp: PersonOpHandler | null = null;
   /** bridge-op answers */
   catalog: (body: Record<string, unknown>) => unknown = () => [];
   resolve: (body: Record<string, unknown>) => unknown = () => ({});
@@ -194,6 +203,7 @@ export class FakeApp {
         rec.kind = "health";
         return sendJson(res, 200, { status: "ok", manifestDigest: this.digest, version: this.manifest.version });
       }
+      if (req.method === "POST" && path === "/tb/v1/person-op") return await this.#personOp(rec, raw, res);
       const op = /^\/tb\/v1\/ops\/([A-Za-z0-9_.-]+)$/.exec(path);
       if (req.method === "POST" && op) return await this.#op(rec, op[1] as string, proof, header(req, "authorization"), body, res);
       const hook = /^\/tb\/v1\/hooks\/([a-z0-9_]+)$/.exec(path);
@@ -261,6 +271,18 @@ export class FakeApp {
       proof: p.claims as unknown as Record<string, unknown>,
     };
     const a = this.onOp ? await this.onOp(info) : { status: 200, body: { status: "ok", output: { op: opId, marker: this.marker } } };
+    sendJson(res, a.status, a.body);
+  }
+
+  async #personOp(rec: Received, raw: Buffer, res: ServerResponse): Promise<void> {
+    rec.kind = "person_op";
+    rec.raw = Buffer.from(raw);
+    rec.name = String(peek(rec.headers["tb-person-op"] ?? "")?.op ?? "");
+    const a = this.onPersonOp ? await this.onPersonOp(rec) : { status: 200, body: { status: "ok", output: {} } };
+    if (a.holdMs) {
+      await sleep(a.holdMs);
+      if (res.destroyed) return;
+    }
     sendJson(res, a.status, a.body);
   }
 

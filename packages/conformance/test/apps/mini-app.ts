@@ -44,9 +44,12 @@ import type { Effect, Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json, OperationView, TrustContext } from "@opt2-tealbrick/spec/sdk";
 import { applyLevelCrud, LEVEL_CRUD_ENV, parseLevelCrud } from "../../src/level-crud.ts";
 import { readTar } from "../../src/tar.ts";
+import { type MiniPersonOpFaults, miniPersonOp, startMiniStandalone } from "./mini-person-op.ts";
 import { writeTarGz } from "./tar-write.ts";
 
 export interface MiniAppFaults {
+  /** spec 0.1.64 (SDK-API §21, conformance 0.1.31): one rule of POST /tb/v1/person-op broken (mini-person-op.ts) */
+  personOp?: MiniPersonOpFaults;
   skipProofVerify?: boolean;
   skipGrantVerify?: boolean;
   ignorePause?: boolean;
@@ -336,6 +339,8 @@ class E extends Error {
 export async function startMiniApp(released: Manifest, env: Record<string, string>, faults: MiniAppFaults = {}, port = 0) {
   // spec 0.1.52 (conformance 0.1.25): an A21 row simulates "an app update" by restarting with TBCONF_LEVEL_CRUD; this start module applies it
   const manifest = faults.ignoresLevelCrud ? released : applyLevelCrud(released, parseLevelCrud(env[LEVEL_CRUD_ENV]));
+  // spec 0.1.64 (S-PO-10): app-alone mode serves no relayed person op
+  if (env.TB_STANDALONE === "1") return startMiniStandalone(manifest, env, faults.personOp ?? {}, port);
   const ins = env.TB_INSTANCE_ID as InstanceId;
   const dataDir = env.TB_DATA_DIR;
   const backupDir = env.TB_BACKUP_DIR;
@@ -471,7 +476,7 @@ export async function startMiniApp(released: Manifest, env: Record<string, strin
 
   // claim (once; again only after a refused identity with a NEW enrolment code, SDK-API §13 v0.1.12)
   async function claim(reclaim: boolean): Promise<void> {
-    const r = await bridge("POST", "/tb/v1/claim", { code: env.TB_ENROL_CODE, instancePublicKey: key.publicJwk, manifestDigest: mDigest, version: manifest.version, sdkVersion: faults.reportedSdkVersion ?? `${manifest.sdkMajor}.0.0`, ...(faults.noProofClaims ? {} : { proofClaims: ["bd"] }) }, undefined, {}, false);
+    const r = await bridge("POST", "/tb/v1/claim", { code: env.TB_ENROL_CODE, instancePublicKey: key.publicJwk, manifestDigest: mDigest, version: manifest.version, sdkVersion: faults.reportedSdkVersion ?? `${manifest.sdkMajor}.0.0`, ...(faults.noProofClaims ? {} : { proofClaims: ["bd"] }), ...(faults.personOp?.noCap ? {} : { caps: ["person_op"] }) }, undefined, {}, false);
     if (r.status !== 200 || !isObj(r.body) || r.body.ins !== ins) throw new Error(`claim failed: ${r.status}`);
     st.claimed = true;
     st.codeDigest = sha(env.TB_ENROL_CODE ?? "");
@@ -522,7 +527,7 @@ export async function startMiniApp(released: Manifest, env: Record<string, strin
         const r = await bridge(
           "POST",
           `/tb/v1/status?wait=${now ? 0 : 60}`,
-          { ...roleStatus(), version: manifest.version, sdkVersion: `${manifest.sdkMajor}.0.0`, scopesRev: 0, sliceRevision: slice?.rev ?? 0, keysRev, pendingHolds: pending(), ...(faults.noProofClaims ? {} : { proofClaims: ["bd"] }) },
+          { ...roleStatus(), version: manifest.version, sdkVersion: `${manifest.sdkMajor}.0.0`, scopesRev: 0, sliceRevision: slice?.rev ?? 0, keysRev, pendingHolds: pending(), ...(faults.noProofClaims ? {} : { proofClaims: ["bd"] }), ...(faults.personOp?.noCap ? {} : { caps: ["person_op"] }) },
           AbortSignal.any([stop.signal, poll.signal]),
         );
         first = false;
@@ -559,7 +564,7 @@ export async function startMiniApp(released: Manifest, env: Record<string, strin
       if (r.status === 200 || r.status === 202) return r.body as Json;
       const code = String(((r.body as { error?: { code?: string } } | null)?.error?.code) ?? "app_error");
       if (attempt === 0 && code === "grant_stale" && !faults.noCompanionRetry) {
-        const s0 = await bridge("POST", "/tb/v1/status?wait=0", { ...roleStatus(), version: manifest.version, sdkVersion: `${manifest.sdkMajor}.0.0`, scopesRev: 0, sliceRevision: 0, keysRev, pendingHolds: pending(), ...(faults.noProofClaims ? {} : { proofClaims: ["bd"] }) });
+        const s0 = await bridge("POST", "/tb/v1/status?wait=0", { ...roleStatus(), version: manifest.version, sdkVersion: `${manifest.sdkMajor}.0.0`, scopesRev: 0, sliceRevision: 0, keysRev, pendingHolds: pending(), ...(faults.noProofClaims ? {} : { proofClaims: ["bd"] }), ...(faults.personOp?.noCap ? {} : { caps: ["person_op"] }) });
         if (s0.status === 200 && isObj(s0.body) && typeof s0.body.slice === "string") installSlice(s0.body.slice);
         continue;
       }
@@ -976,6 +981,9 @@ export async function startMiniApp(released: Manifest, env: Record<string, strin
     json(res, 200, { status: "ok", output: out });
   }
 
+  // spec 0.1.64 (SDK-API §21): relayed person ops from the workspace bridge (K14)
+  const relayed = miniPersonOp({ trust, personNbf: () => slice?.personNbf ?? 0, product, ops, faults: faults.personOp ?? {} });
+
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", "http://x");
     const path = url.pathname;
@@ -989,6 +997,10 @@ export async function startMiniApp(released: Manifest, env: Record<string, strin
         return json(res, 200, { openapi: "3.1.0", info: { title: manifest.name, version: manifest.version }, paths: Object.fromEntries(ops.filter((o) => o.audience === "agent").map((o) => [`/tb/v1/ops/${o.id}`, { post: {} }])) });
       if (faults.servesClaimRoute && path === "/tb/v1/claim") return json(res, 200, { ok: true });
       if (req.method === "POST" && path.startsWith("/tb/v1/ops/")) return await agentOp(req, res, decodeURIComponent(path.slice(11)), raw);
+      if (req.method === "POST" && path === "/tb/v1/person-op") {
+        const a = relayed(req.headers["tb-person-op"] as string | undefined, raw);
+        return json(res, a.status, a.body);
+      }
       if (req.method === "POST" && path.startsWith("/tb/v1/hooks/")) {
         const t = trust();
         if (!t) throw new E(503, "slice_stale");
@@ -1112,7 +1124,14 @@ export async function startMiniApp(released: Manifest, env: Record<string, strin
   }
 
   const server = createServer((req, res) => void handle(req, res));
-  await new Promise<void>((r) => server.listen(port || Number(env.TBCONF_PORT ?? 0), "127.0.0.1", () => r()));
+  // a port taken meanwhile (EADDRINUSE) rejects instead of leaving the start pending forever
+  await new Promise<void>((r, j) => {
+    server.once("error", j);
+    server.listen(port || Number(env.TBCONF_PORT ?? 0), "127.0.0.1", () => {
+      server.off("error", j);
+      r();
+    });
+  });
   const addr = server.address() as { port: number };
   return {
     url: `http://127.0.0.1:${addr.port}`,

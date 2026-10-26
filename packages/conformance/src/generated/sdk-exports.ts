@@ -20,6 +20,7 @@ export const SDK_EXPORTS: readonly SdkExport[] = [
   { name: "RECEIPT_STATUSES", kind: "const", pkg: "@opt2-tealbrick/manifest" },
   { name: "renderSkill", kind: "function", pkg: "@opt2-tealbrick/manifest" },
   { name: "SDK_AUDIT_ACTIONS", kind: "const", pkg: "@opt2-tealbrick/manifest" },
+  { name: "SDK_MODEL_ERROR_CODES", kind: "const", pkg: "@opt2-tealbrick/manifest" },
   { name: "signInstanceAssertion", kind: "function", pkg: "@opt2-tealbrick/manifest" },
   { name: "signJws", kind: "function", pkg: "@opt2-tealbrick/manifest" },
   { name: "signJwsWithSigner", kind: "function", pkg: "@opt2-tealbrick/manifest" },

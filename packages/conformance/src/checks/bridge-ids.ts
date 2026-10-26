@@ -126,6 +126,17 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
     "B27.hook_disabled_skipped": "a declared hook listed with enabled: false → skipped: the call is forwarded, its app gets no hook call (C117)",
     "B27.hook_app_down": "a declared hook listed and enabled whose app is down (connection refused) → hook_failed; the call is not forwarded (C117)",
   }),
+  // conformance 0.1.31 (spec 0.1.64, BRIDGE §16, C326): the person-op relay; gated by the reported `person_ops` cap, never by version
+  person_ops: ids({
+    "R-PO-1": "the person_ops cap declared ⇔ the bridge keeps ONE long-poll GET /bridge/person-ops (with its bridge assertion)",
+    "R-PO-2": "a row whose ins is not in the current config → result 409 instance_unknown; nothing is forwarded",
+    "R-PO-3": "POST <internalUrl>/tb/v1/person-op: body bytes unchanged (sha256 = K14 bd, non-ASCII included), TB-Person-Op = the K14, the app's answer posted as the result",
+    "R-PO-4": "no relayed body, app answer or K14 in the bridge's logs",
+    "R-PO-5": "one forward per pop, never retried (app answers 500, or holds past the forward timeout)",
+    "R-PO-6": "result status: app unreachable → -1; timeout after sending → 0; the app's status passed through",
+    "R-PO-7": "a row for an app that does not declare person_op (spec 0.1.70, C354) → result 409 person_op_unsupported; nothing reaches the app",
+    "R-PO-8": "malformed app caps (not an array of strings within APP_CAPS_LIMITS) count as none (→ 409 person_op_unsupported); an unknown entry next to person_op is ignored (→ forwarded)",
+  }),
   // C91: a REAL @opt2-tealbrick/miniapp-sdk app behind the bridge (the fake apps cannot catch a binding the SDK refuses)
   real_app: ids({
     "B25.real_catalog_search": "<product>__<op>_search through the bridge returns the real SDK app's catalog entries",

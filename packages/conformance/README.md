@@ -3,6 +3,44 @@
 The Teal Brick opt2 conformance suite: checks, a fake bridge and a fake Portal, generated from `@opt2-tealbrick/spec`.
 Targets: `app`, `manifest`, `bridge`, `relay`, `core` (`tb-conformance --help`).
 
+## 0.1.31 (spec 0.1.70, C326, C354): person-op relay
+
+Release order (C215): spec 0.1.70 → `@opt2-tealbrick/miniapp-sdk` with `POST /tb/v1/person-op` and `caps: ["person_op"]` (sdk#49) → this package → the bridge that declares `person_ops` (bridge#24). The version number is a reservation (C354: rows are decided by capabilities, never by versions). Only this package's spec pin moves, to 0.1.70 (lockfile integrity pinned); manifest and miniapp-sdk keep theirs. The pinned spec adds three SDK exports for A11: `familyAllowedFor` (mapped to `S-PO-8`), and `modelRole` and `SDK_MODEL_ERROR_CODES` (mapped to `C8.keys_via_bridge`, as in sdk#52, which adds the model-role rows).
+
+- **Core target (static), because of the pin move.** The rules now follow the route table of spec 0.1.58 to 0.1.70:
+  - the auth class `host` is accepted, with RT9 checked (`host` only on `host.*` rows), and `host.d.ts` is in the type scan;
+  - `portal.info` is an explicit public row;
+  - RT1 as amended admits `push_devices.register`, `push_devices.unregister` and `person_ops.call`;
+  - a field typed as a closed set of string literals (`PushEnvironment`) cannot carry a key value (R4);
+  - two rows are exempt from one R5 token each: `person_ops.call` from `call` (PORTAL-API v0.1.64 B), and `licences.staff_comp` from `staff` (the one exception that PORTAL-API §6 names).
+- **Bridge target: group `person_ops`, `R-PO-1`..`R-PO-8`** (BRIDGE §16, spec 0.1.70). The rows depend on the `person_ops` capability of the latest StatusReport, never on the version. Without the cap every row is `not_applicable`, but `R-PO-1` FAILS a bridge that polls `GET /bridge/person-ops` without declaring it. The fake Portal plays Core. The primary fake app plays the app: it pushes a status with `caps: ["person_op"]` for the group, and a status without caps at the end.
+  - `R-PO-1`: with the cap, an accepted poll (bridge assertion) with `wait` in 1..`pollWaitS`, and never more than one poll open at a time.
+  - `R-PO-2`: a row for an instance id that no config lists → result `409` with `error.code` `instance_unknown`, and no fake app receives anything.
+  - `R-PO-3`: a body with non-ASCII text and non-canonical spacing → exactly one `POST /tb/v1/person-op`. The sha256 of the bytes received equals K14 `bd`, `TB-Person-Op` equals the K14, the content type is JSON, and the result carries the app's status and body.
+  - `R-PO-4`: the captured bridge logs contain no body marker, no app-answer marker and no K14 (the whole token, its payload or its signature). A harness that cannot capture logs gives `not_run`, never a pass.
+  - `R-PO-5`: the app answers 500, or holds its answer for `bridgeForwardS` + 3 s → exactly one request each time, also 2 s after the result.
+  - `R-PO-6`: app listener closed → `-1`; answer held past the forward timeout → `0`; a 403 envelope and a 500 come back with the app's status and body.
+  - `R-PO-7`: the app pushes a status without caps → result `409` `person_op_unsupported` (`PERSON_OP_BRIDGE_REFUSALS.appUnsupported`), and nothing reaches the app. With `["person_op"]` again → forwarded.
+  - `R-PO-8`: malformed caps count as none (→ `person_op_unsupported`): a string, `APP_CAPS_LIMITS.maxEntries + 1` entries, or an entry of `maxLength + 1` characters, each next to `person_op`. An unknown entry next to `person_op` (`["person_op", "future_cap"]`) is ignored → forwarded.
+  - `B9.portal_paths` admits `GET /api/v1/bridge/person-ops` and `POST /api/v1/bridge/person-ops/{pop}/result` only for a bridge that declares `person_ops` in a StatusReport of the run (a bridge drops the cap after the standalone handover). A bridge that never declares it and calls them still fails. `B9.no_payload` is unchanged.
+- **App target: `S-PO-1`..`S-PO-12`** (SDK-API §21 with the sharpening of `S-PO-7` / `S-PO-9` in spec 0.1.70). The rows apply to an app that declares `person_op` in `ClaimRequest.caps` or in its latest `AppStatus.caps`. A value outside `APP_CAPS_LIMITS` counts as none. Any other app gets `not_applicable`, whatever version it reports (C354). Every K14 is signed with the fake bridge's Portal key. The token rows use `tb.export` as the probe op: it is on no allow-list entry, so a K14 that passes every token and digest check gets `403 person_op_not_allowed` (the positive control). An earlier refusal is `401 person_op_invalid`.
+  - `S-PO-1` K11 launch ticket; `S-PO-2` `aud` of another instance; `S-PO-3` foreign `ws`; `S-PO-4` wrong body → 401, then the same K14 with the right body → 401 (jti spent), a fresh one → 403; `S-PO-5` replay → 401.
+  - `S-PO-6`: `tb.key_set`, `tb.export`, another product's allow-listed op and an own unlisted person op → 403 each.
+  - `S-PO-7`: `cli` `tbd` and `cli` on a read and a write op → 401 each. A `tbm` K14 with the same jti then gets 403, so the refused jti was not spent.
+  - `S-PO-9`: two K14s with the same `iat`. `exp` 5 s in the past → 401; `exp` 1 s in the past (inside `expLeewayS`) → 403.
+  - `S-PO-10`: a restart with `TB_STANDALONE=1` on a fresh data dir → 503 `person_op_unavailable`. A restart back must push its status again. `--url` mode gives `not_run`.
+  - `S-PO-11`: an allow-listed write op of the own product (product `inbox` only), two K14s with one `idk` → both 200, and the second answer is the stored first one. Without such an op the row is `not_applicable`. Without an input the op accepts (`inputs.<op>`) the row is `not_run`.
+  - `S-PO-8` (no relayed hold decision reaches a generic app; family rule: miniapp-sdk tests and the Inbox suite) and `S-PO-12` (Inbox-specific) are `not_applicable`, with the reason in the row.
+- **Fakes.**
+  - Fake Portal: `queuePersonOp({ins, op, body, mint?, jws?})` mints the K14. The claim set is closed: `exp = iat + LIFETIME_S.personOp`, `bd` = sha256 over the exact UTF-8 bytes, `cli` `tbm`, `sub tb:per:<owner>`. Rows expire untaken after `queueTtlS`, and the long-poll hands each row out once. Also `waitPersonOpResult(pop, ms)`, `personOpResults`, `personOpPolls`, `personOpPollsMaxOpen`.
+  - Fake app: `onPersonOp` (status, body, `holdMs`); it records the raw bytes.
+  - Helpers in `src/person-op.ts`: `mintPersonOp`, `bodyDigest`, `declaredAppCaps` (the `APP_CAPS_LIMITS` rule), `PERSON_OP_APP_CAP`.
+- **Test doubles.** Each fault fails its row (`test/bridge/person-ops-target.test.ts`, `test/app-person-op.test.ts`).
+  - Mini bridge (`personOps: true`): it forwards only to an app whose latest status declares `person_op`. Faults: `rewritesBody`, `retries`, `logsBody`, `unknownInsNotDelivered`, `zeroForUnreachable`, `ignoresAppCaps` (forwards anyway: R-PO-7, R-PO-8), `lenientAppCaps` (R-PO-8), and the flag `personOpsWithoutCap`.
+  - Mini app: it declares `caps: ["person_op"]` in its claim and every status push. Faults: `noCap` (every S-PO row `not_applicable`), `noBodyDigest`, `jtiAfterBody`, `noReplay`, `generalLeeway`, `anyCli`, `allowAll`, `ignoresAud`, `ignoresWs`, `anyTyp`, `servedStandalone`, `ignoresIdk`.
+  - The real miniapp-sdk (the workspace one, or `TBCONF_SDK_DIR`) passes every S-PO row it can be driven on. The case is skipped, with the reason, for a checkout without the route.
+- **Test stability.** `scripts/run-tests.ts` runs with `--test-timeout=600000`, so a test that waits forever fails with its name instead of ending its file as an unnamed cancel. The test doubles' `listen` helpers reject on `EADDRINUSE` instead of staying pending.
+
 ## 0.1.30 (spec 0.1.64, C322(3), C330(4)): model roles in the fake bridge
 
 - The fake bridge serves `GET /tb/v1/model-roles/<role>` per BRIDGE §15.4 (`TB-Assert` of the app instance or a service): a role not in `MODEL_ROLES` or not declared by the manifest for the caller (`app` or the service id) → 403 `role_not_declared`; no binding → 404 `role_not_set`; a binding below the entry's `minPolicy` → 403 `role_policy_too_low` (nothing of the binding in the body); a binding whose key is unset (`keyUnset`) → 404; else the binding with `keysRev` and `Cache-Control: no-store`. The fake declares cap `model_roles` in the slices it signs while it serves the route for a manifest that declares roles (an explicit `control.setBridgeCaps` list wins); `control.setModelRoutes(false)` = a bridge without the cap (no route: 404 `not_found`, RM-17). Control API: `control.setRole(role, binding)` / `control.deleteRole(role)` bump `keysRev` (one revision for keys and bindings) and wake the long-polls; `bridge.roleFetches` records each answered-or-policy-refused fetch. Tests: `test/fake-bridge.test.ts`, and `test/model-roles-real-sdk.test.ts` runs the real miniapp-sdk (needs_keys + attention, the binding, a changed binding).

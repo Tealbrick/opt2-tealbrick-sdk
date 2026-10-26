@@ -22,7 +22,7 @@ export {
   type FakeBridgeOptions,
   type FakeRoleBinding,
 } from "./fake-bridge.ts";
-export { createFakePortal, FAKE_PORTAL_ROUTES, FakePortal, FakePortalControl, type FakePortalOptions } from "./fake-portal.ts";
+export { createFakePortal, FAKE_PORTAL_ROUTES, FakePortal, FakePortalControl, type FakePortalOptions, type PersonOpResultSeen, type QueuedPersonOp } from "./fake-portal.ts";
 export { FakeUpstream, type UpstreamRequest } from "./fake-upstream.ts";
 export { checkStartModule, type ForkedStart, type ForkStartOptions, forkStart } from "./fork-start.ts";
 export { SDK_EXPORTS, type SdkExport } from "./generated/sdk-exports.ts";
@@ -30,6 +30,7 @@ export { applyLevelCrud, LEVEL_CRUD_ENV, type LevelCrudChange, parseLevelCrud } 
 export { KeyAgent, McpSession, OAuthAgent, parseForms, pkcePair } from "./mcp-agent.ts";
 export { type AppDriver, DECOY_PRODUCT, type MultiAppDeps, PEER_SETTINGS_ENV, type PreparedPeer, preparePeers, runPeerChecks } from "./multi-app.ts";
 export { defaultCacheRoot, extractArchive, fetchVerifiedIndex, githubSource, INDEX_BASES, type LoadedPeer, loadPeer, PeerError, type PeerSourceOptions, peerCacheDir, RELEASE_KEYS, type ReleaseRecord, removePeerCaches, selectRecord } from "./peer-source.ts";
+export { APP_CAPS_LIMITS, bodyDigest, declaredAppCaps, mintPersonOp, PERSON_OP_APP_CAP, PERSON_OP_BRIDGE_REFUSALS, PERSON_OP_HEADER, PERSON_OP_ROUTE, PERSON_OPS_CAP, type PersonOpMint } from "./person-op.ts";
 export { loadSdk, REAL_ENTRIES, REAL_OPS, type RealApp, type RealCompanion, type RealRunningApp, type RealStartContext, realAppManifest, type SdkModule, startRealApp } from "./real-app.ts";
 export {
   applyWaivers,

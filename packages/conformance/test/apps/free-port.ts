@@ -2,8 +2,9 @@
 import { createServer } from "node:net";
 
 export function freePort(): Promise<number> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const srv = createServer();
+    srv.once("error", reject);
     srv.listen(0, "127.0.0.1", () => {
       const port = (srv.address() as { port: number }).port;
       srv.close(() => resolve(port));
