@@ -14,10 +14,13 @@ export function requestId(): string {
 export class HttpError extends Error {
   readonly code: string;
   readonly status: number;
-  constructor(status: number, code: string, message: string) {
+  /** conformance 0.1.31: `error.details` of the envelope (e.g. `{ pointer }` of an `input_invalid`) */
+  readonly details: Record<string, unknown> | undefined;
+  constructor(status: number, code: string, message: string, details?: Record<string, unknown>) {
     super(message);
     this.code = code;
     this.status = status;
+    this.details = details;
   }
 }
 
@@ -48,8 +51,8 @@ export function sendJson(res: ServerResponse, status: number, body: unknown, hea
   res.end(text);
 }
 
-export function sendError(res: ServerResponse, status: number, code: string, message: string): void {
-  const body: ErrorEnvelope<string> = { error: { code, message, requestId: requestId() } };
+export function sendError(res: ServerResponse, status: number, code: string, message: string, details?: Record<string, unknown>): void {
+  const body = { error: { code, message, requestId: requestId(), ...(details ? { details } : {}) } } as ErrorEnvelope<string>;
   sendJson(res, status, body);
 }
 

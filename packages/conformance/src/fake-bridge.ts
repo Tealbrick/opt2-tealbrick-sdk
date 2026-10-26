@@ -6,6 +6,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import {
   assertPublicJwk,
+  callerContextProblem,
   DATA_POLICY_RANK,
   DEFAULT_HELD_FAMILIES,
   declaredModelRoles,
@@ -39,6 +40,7 @@ import {
   type ClaimRequest,
   type ClaimResponse,
   type InstanceSlice,
+  type JsonObject,
   type KeyFetchResponse,
   type OpResult,
 } from "@opt2-tealbrick/spec/bridge";
@@ -97,6 +99,8 @@ export interface PeerCall {
   caller: InstanceId;
   /** the companion grant the caller presented (already checked by gate()) */
   grant: string;
+  /** conformance 0.1.31 (BRIDGE §8.5, flag `appCallContext`): the caller's context keys, to merge into the op context (absent: none) */
+  context?: JsonObject;
 }
 export interface PeerAnswer {
   status: number;
@@ -228,6 +232,19 @@ export class FakeBridge {
    * (404 `not_found`, no refuse code; RM-17) and no cap.
    */
   modelRoutes = true;
+  /**
+   * spec 0.1.77 (C367 P3, BRIDGE §8.3, cap `app_hold_status`): true = this fake routes `tb.hold_status` of an app caller when the presented
+   * companion grant's `wf` lists it (else 403 `not_in_workflow`) and declares the cap in the slices it signs (when `bridgeCaps` is not set).
+   * false = a bridge without the cap: the op is not routed for an app caller (403 `not_in_workflow`). The target's SDK version is not
+   * gated here: the REAL peer app answers.
+   */
+  appHoldStatus = false;
+  /**
+   * spec 0.1.77 (C367 P4, BRIDGE §8.5, cap `app_call_context`): true = this fake checks `CallEnvelope.context` with `callerContextProblem`
+   * against the `prd` of the presented grant (400 `input_invalid`, `details.pointer`), hands the keys to the target (`PeerCall.context`) and
+   * declares the cap in the slices it signs (when `bridgeCaps` is not set). false = a bridge without the cap: the field is ignored.
+   */
+  appCallContext = false;
   bridgeKeys: Ed25519KeyPair[];
   stranger: Ed25519KeyPair;
   readonly sdkMajors: number[];
@@ -466,7 +483,8 @@ export class FakeBridge {
   /** `bridge.caps` of the next slice: the explicit list when a test set one, else `model_roles` while this fake serves the route for a manifest that declares roles. */
   #sliceCaps(): unknown[] | undefined {
     if (this.bridgeCaps !== undefined) return [...this.bridgeCaps];
-    return this.modelRoutes && declaredModelRoles(this.manifest).length > 0 ? [MODEL_ROLES_CAP] : undefined;
+    const caps = [...(this.modelRoutes && declaredModelRoles(this.manifest).length > 0 ? [MODEL_ROLES_CAP] : []), ...(this.appHoldStatus ? ["app_hold_status"] : []), ...(this.appCallContext ? ["app_call_context"] : [])];
+    return caps.length > 0 ? caps : undefined;
   }
 
   wake(): void {
@@ -535,7 +553,7 @@ export class FakeBridge {
     } catch (e) {
       const err = e instanceof HttpError ? e : new HttpError(500, "internal", "fake bridge error");
       if (err.status !== 404 && path !== BRIDGE_INTERNAL_PATHS.status) this.violations.push({ route: path, code: err.code, detail: err.message, at: Date.now() });
-      sendError(res, err.status, err.code, err.message);
+      sendError(res, err.status, err.code, err.message, err.details);
     }
   }
 
@@ -774,13 +792,23 @@ export class FakeBridge {
       declaredScopeTypes: real ? [...real.scopeTypes] : [],
     });
     if (g.decision === "refuse") throw new HttpError(403, g.reason, "refused by gate()");
+    const claims = peek(grant) as { wf?: unknown; prd?: unknown } | null;
+    // spec 0.1.77 (BRIDGE §8.3, cap `app_hold_status`): gate() skips the CRUD ceiling and the workflow step for tb.hold_status (I4); an APP caller needs the op in its grant's wf
+    if (env.op === "tb.hold_status" && !(this.appHoldStatus && Array.isArray(claims?.wf) && claims.wf.includes("tb.hold_status"))) throw new HttpError(403, "not_in_workflow", "tb.hold_status is not in the grant's workflow");
+    // spec 0.1.77 (BRIDGE §8.5, cap `app_call_context`): the caller context against the VERIFIED product of the grant (prd)
+    let context: JsonObject | undefined;
+    if (this.appCallContext && env.context !== undefined) {
+      const problem = callerContextProblem(typeof claims?.prd === "string" ? claims.prd : null, env.context);
+      if (problem) throw new HttpError(400, "input_invalid", problem.message, { pointer: problem.pointer });
+      if (Object.keys(env.context).length > 0) context = env.context as JsonObject;
+    }
     for (const h of this.hooks) {
       if (h.behaviour === "deny") throw new HttpError(403, "hook_denied", `${h.phase} hook denied the call`);
       if (h.behaviour === "timeout") await new Promise((r) => setTimeout(r, 2100));
       throw new HttpError(502, "hook_failed", `${h.phase} hook failed (fail closed)`);
     }
     if (real) {
-      const r = await real.route({ envelope: env as CallEnvelope, caller: who.ins, grant });
+      const r = await real.route({ envelope: env as CallEnvelope, caller: who.ins, grant, ...(context ? { context } : {}) });
       if (r.status !== 200 && r.status !== 202) {
         // the peer's refusal is relayed with its status and error code (the caller's callApp sees what the peer said)
         const e = (r.body as { error?: { code?: unknown; message?: unknown } } | null)?.error;
@@ -933,6 +961,16 @@ export class FakeBridgeControl {
     this.#b.roleBindings.delete(role);
     this.#b.keysRev++;
     this.#b.wake();
+  }
+  /** spec 0.1.77 (C367 P3): true = this fake implements BRIDGE §8.3 and declares `app_hold_status` (the next slice); false = a bridge without the cap. */
+  setAppHoldStatus(on: boolean): Promise<number> {
+    this.#b.appHoldStatus = on;
+    return this.#b.rebuildSlice();
+  }
+  /** spec 0.1.77 (C367 P4): true = this fake implements BRIDGE §8.5 and declares `app_call_context` (the next slice); false = a bridge without the cap. */
+  setAppCallContext(on: boolean): Promise<number> {
+    this.#b.appCallContext = on;
+    return this.#b.rebuildSlice();
   }
   /** v0.1.63 (RM-17): false = a bridge without cap `model_roles` (no route, no cap in the slices after the next publish); true = serves it. */
   setModelRoutes(on: boolean): Promise<number> {

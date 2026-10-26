@@ -208,8 +208,8 @@ class World {
       for (const y of members) {
         if (x === y || !(x.manifest.companions ?? []).some((c) => c.product === y.manifest.id)) continue;
         x.bridge.ids.peers[y.manifest.id] = y.ins;
-        const route: PeerRoute = async ({ envelope, caller, grant }) => {
-          const answer = await y.bridge.client(y.url()).callOp(envelope.op, envelope.input as Json, { caller, grant, context: {}, ...(envelope.idempotencyKey ? { idempotencyKey: envelope.idempotencyKey } : {}) });
+        const route: PeerRoute = async ({ envelope, caller, grant, context }) => {
+          const answer = await y.bridge.client(y.url()).callOp(envelope.op, envelope.input as Json, { caller, grant, context: (context ?? {}) as Record<string, Json>, ...(envelope.idempotencyKey ? { idempotencyKey: envelope.idempotencyKey } : {}) });
           this.#calls.push({ from: x.manifest.id, to: y.manifest.id, op: envelope.op, idempotencyKey: envelope.idempotencyKey, status: answer.status, body: answer.body, at: Date.now() });
           return { status: answer.status, body: answer.body };
         };

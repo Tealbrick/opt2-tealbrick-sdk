@@ -140,6 +140,64 @@ describe("fake bridge: model roles (v0.1.63, BRIDGE §15.4)", () => {
   });
 });
 
+describe("fake bridge: app hold status and caller context (conformance 0.1.31, spec 0.1.77, BRIDGE §8.3 / §8.5)", () => {
+  let b: FakeBridge;
+  let key: Ed25519KeyPair;
+  const caps = () => (peek(b.slice as string) as unknown as InstanceSlice).bridge.caps;
+  const call = (env: Record<string, unknown>, grant: string) => signed(b, key, "POST", "/tb/v1/call", env, { "TB-Grant": grant });
+  before(async () => {
+    b = await createFakeBridge({ manifest, maxWaitS: 1 });
+    key = await generateKeyPair();
+    assert.equal((await post(`${b.url}/tb/v1/claim`, claimBody(b, key))).status, 200);
+  });
+  after(() => b.close());
+
+  it("declares each cap in the slice only while its flag is on; an explicit list wins", async () => {
+    await b.control.republish();
+    assert.equal(caps(), undefined);
+    await b.control.setAppHoldStatus(true);
+    assert.deepEqual(caps(), ["app_hold_status"]);
+    await b.control.setAppCallContext(true);
+    assert.deepEqual(caps(), ["app_hold_status", "app_call_context"]);
+    await b.control.setBridgeCaps(["owner_rows"]);
+    assert.deepEqual(caps(), ["owner_rows"]);
+    await b.control.setBridgeCaps(undefined);
+    await b.control.setAppHoldStatus(false);
+    await b.control.setAppCallContext(false);
+    assert.equal(caps(), undefined);
+  });
+
+  it("tb.hold_status: not routed without the flag or without the op in the grant's wf; routed with both", async () => {
+    const listed = await b.companionGrantFor("conf-peer", { wf: ["peer_get", "tb.hold_status"], prd: "evolution" });
+    const unlisted = await b.companionGrantFor("conf-peer", { prd: "evolution" });
+    const env = { target: "conf-peer", op: "tb.hold_status", input: { holdId: "hld_x" } };
+    assert.equal((await call(env, listed)).body.error.code, "not_in_workflow", "a bridge without the cap does not route it");
+    await b.control.setAppHoldStatus(true);
+    assert.equal((await call(env, unlisted)).body.error.code, "not_in_workflow", "wf does not list it");
+    const ok = await call(env, listed);
+    assert.deepEqual([ok.status, ok.body.status], [200, "ok"]);
+    await b.control.setAppHoldStatus(false);
+  });
+
+  it("context: ignored without the flag; with it checked against the grant's prd (400 input_invalid + pointer) and handed to the target", async () => {
+    const grant = await b.companionGrantFor("conf-peer", { prd: "evolution" });
+    const noPrd = await b.companionGrantFor("conf-peer");
+    const env = (context: unknown) => ({ target: "conf-peer", op: "peer_get", input: { id: "x" }, context });
+    const run = { "evolution.run": "run_1" };
+    assert.equal((await call(env({ "kanban.card": "c" }), grant)).status, 200, "a bridge without the cap ignores the field");
+    await b.control.setAppCallContext(true);
+    const bad = await call(env({ "kanban.card": "c" }), grant);
+    assert.deepEqual([bad.status, bad.body.error.code, bad.body.error.details], [400, "input_invalid", { pointer: "/context/kanban.card" }]);
+    const tb = await call(env({ "tb.onBehalfOf": 1 }), grant);
+    assert.deepEqual(tb.body.error.details, { pointer: "/context/tb.onBehalfOf" });
+    assert.equal((await call(env(run), grant)).status, 200);
+    assert.deepEqual((await call(env(run), noPrd)).body.error.details, { pointer: "/context" }, "no verified product: a non-empty context is refused");
+    assert.equal((await call(env({}), noPrd)).status, 200, "{} is accepted");
+    assert.equal((await call(env([1]), grant)).body.error.details.pointer, "/context");
+    await b.control.setAppCallContext(false);
+  });
+});
+
 describe("fake bridge: claim", () => {
   let b: FakeBridge;
   let key: Ed25519KeyPair;
