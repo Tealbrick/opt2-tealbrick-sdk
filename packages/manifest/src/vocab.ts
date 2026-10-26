@@ -64,6 +64,8 @@ export type {
 export {
   AGENT_MODES,
   CATEGORIES,
+  /** v0.1.77 (spec 0.1.77, C367 P3): `tb.hold_status`, the one other standard op a one-product companion entry may name (M-CP-3) */
+  COMPANION_HOLD_STATUS_OP,
   /** v0.1.20 (spec 0.1.42): shared app-to-app contract ids */
   CONTRACT_IDS,
   CRUD_ACTIONS,
