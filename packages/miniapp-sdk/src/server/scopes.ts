@@ -8,6 +8,27 @@ import { TbError } from "./errors.ts";
 import { metaGet, metaSet, type RawDb, type Row, tx } from "./store.ts";
 
 const SUMMARY_MAX = 80;
+
+/**
+ * Spec 0.1.65 (C331 D5b/D8), declared here until this package pins that spec (then `ScopeSourceItem`, `SCOPE_SOURCES_MAX` and
+ * `SCOPE_SOURCE_LABEL_MAX` come from @opt2-tealbrick/spec/bridge): one scope instance an agent may use, as the owner UI names it.
+ * `id` = the app's own scope instance id; `label` without control or format characters (\p{Cc}, \p{Cf}), at most 60 chars.
+ */
+export interface ScopeSourceItem { type: string; id: string; label: string; access: string }
+export const SCOPE_SOURCES_MAX = 20;
+export const SCOPE_SOURCE_LABEL_MAX = 60;
+/** spec 0.1.65: `scopes[].summaryEmpty` (the manifest schema accepts it once this package pins that spec) */
+const summaryEmptyOf = (s: Scope): string | undefined => {
+  const v = (s as Scope & { summaryEmpty?: unknown }).summaryEmpty;
+  return typeof v === "string" && v.length > 0 && v.length <= 40 && !/[{}]/.test(v) ? v : undefined;
+};
+/** QA sdk#50: cut at code points (half a surrogate pair breaks Postgres jsonb at Core). */
+const sourceLabel = (label: string): string => Array.from(label.replace(/[\p{Cc}\p{Cf}]/gu, "").trim()).slice(0, SCOPE_SOURCE_LABEL_MAX).join("");
+/**
+ * QA sdk#50 (same rule as the bridge): a source id is the app's own instance id, `<prefix>_<ULID>` or a lower-case slug; an
+ * instance whose id looks like a provider id (Stripe `cus_…`, Slack `C04…`, an email) is not listed as a source.
+ */
+export const SOURCE_ID_RE = /^(?:[a-z]{2,4}_[0-9A-HJKMNP-TV-Z]{26}|[a-z][a-z0-9_-]{0,63})$/;
 /** v0.1.14 (Connect Q-C2): caller type of a scope caller id (companion app callers are instances). */
 const callerKind = (id: string): "agent" | "app" => (id.startsWith("ins_") ? "app" : "agent");
 const appliesTo = (g: { callers?: readonly ("agent" | "app")[] }, id: string): boolean => !g.callers || g.callers.includes(callerKind(id));
@@ -47,6 +68,8 @@ function toInstance(r: Row): ScopeInstance {
 }
 
 export interface ScopeStoreInternals extends ScopeStore {
+  /** spec 0.1.65 (C331 D8): this agent's rows as display items (instance label, access id), by type then label, ≤ SCOPE_SOURCES_MAX. */
+  sources(agent: string): Promise<ScopeSourceItem[]>;
   /** CRUD set of an access level (manifest `access[].crud`); [] for unknown levels. */
   crudOf(type: string, level: string): CrudAction[];
   /** Monotonic counter reported as `AppStatus.scopesRev`. */
@@ -363,7 +386,12 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
       const parts: string[] = [];
       for (const s of scopes.values()) {
         const rows = rowsOf(agent, s.type);
-        if (rows.length === 0) continue;
+        if (rows.length === 0) {
+          // spec 0.1.65 (C331 D5b): say that the agent can reach nothing of this type ("no account yet") instead of nothing
+          const empty = summaryEmptyOf(s);
+          if (empty) parts.push(empty);
+          continue;
+        }
         const text = s.summaryTemplate.replace(/\{(count|label|labelPlural|access\.([a-z0-9_]+))\}/g, (_m, v: string, level?: string) => {
           if (v === "count") return String(rows.length);
           if (v === "label") return s.label;
@@ -374,6 +402,20 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
       }
       const out = parts.join(" · ");
       return out.length <= SUMMARY_MAX ? out : `${out.slice(0, SUMMARY_MAX - 1)}…`;
+    },
+    async sources(agent) {
+      const out: ScopeSourceItem[] = [];
+      for (const s of [...scopes.values()].sort((a, b) => (a.type < b.type ? -1 : a.type > b.type ? 1 : 0))) {
+        const items = rowsOf(agent, s.type)
+          .map((r) => {
+            const inst = db.prepare("SELECT label FROM tb_scope_instances WHERE type = ? AND id = ?").get(s.type, r.instanceId) as Row | undefined;
+            return { type: s.type, id: r.instanceId, label: sourceLabel(String(inst?.label ?? "")), access: r.access };
+          })
+          .filter((i) => i.label.length > 0 && SOURCE_ID_RE.test(i.id))
+          .sort((a, b) => a.label.localeCompare(b.label) || (a.id < b.id ? -1 : 1));
+        out.push(...items);
+      }
+      return out.slice(0, SCOPE_SOURCES_MAX);
     },
     crudOf,
     agentCeiling,
