@@ -1,5 +1,7 @@
 // The instance ↔ bridge link (SDK-API §9, BRIDGE §8.3, §10): ONE claim path, the status push + slice/keys long-poll,
 // and companion calls. One credential: the instance key K8 (instance assertions in TB-Assert).
+
+import { APP_CALL_CONTEXT_CAP, callerContextProblem } from "@opt2-tealbrick/manifest";
 import {
   type AppStatus,
   type AppStatusResponse,
@@ -264,13 +266,25 @@ export class BridgeLink {
    * Companion call `POST /tb/v1/call` with TB-Assert + TB-Grant (SDK-API §9, BRIDGE §8.3). `parentCall: null` = an
    * app-initiated call (v0.1.13 C85: StartContext / EventContext / timers): the envelope carries no parentCall.
    */
-  async call<O = Json>(product: string, op: string, input: Json, opts: { idempotencyKey?: string; parentCall: string | null }): Promise<CompanionResult<O>> {
+  async call<O = Json>(product: string, op: string, input: Json, opts: { idempotencyKey?: string; context?: Record<string, Json>; parentCall: string | null }): Promise<CompanionResult<O>> {
     const rt = this.#rt;
     // a product declaration first; else the wildcard companion (M-CP-3: only tb.holds_pending) for any product
     const declared =
       rt.manifest.companions?.find((c) => c.product === product && c.operations.includes(op)) ??
       (product !== "*" ? rt.manifest.companions?.find((c) => c.product === "*" && c.operations.includes(op)) : undefined);
     if (!declared) throw new TbError("companion_undeclared", `companion operation not declared: ${product}.${op}`, 500);
+    // v0.1.77 (C367 P4, SDK-API §18.6): `context` undefined or `{}` = no context (nothing sent, no cap needed). A non-empty one needs the
+    // bridge cap `app_call_context` (409 `bridge_cap_missing`, like Core's D-CAP-1) and must pass the shared rules (`input_invalid`, pointer).
+    // Both checks run before any network call, after `companion_undeclared`.
+    const context = opts.context;
+    const hasContext = context !== undefined && !(context !== null && typeof context === "object" && !Array.isArray(context) && Object.keys(context).length === 0);
+    if (hasContext) {
+      if (!rt.trust.bridgeCaps(Date.now()).includes(APP_CALL_CONTEXT_CAP)) {
+        throw new TbError("bridge_cap_missing", `the workspace bridge does not declare the capability ${APP_CALL_CONTEXT_CAP}; call without a context`, 409, { cap: APP_CALL_CONTEXT_CAP });
+      }
+      const problem = callerContextProblem(rt.manifest.id, context);
+      if (problem) throw new TbError("input_invalid", `context: ${problem.message}`, 400, { pointer: problem.pointer });
+    }
     const p = rt.trust.paused(null);
     if (p.workspace || p.instance) throw new TbError("paused", "this instance is paused", 403);
     const envelope: CallEnvelope = {
@@ -279,6 +293,7 @@ export class BridgeLink {
       input,
       ...(opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}),
       ...(opts.parentCall ? { parentCall: opts.parentCall as CallEnvelope["parentCall"] } : {}),
+      ...(hasContext ? { context: context as CallEnvelope["context"] } : {}),
     };
     for (let attempt = 0; ; attempt++) {
       const grant = companionGrant(rt, product, declared.product === "*" ? null : declared.operations, op);

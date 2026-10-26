@@ -438,7 +438,7 @@ export async function startApp(
   // v0.1.13 (C85/C86): callApp without parentCall (app-initiated), statusChanged and ownerLink outside op handlers
   const appCallApp: StartContext["callApp"] = (product, op, input, opts) => {
     if (!link) return Promise.reject(new TbError("no_bridge", "companion calls need the bridge", 503));
-    return link.call(product, op, input, { ...(opts?.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}), parentCall: null });
+    return link.call(product, op, input, { ...(opts?.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}), ...(opts?.context !== undefined ? { context: opts.context } : {}), parentCall: null });
   };
   /** v0.1.13 (C86) ownerLink / v0.1.20 ownerLinkFor: ONE builder; the path passes the shared launch-path rule (L1). */
   const ownerLinkFor = (product: string, path: string): string | null => {
