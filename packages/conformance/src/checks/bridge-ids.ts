@@ -163,6 +163,26 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
     "B-EV-17": "\"events\" in every StatusReport of a bridge that passes all of these, never otherwise",
     "B-EV-18": "a bridge without the events capability answers tealbrick/events/* with JSON-RPC -32601 (method not found)",
   }),
+  // conformance 0.1.31 (spec 0.1.77, CONFORMANCE B31 / B32, BRIDGE §8.3 / §8.5, SDK-API §4.7 / §18.6): a REAL SDK app is the target (its
+  // ownership and context rules), fake apps are the callers; gated by the cap the bridge reports, never by version (a bridge without
+  // the cap: not_applicable, noted)
+  b31: ids({
+    "B31.hold_status_own": "an app caller's own hold: tb.hold_status through the companion path → held, then approved after the owner decides",
+    "B31.hold_status_other_not_found": "another instance of the caller's product, an agent's hold and an unknown id → the same 404 hold_not_found envelope as an agent's unknown id",
+    "B31.hold_status_undeclared": "a companion entry without tb.hold_status → callApp throws companion_undeclared; a direct call with that grant → not_in_workflow, the target never sees it",
+    "B31.hold_approved_repeat_once": "after approved the identical call runs exactly once, a second repeat does not run again, and the status answers run",
+    "B31.hold_status_old_target": "a target that reports an sdkVersion below the minimum → not_in_workflow, the target is not called",
+    "B31.hold_denied_repeat_blocked": "after denied (and after expired) the identical repeat does not run",
+  }),
+  b32: ids({
+    "B32.context_reaches_target": "ctx.context, receipt meta.callerContext, receipts_list / holds_list and the holds_pending summary carry the caller context",
+    "B32.context_foreign_key": "a key of another product → 400 input_invalid, details.pointer /context/<key>; the target is not called",
+    "B32.context_tb_key": "a tb. key from an app → 400 input_invalid, pointer /context/tb.onBehalfOf; the target is not called",
+    "B32.context_too_large": "JCS 2049 bytes → 400 input_invalid /context; exactly 2048 accepted; every row of caller-context.cases.json through the bridge",
+    "B32.context_informational": "an approved repeat that reports another run runs once; the receipt keeps the hold's callerContext and stores callerContextRun",
+    "B32.sdk_local_refusal": "callApp with a context and no app_call_context cap → bridge_cap_missing before any call; {} sent without context; undeclared op wins; with the cap a bad key → local input_invalid",
+    "B32.context_tampered": "the context in the op body changed after the bridge signed the proof → the app refuses call_proof_invalid",
+  }),
   claim: ids({
     "C1.K6": "claim with a one-time enrolment code",
     "C6.claim_replay": "enrolment code reused → code_invalid",
