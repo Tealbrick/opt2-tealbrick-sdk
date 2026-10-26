@@ -457,7 +457,7 @@ describe("target side: receipts, holds, summary, hold status, repeat (SDK-API §
       assert.equal(rows(b).length, before, "tb.hold_status writes no receipt");
     });
 
-    test("another app's hold, an agent's hold and an unknown id answer the identical 404 not_found 'No such hold.' (never the id)", async () => {
+    test("another app's hold, an agent's hold and an unknown id answer the identical 404 hold_not_found as an agent's unknown id (never the id)", async () => {
       const h = await holdOf(b.insA, evoContext(), "n-hs-2");
       const holdId = h.r.body.holdId as string;
       const agentHold = await agentCall(b, "note_delete", { id: "n-hs-agent" });
@@ -467,12 +467,17 @@ describe("target side: receipts, holds, summary, hold status, repeat (SDK-API §
       const agentsHold = await post(b, h.g, "tb.hold_status", { holdId: agentHold.body.holdId }, {});
       const unknown = await post(b, h.g, "tb.hold_status", { holdId: "hld_01UNKNOWN0000000000000000" }, {});
       const notHld = await post(b, h.g, "tb.hold_status", { holdId: "rcp_01XYZ" }, {});
+      // the reference: what an AGENT gets for an unknown id (the public hold_not_found answer, unchanged)
+      const agentUnknown = await agentCall(b, "tb.hold_status", { holdId: "hld_01UNKNOWN0000000000000000" }, { held: false });
+      assert.equal(agentUnknown.status, 404);
+      assert.equal(agentUnknown.body.error.code, "hold_not_found");
+      const same = noRequestId(agentUnknown.body);
       for (const x of [other, agentsHold, unknown, notHld]) {
         assert.equal(x.status, 404, JSON.stringify(x.body));
-        assert.equal(x.body.error.code, "not_found");
-        assert.equal(x.body.error.message, "No such hold.");
+        assert.equal(noRequestId(x.body), same, "byte-equal to the agent's unknown-id envelope, requestId aside");
       }
-      const same = noRequestId(other.body);
+      assert.ok(!same.includes("hld_"), "the fixed message never holds an id");
+      assert.equal(noRequestId(other.body), same);
       assert.equal(noRequestId(agentsHold.body), same);
       assert.equal(noRequestId(unknown.body), same);
       assert.equal(noRequestId(notHld.body), same);

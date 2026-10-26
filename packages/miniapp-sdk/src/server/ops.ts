@@ -648,10 +648,10 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
     if (op.standard && op.id === "tb.hold_status") {
       const v = validateInput(op, body.input);
       if (!v.ok) throw new TbError("input_invalid", "input does not match the schema", 400, { errors: v.errors });
-      // ONE lookup keyed by (id, caller): a foreign hold and an unknown id take the same path. v0.1.77 (C367 P3, SDK-API §4.7): an app caller
-      // is keyed by type too and gets `404 not_found` "No such hold." (never the holdId); the agent answer is unchanged.
+      // ONE lookup keyed by (id, caller type, caller id): a foreign hold and an unknown id take the same path and give the same answer.
+      // `hold_not_found` is a public code and stays for every caller, agent and app (SDK-API §4.7, C367); the message never holds the holdId.
       const hs = rt.receipts.holdStatusSync(callerId, String((body.input as { holdId: string }).holdId), g.caller.type);
-      if (!hs) throw g.caller.type === "app" ? new TbError("not_found", "No such hold.", 404) : new TbError("hold_not_found", "no such hold for this caller", 404);
+      if (!hs) throw new TbError("hold_not_found", "no such hold for this caller", 404);
       const output: Json = {
         status: hs.status,
         expiresAt: hs.expiresAt === null ? null : iso(hs.expiresAt),

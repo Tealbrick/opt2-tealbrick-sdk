@@ -169,6 +169,13 @@ describe("modelRole() (SDK-API v0.1.63 additions)", T, () => {
     assert.equal(fetches("reasoning"), 1, "one fetch serves the op, start and free-export calls (cache per keysRev)");
   });
 
+  test("modelFetch(role) returns null until sdk#53 ships it: fail closed, no bridge request, no key read", T, async () => {
+    const before = b.bridge.modelRoleFetches.length;
+    assert.equal(await b.running.keys.modelFetch("reasoning"), null);
+    assert.equal(await b.running.keys.modelFetch("embeddings"), null);
+    assert.equal(b.bridge.modelRoleFetches.length, before);
+  });
+
   test("the returned object is a copy: changing it does not change what the next call returns", T, async () => {
     const a = await modelRole("reasoning");
     assert.ok(a);

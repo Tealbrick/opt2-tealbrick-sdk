@@ -113,6 +113,7 @@ export function createKeys(opts: {
   };
 
   return {
+    modelFetch: async () => null, // until sdk#53 ships modelFetch: fail closed (no endpoint, no key read)
     async getKey(name) {
       if (opts.paused?.()) throw new TbError("paused", "this workspace or instance is paused", 403);
       const k = req(name);
