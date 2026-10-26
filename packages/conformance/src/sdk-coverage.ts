@@ -37,6 +37,10 @@ export const SDK_COVERAGE: Readonly<Record<string, readonly string[]>> = {
   verifyTicket: ["A6", "C2.ticket_aud_foreign", "C2.ticket_ws_foreign", "C5.ticket_expired", "C5.ticket_unannounced_kid", "C3.grant_as_ticket"],
   withStandardOps: ["A3.audience", "A4.hold_status", "M4.openapi"],
   // @opt2-tealbrick/miniapp-sdk (server)
+  // v0.1.77 (C367 P4): the cut rules of the holds_pending summary (SDK-API §18.6 item 7); B32 runs every summaryCases row of the spec's case file through a real SDK
+  CALLER_CONTEXT_SUMMARY_MAX_CHARS: ["B32.context_reaches_target"],
+  CALLER_CONTEXT_SUMMARY_VALUE_MAX_CHARS: ["B32.context_reaches_target"],
+  CALLER_CONTEXT_SUMMARY_VALUE_SEGMENTS: ["B32.context_reaches_target"],
   CSRF_HEADER: ["A6.csrf"],
   decideHold: ["A4.decide_person_only", "A10"],
   defineApp: ["A1.manifest_served", "M4.openapi", "A1.no_claim_route", "A17.pending_count"], // gitleaks:allow (check ids, not secrets)
@@ -64,5 +68,6 @@ export const SDK_COVERAGE: Readonly<Record<string, readonly string[]>> = {
  * does not export, is stale). A false mapping to a row that never calls the export is worse than this list.
  */
 export const SDK_UNCOVERED: Readonly<Record<string, string>> = {
+  SDK_MODEL_ERROR_CODES: "v0.1.77 (model fetch lane, miniapp-sdk modelFetch, sdk#53): the error codes of modelFetch, a lane this package has no row for yet; the lane that implements modelFetch adds the row",
   familyAllowedFor: "v0.1.64 (C332a(4)), the person-op relay lane: declared by the spec, not implemented in this repo; the lane that implements it adds the row",
 };

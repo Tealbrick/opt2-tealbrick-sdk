@@ -379,7 +379,9 @@ async function caught(fn: () => Promise<unknown>): Promise<{ code: string; statu
 // ── B32 ──
 interface CaseFile {
   cases: { name: string; callerProduct: string | null; context: unknown; ok: boolean; pointer?: string }[];
+  summaryCases: { name: string; context: Record<string, Json>; summary: string }[];
 }
+const caseFile = (): CaseFile => JSON.parse(readFileSync(fileURLToPath(import.meta.resolve("@opt2-tealbrick/spec/examples/caller-context.cases.json")), "utf8")) as CaseFile;
 
 async function context(c: BridgeCtx, fx: Fx): Promise<void> {
   const k = new Caller(c, fx);
@@ -389,7 +391,7 @@ async function context(c: BridgeCtx, fx: Fx): Promise<void> {
   const noteRuns = () => fx.target.runs.note;
   const noteHits = () => fx.proxy.opHits(0, CAP_TARGET.note).length;
 
-  await run("B32.context_reaches_target", "ctx.context has the four keys; the receipt has meta.callerContext; tb.receipts_list and (held call) tb.holds_list return it; tb.holds_pending has the summary", async () => {
+  await run("B32.context_reaches_target", "ctx.context has the four keys; the receipt has meta.callerContext; tb.receipts_list and (held call) tb.holds_list return it; tb.holds_pending has the summary (and every summaryCases row of the case file)", async () => {
     const t0 = Date.now() - 1000;
     const note = await k.toX(A, CAP_TARGET.note, { id: `cap-${ulid()}` }, { key: c.idemKey(), context: EVO });
     const reached = isObj(out(note).context) && Object.entries(EVO).every(([key, v]) => same((out(note).context as Record<string, unknown>)[key], v));
@@ -403,12 +405,17 @@ async function context(c: BridgeCtx, fx: Fx): Promise<void> {
     const hl = await fx.owner.op("tb.holds_list", {});
     const held = (isObj(hl.body) && isObj(hl.body.output) && Array.isArray(hl.body.output.items) ? (hl.body.output.items as { id?: unknown; meta?: unknown }[]) : []).find((x) => x.id === h.holdId);
     const holdsOk = !!held && isObj(held.meta) && same(held.meta.callerContext, EVO);
+    // the summary rule of SDK-API §18.6 item 7: every summaryCases row of the case file is one held call
+    const summaryHolds: { name: string; holdId: string | null; summary: string }[] = [];
+    for (const cs of caseFile().summaryCases) summaryHolds.push({ name: cs.name, holdId: (await k.hold(B, cs.context)).holdId, summary: cs.summary });
     const pend = await k.toX(B, "tb.holds_pending", { limit: 100 });
-    const item = (Array.isArray(out(pend).items) ? (out(pend).items as { id?: unknown; callerContext?: unknown }[]) : []).find((x) => x.id === h.holdId);
+    const items = Array.isArray(out(pend).items) ? (out(pend).items as { id?: unknown; callerContext?: unknown }[]) : [];
+    const item = items.find((x) => x.id === h.holdId);
     const summaryOk = item?.callerContext === EVO_SUMMARY;
+    const summaryMisses = summaryHolds.filter((x) => !x.holdId || items.find((i) => i.id === x.holdId)?.callerContext !== x.summary).map((x) => x.name);
     return verdict(
-      reached && receiptOk && listOk && holdsOk && summaryOk,
-      `op → ctx.context ${shown(note)} four keys ${reached}; receipt meta.callerContext ${receiptOk}; tb.receipts_list ${listOk}; tb.holds_list ${holdsOk}; tb.holds_pending ${shown(pend)} summary ${JSON.stringify(item?.callerContext ?? null)}`,
+      reached && receiptOk && listOk && holdsOk && summaryOk && summaryMisses.length === 0,
+      `op → ctx.context ${shown(note)} four keys ${reached}; receipt meta.callerContext ${receiptOk}; tb.receipts_list ${listOk}; tb.holds_list ${holdsOk}; tb.holds_pending ${shown(pend)} summary ${JSON.stringify(item?.callerContext ?? null)}; ${summaryHolds.length - summaryMisses.length} of ${summaryHolds.length} summaryCases rows agree${summaryMisses.length ? ` (differ: ${summaryMisses.join(", ")})` : ""}`,
     );
   });
 
@@ -439,7 +446,7 @@ async function context(c: BridgeCtx, fx: Fx): Promise<void> {
     const runs = noteRuns();
     const over = await k.toX(B, CAP_TARGET.note, { id: `cap-${ulid()}` }, { context: sized(2049) });
     if (!(over.status === 400 && code(over) === "input_invalid" && pointer(over) === "/context" && noteRuns() === runs)) edge.push(`2049 bytes: ${shown(over)} pointer ${pointer(over) ?? "(none)"}`);
-    const file = JSON.parse(readFileSync(fileURLToPath(import.meta.resolve("@opt2-tealbrick/spec/examples/caller-context.cases.json")), "utf8")) as CaseFile;
+    const file = caseFile();
     const fails: string[] = [];
     let n = 0;
     for (const [i, cs] of file.cases.entries()) {
