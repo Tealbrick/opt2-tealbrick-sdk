@@ -13,6 +13,7 @@ import { HOLD_PAGE_RE, handleHoldPage } from "./holds-page.ts";
 import { escapeHtml, readRaw, requestId, sendError, sendHtml, sendJson } from "./http.ts";
 import { buildOpenApi } from "./openapi.ts";
 import { handleAgentOp, handlePersonOp } from "./ops.ts";
+import { handleRelayedPersonOp } from "./person-op.ts";
 import type { Runtime } from "./runtime.ts";
 import { handleViewer, isViewerPath } from "./viewer.ts";
 
@@ -162,6 +163,8 @@ export function createHttpServer(rt: Runtime): Server {
         return void res.end(openapi);
       }
       if (m === "POST" && rest.startsWith("ops/")) return handleAgentOp(rt, req, res, decodeURIComponent(rest.slice(4)));
+      // v0.1.39 (SDK-API §21, spec 0.1.64): a person op relayed by the workspace bridge for a native owner session (K14; no cookie, no CSRF)
+      if (m === "POST" && rest === "person-op") return handleRelayedPersonOp(rt, req, res);
       if (m === "POST" && rest.startsWith("hooks/")) return handleHook(rt, req, res, decodeURIComponent(rest.slice(6)));
       if (m === "POST" && rest.startsWith("bridge/") && BRIDGE_OP_ROUTES[rest.slice(7)]) return handleBridgeOp(rt, req, res, BRIDGE_OP_ROUTES[rest.slice(7)] as BridgeOp);
       return sendError(res, requestId(), new TbError("not_found", "not found", 404));

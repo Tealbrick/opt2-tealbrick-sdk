@@ -1,7 +1,7 @@
 // Context members added by Coordinator C31 on top of types/sdk.ts §B (SPEC-GAP until the spec package declares them):
 // `publicUrl` (slice `bridge.publicUrl`), `viewUrl` (slice `bridge.viewUrl`, 0.1.26), `workspace`, `scopes.instances` and `secrets` (the ONE app-secret store).
 import type { ScopeRequest } from "@opt2-tealbrick/spec/bridge";
-import type { WorkspaceId } from "@opt2-tealbrick/spec/credentials";
+import type { PersonOpClient, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
 import type { AppDefinition, Caller, EventContext, HookContext, OpContext, PublicHandler, ScopeStore, SliceAgent, StartContext as SpecStartContext } from "@opt2-tealbrick/spec/sdk";
 import type { AppSecrets } from "./app-secrets.ts";
 import type { JobHandler, JobSpec, JobsView } from "./jobs.ts";
@@ -25,8 +25,11 @@ export interface ContextExtras {
  * slice `companionCallers` under the SAME verified product as `caller.product`; false when the slice is stale or the caller
  * is not listed (or listed under another product). ABSENT (no key) on person and agent callers.
  * Typed in spec 0.1.49 (`Caller.listed`); `SdkCaller` stays exported as an alias for code written against the 0.1.48 types.
+ * v0.1.39 (SPEC-GAP, spec 0.1.64 `PersonPrincipal.via`, SDK-API §21): PERSON callers of an op relayed from a native owner
+ * session (`POST /tb/v1/person-op`) carry `via` = the K14 `cli` (e.g. "tbm"); ABSENT (no key) for browser sessions, agents and
+ * apps. A decide op passes it to `familyAllowedFor(ctx.caller.via, family)` (403 `family_needs_portal` when false).
  */
-export type SdkCaller = Caller;
+export type SdkCaller = Caller & { via?: PersonOpClient };
 export type SdkOpContext = OpContext & { caller: SdkCaller } & ContextExtras & CompanionTargetsView & JobsView;
 export type SdkHookContext = HookContext & { secrets: AppSecrets };
 export type SdkPublicContext = Parameters<PublicHandler>[1] & ContextExtras;

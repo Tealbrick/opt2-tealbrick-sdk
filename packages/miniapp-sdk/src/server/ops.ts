@@ -26,8 +26,9 @@ import type {
   StandardOpId,
   VerifiedGrant,
 } from "@opt2-tealbrick/spec/sdk";
-import type { ContextExtras, SdkHookContext, SdkOpContext } from "./context.ts";
+import type { ContextExtras, SdkCaller, SdkHookContext, SdkOpContext } from "./context.ts";
 import { TbError } from "./errors.ts";
+import { familyAllowedFor, familyNeedsPortal } from "./family.ts";
 import { header, readJson, requestId, sendError, sendJson } from "./http.ts";
 import { type ClaimedJob, jobsView, type OpFireOutcome, unsealGrant } from "./jobs.ts";
 import { HOLD_TTL_MS, type NewReceipt, type Receipts } from "./receipts.ts";
@@ -237,7 +238,8 @@ export function grantRefusal(rt: Runtime, agent: string, now: number): { reason:
 
 /**
  * v0.1.31 (SDK-INSTANCE-GRANT, spec 0.1.47): `ctx.scopeGrants` of a live PERSON op. Called from exactly one place
- * (`handlePersonOp`, after the session and CSRF checks); agent, app, scheduled and public contexts never get it. Bounds and
+ * (`runPersonOp` for a browser session, after the session and CSRF checks of `handlePersonOp`; v0.1.39: never for a relayed op);
+ * agent, app, scheduled and public contexts never get it. Bounds and
  * the audit row live in `ScopeGrantOps` (scopes.ts); the "has an edge to this app" check reads the verified slice.
  */
 function personScopeGrants(rt: Runtime, principal: PersonPrincipal, opId: string, requestId: string, life: OpLife): ScopeGrantApi {
@@ -429,7 +431,7 @@ async function claimIdempotency(rt: Runtime, callerId: string, opId: string, key
   }
 }
 
-function toTbError(e: unknown, rt: Runtime): TbError {
+export function toTbError(e: unknown, rt: Runtime): TbError {
   if (e instanceof TbError) return e;
   rt.log.error("handler failed", { error: e instanceof Error ? e.message : "unknown" });
   return new TbError("app_error", "the operation failed", 500);
@@ -974,6 +976,8 @@ export async function decide(rt: Runtime, principal: PersonPrincipal, input: Hol
   const now = Date.now();
   const row = typeof input.holdId === "string" && input.holdId.startsWith("hld_") ? rt.receipts.getSync(input.holdId) : null;
   if (!row) throw new TbError("hold_not_found", "no such hold", 404);
+  // v0.1.39 (SDK-API §21 family rule, C332a(4), fail closed): a relayed decision (`via` set) never decides a refused or unknown family
+  if (!familyAllowedFor(principal.via, row.holdFamily as HoldFamily | null)) throw familyNeedsPortal();
   if (row.status === "held" && row.expiresAt !== null && row.expiresAt <= now) {
     rt.receipts.sweep(now);
     rt.statusChanged();
@@ -1066,53 +1070,65 @@ export async function handlePersonOp(rt: Runtime, req: IncomingMessage, res: Ser
     if (op.audience !== "person") throw new TbError("audience_not_person", "operation is not person-audience", 403);
     const v = validateInput(op, input);
     if (!v.ok) throw new TbError("input_invalid", "input does not match the schema", 400, { errors: v.errors });
-    const principal = session.principal;
-    if (op.standard) {
-      const out = await runStandardPersonOp(rt, principal, op.id, input as Record<string, unknown>, res);
-      if (out !== null) sendJson(res, 200, { status: "ok", output: out } satisfies OpResult);
-      return;
-    }
-    const inputDigest = digest(input);
-    const idemKey = idempotencyKeyFor(op, typeof raw.idempotencyKey === "string" ? raw.idempotencyKey : null);
-    // v0.1.22 (SDK-01): reserved before the handler, like agent calls
-    let idem: IdemLease | null = null;
-    if (idemKey) {
-      const c = await claimIdempotency(rt, principal.id, op.id, idemKey, inputDigest, `${principal.id}:${op.id}:${idemKey}`);
-      if (c.kind === "result") return sendJson(res, 200, { status: "ok", output: c.output } satisfies OpResult);
-      if (c.kind === "held") throw new TbError("idempotency_conflict", "idempotency key belongs to a held call", 409);
-      idem = c.lease;
-    }
-    const caller: Caller = { type: "person", id: principal.id as PersonId, name: "owner", mode: null };
-    const rh = receiptHelpers();
-    let sig: ReturnType<typeof opSignal> | null = null;
-    let output: Json;
-    try {
-      sig = opSignal(req, res);
-      const ctx = buildContext(rt, op, caller, null, rt.scopes.view(null, null), null, idemKey, {}, rh.helpers, sig.signal, { ...rt.extras(), workspace: principal.ws });
-      // v0.1.31 (SDK-INSTANCE-GRANT): THE one place ctx.scopeGrants is set: a live person op (verified session + CSRF + the owner's confirm)
-      const life = opLife(sig.signal);
-      ctx.scopeGrants = personScopeGrants(rt, principal, op.id, rid, life);
-      // v0.1.32 (SDK-COMPANION-CALLERS): same place, person ops only; each call reads the current slice
-      ctx.companionCallers = personCompanionCallers(rt);
-      const h = startHandler(rt, op, input, ctx, null);
-      life.bind(h.actual);
-      const lease = idem;
-      idem = null;
-      h.actual.then(
-        (out) => lease?.result(out),
-        () => lease?.release(),
-      );
-      output = await h.raced;
-    } catch (e) {
-      idem?.release();
-      throw e;
-    } finally {
-      sig?.done();
-    }
-    sendJson(res, 200, { status: "ok", output } satisfies OpResult);
+    const idemKey = op.standard ? null : idempotencyKeyFor(op, typeof raw.idempotencyKey === "string" ? raw.idempotencyKey : null);
+    await runPersonOp(rt, req, res, rid, op, session.principal, input, idemKey);
   } catch (e) {
-    sendError(res, rid, e instanceof TbError ? e : toTbError(e, rt));
+    sendError(res, rid, toTbError(e, rt));
   }
+}
+
+/**
+ * THE person handler path (after the caller's own authentication, op lookup and input schema check): standard ops, or the
+ * idempotency reservation (§4.4) and the app handler. Shared by `/a/<product>/tb/v1/ops/:op` (session + CSRF) and, v0.1.39,
+ * `POST /tb/v1/person-op` (K14, SDK-API §21; `principal.via` set, `idemKey` = K14 `idk`). Throws; the route answers the error.
+ * A relayed op (`principal.via` set) sees `ctx.caller.via` and gets no `ctx.scopeGrants` (owner agent-access writes stay with
+ * the browser session); `ctx.companionCallers` (display data) is set for both.
+ */
+export async function runPersonOp(rt: Runtime, req: IncomingMessage, res: ServerResponse, rid: string, op: OperationView, principal: PersonPrincipal, input: Json, idemKey: string | null): Promise<void> {
+  if (op.standard) {
+    const out = await runStandardPersonOp(rt, principal, op.id, input as Record<string, unknown>, res);
+    if (out !== null) sendJson(res, 200, { status: "ok", output: out } satisfies OpResult);
+    return;
+  }
+  const inputDigest = digest(input);
+  // v0.1.22 (SDK-01): reserved before the handler, like agent calls
+  let idem: IdemLease | null = null;
+  if (idemKey) {
+    const c = await claimIdempotency(rt, principal.id, op.id, idemKey, inputDigest, `${principal.id}:${op.id}:${idemKey}`);
+    if (c.kind === "result") return sendJson(res, 200, { status: "ok", output: c.output } satisfies OpResult);
+    if (c.kind === "held") throw new TbError("idempotency_conflict", "idempotency key belongs to a held call", 409);
+    idem = c.lease;
+  }
+  // v0.1.39 (SPEC-GAP, spec 0.1.64 PersonPrincipal.via): the person caller of a relayed op carries `via` (absent for browser sessions)
+  const caller: SdkCaller = { type: "person", id: principal.id as PersonId, name: "owner", mode: null, ...(principal.via !== undefined ? { via: principal.via } : {}) };
+  const rh = receiptHelpers();
+  let sig: ReturnType<typeof opSignal> | null = null;
+  let output: Json;
+  try {
+    sig = opSignal(req, res);
+    const ctx = buildContext(rt, op, caller, null, rt.scopes.view(null, null), null, idemKey, {}, rh.helpers, sig.signal, { ...rt.extras(), workspace: principal.ws });
+    const life = opLife(sig.signal);
+    // v0.1.31 (SDK-INSTANCE-GRANT): THE one place ctx.scopeGrants is set: a live person op of a browser session (verified
+    // session + CSRF + the owner's confirm). v0.1.39: never for a relayed op (`via` set).
+    if (principal.via === undefined) ctx.scopeGrants = personScopeGrants(rt, principal, op.id, rid, life);
+    // v0.1.32 (SDK-COMPANION-CALLERS): same place, person ops only; each call reads the current slice
+    ctx.companionCallers = personCompanionCallers(rt);
+    const h = startHandler(rt, op, input, ctx, null);
+    life.bind(h.actual);
+    const lease = idem;
+    idem = null;
+    h.actual.then(
+      (out) => lease?.result(out),
+      () => lease?.release(),
+    );
+    output = await h.raced;
+  } catch (e) {
+    idem?.release();
+    throw e;
+  } finally {
+    sig?.done();
+  }
+  sendJson(res, 200, { status: "ok", output } satisfies OpResult);
 }
 
 export type { OpCallBody };

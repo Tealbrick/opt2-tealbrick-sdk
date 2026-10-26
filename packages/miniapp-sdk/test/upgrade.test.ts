@@ -218,6 +218,7 @@ test("M2: failed mode pushes the failure to the bridge (readiness degraded + att
     assert.deepEqual(healthy.schemaVersion, { app: 1, sdk: SDK_SCHEMA }, "a healthy status carries the schema too");
     assert.equal(healthy.minCompatibleCode, "1.0.0");
     assert.deepEqual(healthy.proofClaims, ["bd"], "v0.1.36 (C268 B): every status push declares the proof claims");
+    assert.deepEqual(healthy.caps, ["person_op"], "v0.1.39 (C354): a running app declares the caps it serves");
     bridge.statuses.length = 0;
     const b = await boot(appAt("2.0.0", r.code("v2b", V2_BROKEN), await freePort()), env, testRoots(w));
     try {
@@ -225,6 +226,8 @@ test("M2: failed mode pushes the failure to the bridge (readiness degraded + att
       assert.equal(s.version, "2.0.0");
       assert.equal(s.attention.code, "migration_failed");
       assert.deepEqual(s.proofClaims, ["bd"], "also in failed mode: the bridge keeps the capability of the app instance");
+      // v0.1.39 (C354): failed mode serves no ops, so it declares no app caps (no person_op relay to a failed app)
+      assert.equal(s.caps, undefined, "failed mode declares no caps");
       assert.equal(s.failure.code, "migration_failed");
       assert.equal(s.failure.file, "0003_tag_index.sql");
       assert.equal(s.preUpdateSnapshot.file, "tb-preupdate-to-2.0.0.tar.gz");

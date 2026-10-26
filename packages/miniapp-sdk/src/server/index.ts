@@ -82,6 +82,8 @@ export type {
   StopContext,
 } from "./context.ts";
 export { requireViewUrl, TbError, VIEW_ORIGIN_MISSING, viewOriginMissing } from "./errors.ts";
+// v0.1.39 (SDK-API §21, spec 0.1.64): the family rule of relayed decisions; the relay route's header name
+export { familyAllowedFor, familyNeedsPortal } from "./family.ts";
 // v0.1.21 (Scribe R1, SDK-1/SDK-2, RUL-11): the job runner
 export type {
   EnqueueOptions,
@@ -102,4 +104,5 @@ export { JOB_DEFAULTS, OP_JOB_KIND, OP_JOB_MAX_ATTEMPTS } from "./jobs.ts";
 // v0.1.23 (SDK-HV-1): dynamic hold view budget and the fallback line (SDK-API §4.6)
 export { HOLD_VIEW_BUDGET_MS, HOLD_VIEW_UNREADABLE } from "./ops.ts";
 export { CSRF_HEADER, SESSION_COOKIE } from "./person.ts";
+export { PERSON_OP_HEADER } from "./person-op.ts";
 export { TB_EXEC_CONTROL_PORT } from "./service-helper.ts";
