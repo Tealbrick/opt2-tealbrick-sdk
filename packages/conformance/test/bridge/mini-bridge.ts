@@ -162,6 +162,11 @@ export interface MiniFlags {
   appCallContext?: boolean;
   /** one §8.5 rule broken (B32 sensitivity): `noValidation` accepts any context, `noMerge` drops it, `productFromContext` reads the caller product from the context's first key */
   appCallContextFaults?: { noValidation?: boolean; noMerge?: boolean; productFromContext?: boolean };
+  /**
+   * a strict bridge without `app_call_context`: a companion envelope that carries a `context` member is refused 400 `input_invalid`
+   * (BRIDGE §8.5: such a bridge need not accept the field). B31 must still pass on a bridge that declares only `app_hold_status` (QA-SDK62-1).
+   */
+  rejectContext?: boolean;
 }
 
 /** Is `version` at least `min` (plain `major.minor.patch`; anything else is not)? */
@@ -449,8 +454,8 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     }
     return Math.max(1, Math.ceil((1 - b.tokens) / 2));
   };
-  const toolError = (code: string, details?: Record<string, unknown>) => {
-    const error = { code, message: code, requestId: "req_mini", ...(details ? { details } : {}) };
+  const toolError = (code: string, details?: Record<string, unknown>, message?: string) => {
+    const error = { code, message: message ?? code, requestId: "req_mini", ...(details ? { details } : {}) };
     return { isError: true, content: [{ type: "text", text: JSON.stringify({ error }) }], structuredContent: { error } };
   };
 
@@ -642,8 +647,10 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     if (flags.leakToPortal) await ack({ lastCall: { name, input: args, output: body } });
     if (r.status === 200) return { content: [{ type: "text", text: JSON.stringify(body.output) }], structuredContent: body.output };
     if (r.status === 202) return { content: [{ type: "text", text: "held" }], structuredContent: { status: "held", holdId: body.holdId, expiresAt: body.expiresAt, checkWith: mcpToolName(m.id, "tb_hold_status") } };
-    const code = (body.error as { code?: string } | undefined)?.code ?? "app_error";
-    return toolError(code);
+    // the app's own error text is relayed (the real bridge does), so an agent's unknown hold id carries the SDK's message (B31.hold_status_other_not_found)
+    const appError = body.error as { code?: string; message?: string } | undefined;
+    const code = appError?.code ?? "app_error";
+    return toolError(code, undefined, typeof appError?.message === "string" ? appError.message : undefined);
   };
 
   // ── spec 0.1.57 (BRIDGE §14): the per-agent event log (reference implementation, conformance src/event-log.ts) ──
@@ -851,6 +858,7 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
       }
       // spec 0.1.77 (C367 P4, BRIDGE §8.5): the caller context, checked against the VERIFIED product of the grant (prd), merged into the op context
       let callerContext: Record<string, Json> = {};
+      if (!flags.appCallContext && flags.rejectContext && env.context !== undefined) return send(res, 400, { error: { code: "input_invalid", message: "context is not accepted by this bridge", requestId: "req_mini", details: { pointer: "/context" } } });
       if (flags.appCallContext && env.context !== undefined) {
         const faults = flags.appCallContextFaults ?? {};
         const prd = faults.productFromContext && isObj(env.context) ? (Object.keys(env.context)[0]?.split(".")[0] ?? null) : typeof (g.claims as { prd?: unknown }).prd === "string" ? ((g.claims as { prd?: unknown }).prd as string) : null;

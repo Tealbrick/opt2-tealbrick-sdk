@@ -1,4 +1,4 @@
-// B31 / B32 (conformance 0.1.31, spec 0.1.77, CONFORMANCE B31 + B32, BRIDGE §8.3 / §8.5, SDK-API §4.7 / §18.6): `tb.hold_status` for an
+// B31 / B32 (conformance 0.1.31, spec 0.1.78, CONFORMANCE B31 + B32, BRIDGE §8.3 / §8.5, SDK-API §4.7 / §18.6): `tb.hold_status` for an
 // app caller (cap `app_hold_status`) and the caller context of a companion call (cap `app_call_context`). Gated by the cap the bridge
 // reports in its StatusReport (`bridge.caps`), never by version: a bridge without a cap skips that group (not_applicable, noted).
 //
@@ -261,8 +261,8 @@ async function hold(c: BridgeCtx, fx: Fx): Promise<void> {
     const equal = answers.every((x) => envelope(x) === envelope(nope));
     const all404 = answers.every((x) => x.status === 404 && code(x) === "hold_not_found");
     const noIds = answers.every((x) => ![mine.holdId, agentHold, unknown].some((id) => JSON.stringify(x.body).includes(id as string)));
-    // the fixed text of spec 0.1.78 (the SDK's existing message for an agent's unknown id); the agent's answer comes back through the bridge's MCP wrapping, so its code is compared and its message shown
-    const likeAgent = refEnv !== null && refEnv.code === "hold_not_found" && answers.every((x) => message(x) === HOLD_NOT_FOUND);
+    // the fixed text of spec 0.1.78 (the SDK's existing message for an agent's unknown id): the agent's own answer (through the bridge's MCP wrapping) must carry it too, so an SDK that words it differently for apps OR for agents fails
+    const likeAgent = refEnv !== null && refEnv.code === "hold_not_found" && refEnv.message === HOLD_NOT_FOUND && answers.every((x) => message(x) === HOLD_NOT_FOUND);
     return verdict(equal && all404 && noIds && likeAgent, `B→A's hold ${shown(other)}; A→agent's hold ${shown(agents)}; A→unknown ${shown(nope)}; envelopes equal ${equal}; message "${message(nope) ?? ""}" (spec: "${HOLD_NOT_FOUND}"); the agent's unknown id: ${refEnv?.code ?? "no envelope"} "${refEnv?.message ?? ""}"; the id never appears ${noIds}`);
   });
 
@@ -284,33 +284,57 @@ async function hold(c: BridgeCtx, fx: Fx): Promise<void> {
     return verdict(thrown?.code === "companion_undeclared" && direct && control, `callApp: ${thrown ? thrown.code : "did not throw"}; direct without tb.hold_status in wf: ${shown(refused)}, target saw ${seen} op call(s); control (grant lists it, ${op} edge): ${shown(ctl)}, target saw ${controlSeen}`);
   });
 
-  await run("B31.hold_approved_repeat_once", "after approved the same call (op, input, idempotency key) runs exactly once; a second repeat is not run again; hold_status answers run", async () => {
+  await run("B31.hold_approved_repeat_once", "after approved the same call (op, input, idempotency key) runs exactly once; a second repeat (same key) and a third call (fresh key, same input) are not run again; hold_status answers run", async () => {
     const ran = fx.target.runs.del;
-    const h = await k.hold(A, EVO);
+    // B31 sends NO caller context: a bridge that declares only app_hold_status need not accept the field (BRIDGE §8.5)
+    const h = await k.hold(A);
     if (!h.holdId) return bad(`the destructive op was not held: ${shown(h.a)}`);
     const declined = await k.decide(h.holdId, "approve");
     if (declined) return bad(declined);
-    const one = await k.toX(A, CAP_TARGET.del, h.input, { key: h.key, context: EVO });
+    const one = await k.toX(A, CAP_TARGET.del, h.input, { key: h.key });
     const afterOne = fx.target.runs.del;
-    const two = await k.toX(A, CAP_TARGET.del, h.input, { key: h.key, context: EVO });
+    const two = await k.toX(A, CAP_TARGET.del, h.input, { key: h.key });
     const afterTwo = fx.target.runs.del;
     const st = await k.status(A, h.holdId);
-    const pass = one.status === 200 && afterOne === ran + 1 && afterTwo === ran + 1 && two.status < 500 && out(st).status === "run";
-    return verdict(pass, `repeat ${shown(one)} (handler runs +${afterOne - ran}); second repeat ${shown(two)} (handler runs +${afterTwo - ran} in total); status after ${String(out(st).status)} (erratum v0.1.78: run, not consumed)`);
+    // the approval matches (caller, op, input digest), not the idempotency key (SDK-API §4.2 / §4.7): the SDK's idempotency replay alone
+    // keeps the same-key repeat at +1, so a third call with a FRESH key and the same input is what proves the approval was consumed
+    const fresh = await k.toX(A, CAP_TARGET.del, h.input, { key: c.idemKey() });
+    const afterFresh = fx.target.runs.del;
+    const freshRan = afterFresh !== afterTwo || (fresh.status === 200 && isObj(fresh.body) && fresh.body.status === "ok");
+    const pass = one.status === 200 && afterOne === ran + 1 && afterTwo === ran + 1 && two.status < 500 && out(st).status === "run" && !freshRan;
+    return verdict(pass, `repeat ${shown(one)} (handler runs +${afterOne - ran}); second repeat, same key ${shown(two)} (handler runs +${afterTwo - ran} in total); status after ${String(out(st).status)} (erratum v0.1.78: run, not consumed); third call, fresh key, same input ${shown(fresh)} (handler runs +${afterFresh - ran} in total; +1 expected, the approval is used up by the first run)`);
   });
 
-  await run("B31.hold_status_old_target", "a target that reports an sdkVersion below the minimum → not_in_workflow and the target is not called (a version at or above it is routed: control)", async () => {
+  await run("B31.hold_status_old_target", "a target that reports an sdkVersion below the minimum, none at all, or a malformed one (banana, 0.1.41-rc.1) → not_in_workflow and the target is not called (a version at or above it is routed: control)", async () => {
     try {
       await T.status({ sdkVersion: SDK_NEW });
       const sNew = c.w.seqNow();
       const control = await k.call(E, T.product, "tb.hold_status", { holdId: `hld_${ulid()}` });
       const routed = c.since(T, sNew, "op").filter((r) => r.name === "tb.hold_status").length;
-      await T.status({ sdkVersion: SDK_OLD });
-      const sOld = c.w.seqNow();
-      const refused = await k.call(E, T.product, "tb.hold_status", { holdId: `hld_${ulid()}` });
-      const seen = c.since(T, sOld, "op").length;
-      const pass = control.status === 200 && routed === 1 && refused.status >= 400 && refused.status < 500 && code(refused) === "not_in_workflow" && seen === 0;
-      return verdict(pass, `target at ${SDK_NEW}: ${shown(control)}, target saw ${routed}; at ${SDK_OLD}: ${shown(refused)}, target saw ${seen} op call(s)`);
+      // fail closed (PK-D6): below the minimum, no sdkVersion in the report, and a value that is not a version; the minimum's own prerelease is below it
+      const variants: { label: string; version: string | undefined }[] = [
+        { label: SDK_OLD, version: SDK_OLD },
+        { label: "(none)", version: undefined },
+        { label: "banana", version: "banana" },
+        { label: "0.1.41-rc.1", version: "0.1.41-rc.1" },
+      ];
+      const lines: string[] = [];
+      let pass = control.status === 200 && routed === 1;
+      for (const v of variants) {
+        const pushed = await T.status(v.version === undefined ? ({ sdkVersion: undefined } as never) : { sdkVersion: v.version });
+        if (pushed.status >= 300) {
+          // the bridge refused this report itself (a status shape check): there is no such state to gate on, the variant is not exercised
+          lines.push(`${v.label}: report refused ${pushed.status} (not exercised)`);
+          continue;
+        }
+        const s0 = c.w.seqNow();
+        const refused = await k.call(E, T.product, "tb.hold_status", { holdId: `hld_${ulid()}` });
+        const seen = c.since(T, s0, "op").length;
+        const ok = refused.status >= 400 && refused.status < 500 && code(refused) === "not_in_workflow" && seen === 0;
+        pass &&= ok;
+        lines.push(`${v.label}: ${shown(refused)}, target saw ${seen}`);
+      }
+      return verdict(pass, `target at ${SDK_NEW}: ${shown(control)}, target saw ${routed}; ${lines.join("; ")}`);
     } finally {
       await T.status({ sdkVersion: SDK_NEW }).catch(() => undefined);
     }
@@ -318,17 +342,17 @@ async function hold(c: BridgeCtx, fx: Fx): Promise<void> {
 
   await run("B31.hold_denied_repeat_blocked", "after denied (and after expired) the same repeat does not run; the handler is not called", async () => {
     const ran = fx.target.runs.del;
-    const d = await k.hold(A, EVO);
+    const d = await k.hold(A);
     if (!d.holdId) return bad(`the destructive op was not held: ${shown(d.a)}`);
     const declined = await k.decide(d.holdId, "deny");
     if (declined) return bad(declined);
     const st = await k.status(A, d.holdId);
-    const rep = await k.toX(A, CAP_TARGET.del, d.input, { key: d.key, context: EVO });
+    const rep = await k.toX(A, CAP_TARGET.del, d.input, { key: d.key });
     const deniedOk = out(st).status === "denied" && rep.status >= 400 && rep.status < 500 && fx.target.runs.del === ran;
     const deniedText = `denied: status ${String(out(st).status)}, repeat ${shown(rep)}, handler runs +${fx.target.runs.del - ran}`;
     if (!deniedOk) return bad(deniedText);
     // expired: the hold's time ran out (white-box: the hold's expiry is moved into the past, as 15 minutes cannot be waited for)
-    const e = await k.hold(A, EVO);
+    const e = await k.hold(A);
     if (!e.holdId) return bad(`${deniedText}; the second hold was not held: ${shown(e.a)}`);
     try {
       const db = new DatabaseSync(join(fx.target.dataDir, "app.db"));
@@ -342,7 +366,7 @@ async function hold(c: BridgeCtx, fx: Fx): Promise<void> {
       return notRun(`${deniedText}; the expired half was not exercised: the SDK's receipt table could not be aged (${err instanceof Error ? err.message : String(err)})`);
     }
     const before = fx.target.runs.del;
-    const rep2 = await k.toX(A, CAP_TARGET.del, e.input, { key: e.key, context: EVO });
+    const rep2 = await k.toX(A, CAP_TARGET.del, e.input, { key: e.key });
     const expiredOk = !(rep2.status === 200 && isObj(rep2.body) && rep2.body.status === "ok") && fx.target.runs.del === before;
     return verdict(expiredOk, `${deniedText}; expired: repeat ${shown(rep2)}, handler runs +${fx.target.runs.del - before}`);
   });
@@ -481,7 +505,7 @@ async function context(c: BridgeCtx, fx: Fx): Promise<void> {
     return verdict(pass, `repeat with run_2 ${shown(rep)}, handler runs +${fx.target.runs.del - ran}; receipt status ${rc?.status ?? "(none)"}, callerContext run ${JSON.stringify((meta.callerContext as Record<string, unknown> | undefined)?.["evolution.run"] ?? null)}, callerContextRun run ${JSON.stringify((meta.callerContextRun as Record<string, unknown> | undefined)?.["evolution.run"] ?? null)}`);
   });
 
-  await run("B32.sdk_local_refusal", "a real SDK caller whose slice has no app_call_context: callApp with a context → bridge_cap_missing (409, details.cap), no call; {} sent without context; an op outside wf → companion_undeclared first; with the cap a bad key → local input_invalid with details.pointer", async () => {
+  await run("B32.sdk_local_refusal", "a real SDK caller whose slice has no app_call_context: callApp with a context → bridge_cap_missing (409, details.cap) and the target is not called; with {} the call goes through and the target sees no caller key; an op outside wf → companion_undeclared first; with the cap a bad key → local input_invalid with details.pointer", async () => {
     const ctx = fx.caller.app.startContext();
     if (!ctx) return bad("the real caller has no start context");
     const mine = (run: string): Record<string, Json> => ({ [`${CAP_CALLER.product}.run`]: run });
@@ -493,9 +517,10 @@ async function context(c: BridgeCtx, fx: Fx): Promise<void> {
     if (!(noCap?.code === "bridge_cap_missing" && noCap.status === 409 && isObj(noCap.details) && noCap.details.cap === APP_CALL_CONTEXT_CAP && noteHits() === hits0)) problems.push(`no cap: ${noCap ? `${noCap.code} ${String(noCap.status)} ${JSON.stringify(noCap.details)}` : "did not throw"}, target hits +${noteHits() - hits0}`);
     const hits1 = noteHits();
     const empty = await caught(() => ctx.callApp(CAP_TARGET.product, CAP_TARGET.note, { id: "b" }, { idempotencyKey: c.idemKey(), context: {} }));
+    // observable here: the body the target receives (after the bridge merged its own tb.* keys), not the envelope the caller sent to the bridge
     const sent = fx.proxy.opHits(0, CAP_TARGET.note).at(-1);
     const sentContext = sent ? (JSON.parse(sent.body) as { context?: Record<string, unknown> }).context ?? {} : null;
-    if (!(empty === null && noteHits() === hits1 + 1 && sentContext !== null && Object.keys(sentContext).every((key) => !key.startsWith(`${CAP_CALLER.product}.`)))) problems.push(`{}: ${empty ? `threw ${empty.code}` : "no throw"}, target hits +${noteHits() - hits1}, forwarded context keys ${sentContext ? JSON.stringify(Object.keys(sentContext)) : "(none seen)"}`);
+    if (!(empty === null && noteHits() === hits1 + 1 && sentContext !== null && Object.keys(sentContext).every((key) => !key.startsWith(`${CAP_CALLER.product}.`)))) problems.push(`{} (no cap): ${empty ? `threw ${empty.code}` : "no throw"}, target hits +${noteHits() - hits1}, caller keys in the body the target got ${sentContext ? JSON.stringify(Object.keys(sentContext)) : "(none seen)"}`);
     const outside = await caught(() => ctx.callApp(CAP_TARGET.product, CAP_TARGET.del, { id: "c" }, { idempotencyKey: c.idemKey(), context: mine("r1") }));
     if (outside?.code !== "companion_undeclared") problems.push(`op outside wf with a context: ${outside ? outside.code : "did not throw"} (expected companion_undeclared)`);
     // the slice now carries the cap (the Portal signs it)
@@ -510,7 +535,7 @@ async function context(c: BridgeCtx, fx: Fx): Promise<void> {
     const reached = isObj(fx.target.runs.lastContext) && same((fx.target.runs.lastContext as Record<string, unknown>)[`${CAP_CALLER.product}.run`], "r2");
     if (!(good === null && reached)) problems.push(`good key with the cap: ${good ? good.code : "no throw"}, reached the target ${reached}`);
     c.w.sliceCaps.delete(fx.caller.ins);
-    return verdict(problems.length === 0, problems.length === 0 ? "no cap: bridge_cap_missing before any call; {} sent without context; undeclared op first; with the cap a bad key is refused locally and a good key reaches the target" : problems.join("; "));
+    return verdict(problems.length === 0, problems.length === 0 ? "no cap: bridge_cap_missing and the target not called; {} accepted and the target got no caller key; undeclared op first; with the cap a bad key is refused locally and a good key reaches the target" : problems.join("; "));
   });
 
   await run("B32.context_tampered", "the context in the op body is changed after the bridge signed the proof → the app refuses call_proof_invalid and does not run", async () => {

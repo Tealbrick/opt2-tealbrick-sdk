@@ -53,6 +53,12 @@ describe("bridge target", () => {
     for (const id of B32_IDS) assert.equal(status(only32, id), "pass", `${id}: ${asserted(only32, id)}`);
   });
 
+  it("spec 0.1.78 (B31): a bridge that declares ONLY app_hold_status and rejects any `context` member passes all six B31 rows (B31 sends no caller context); B32 is not_applicable (QA-SDK62-1)", { timeout: 300_000 }, async () => {
+    const r = await run({ appHoldStatus: true, rejectContext: true }, ["b31", "b32"]);
+    for (const id of B31_IDS) assert.equal(status(r, id), "pass", `${id}: ${asserted(r, id)}`);
+    for (const id of B32_IDS) assert.equal(status(r, id), "not_applicable", id);
+  });
+
   it("fire-on-bad (B31, B32): each broken §8.3 / §8.5 rule fails its row", { timeout: 600_000 }, async () => {
     const cases: [MiniFlags, string[]][] = [
       [{ appHoldStatus: true, appCallContext: true, appHoldStatusFaults: { noWfCheck: true } }, ["B31.hold_status_undeclared"]],

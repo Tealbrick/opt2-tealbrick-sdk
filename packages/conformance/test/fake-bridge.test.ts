@@ -179,6 +179,34 @@ describe("fake bridge: app hold status and caller context (conformance 0.1.31, s
     await b.control.setAppHoldStatus(false);
   });
 
+  it("tb.hold_status: the PK-D6 target gate — a peer reporting no version, a malformed one, a prerelease of the minimum or a lower one is not called; 0.1.41 and above are", async () => {
+    const listed = await b.companionGrantFor("conf-peer", { wf: ["peer_get", "tb.hold_status"], prd: "evolution" });
+    const env = { target: "conf-peer", op: "tb.hold_status", input: { holdId: "hld_x" } };
+    await b.control.setAppHoldStatus(true);
+    const calls = () => b.companionCalls.length;
+    try {
+      for (const version of [undefined, "banana", "0.1.41-rc.1", "0.0.1", "0.1.40"]) {
+        b.control.setPeerSdkVersion("conf-peer", version);
+        const before = calls();
+        const r = await call(env, listed);
+        assert.deepEqual([r.status, r.body.error.code, calls() - before], [403, "not_in_workflow", 0], `reported ${String(version)}: refused, the peer is not called`);
+        // only the app-caller op is gated: a plain op still reaches the peer
+        assert.equal((await call({ target: "conf-peer", op: "peer_get", input: { id: "x" } }, listed)).status, 200);
+      }
+      for (const version of ["0.1.41", "0.1.42", "0.2.0", "1.0.0"]) {
+        b.control.setPeerSdkVersion("conf-peer", version);
+        const before = calls();
+        const r = await call(env, listed);
+        assert.deepEqual([r.status, r.body.status, calls() - before], [200, "ok", 1], `reported ${version}: routed`);
+      }
+      b.control.clearPeerSdkVersion("conf-peer");
+      assert.equal((await call(env, listed)).status, 200, "no version set for the peer: not gated");
+    } finally {
+      b.control.clearPeerSdkVersion("conf-peer");
+      await b.control.setAppHoldStatus(false);
+    }
+  });
+
   it("context: ignored without the flag; with it checked against the grant's prd (400 input_invalid + pointer) and handed to the target", async () => {
     const grant = await b.companionGrantFor("conf-peer", { prd: "evolution" });
     const noPrd = await b.companionGrantFor("conf-peer");
@@ -195,6 +223,39 @@ describe("fake bridge: app hold status and caller context (conformance 0.1.31, s
     assert.equal((await call(env({}), noPrd)).status, 200, "{} is accepted");
     assert.equal((await call(env([1]), grant)).body.error.details.pointer, "/context");
     await b.control.setAppCallContext(false);
+  });
+
+  it("context: the keys reach the REAL peer route as PeerCall.context (merged for a non-empty context, absent for {} or no context or a bridge without the cap)", async () => {
+    const grant = await b.companionGrantFor("conf-peer", { prd: "evolution" });
+    const seen: { context?: Record<string, unknown> }[] = [];
+    b.peerTargets.set("conf-peer", {
+      ops: [{ standard: false, id: "peer_get", title: "peer_get", description: "peer read (test)", crud: ["read"], effect: "read", idempotency: "none", receipt: false, audience: "agent" }],
+      scopeTypes: [],
+      route: async (c) => {
+        seen.push(c);
+        return { status: 200, body: { status: "ok", output: {} } };
+      },
+    });
+    const env = (context?: unknown) => ({ target: "conf-peer", op: "peer_get", input: { id: "x" }, ...(context !== undefined ? { context } : {}) });
+    const run = { "evolution.run": "run_1", "evolution.step": "step_1" };
+    try {
+      await b.control.setAppCallContext(true);
+      assert.equal((await call(env(run), grant)).status, 200);
+      assert.deepEqual(seen.at(-1)?.context, run, "a non-empty context is handed over as given");
+      assert.equal((await call(env({}), grant)).status, 200);
+      assert.equal(seen.at(-1)?.context, undefined, "{} is no context");
+      assert.equal((await call(env(), grant)).status, 200);
+      assert.equal(seen.at(-1)?.context, undefined, "no context field: none");
+      const n = seen.length;
+      assert.equal((await call(env({ "kanban.card": "c" }), grant)).status, 400);
+      assert.equal(seen.length, n, "a refused context never reaches the peer");
+      await b.control.setAppCallContext(false);
+      assert.equal((await call(env(run), grant)).status, 200);
+      assert.equal(seen.at(-1)?.context, undefined, "a bridge without the cap ignores the field and hands nothing over");
+    } finally {
+      b.peerTargets.delete("conf-peer");
+      await b.control.setAppCallContext(false);
+    }
   });
 });
 

@@ -170,8 +170,8 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
     "B31.hold_status_own": "an app caller's own hold: tb.hold_status through the companion path → held, then approved after the owner decides",
     "B31.hold_status_other_not_found": "another instance of the caller's product, an agent's hold and an unknown id → the same 404 hold_not_found envelope as an agent's unknown id",
     "B31.hold_status_undeclared": "a companion entry without tb.hold_status → callApp throws companion_undeclared; a direct call with that grant → not_in_workflow, the target never sees it",
-    "B31.hold_approved_repeat_once": "after approved the identical call runs exactly once, a second repeat does not run again, and the status answers run",
-    "B31.hold_status_old_target": "a target that reports an sdkVersion below the minimum → not_in_workflow, the target is not called",
+    "B31.hold_approved_repeat_once": "after approved the identical call runs exactly once, a second repeat (same key) and a third call (fresh key, same input) do not run again, and the status answers run",
+    "B31.hold_status_old_target": "a target that reports an sdkVersion below the minimum, none, or a malformed one → not_in_workflow, the target is not called",
     "B31.hold_denied_repeat_blocked": "after denied (and after expired) the identical repeat does not run",
   }),
   b32: ids({
@@ -180,7 +180,7 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
     "B32.context_tb_key": "a tb. key from an app → 400 input_invalid, pointer /context/tb.onBehalfOf; the target is not called",
     "B32.context_too_large": "JCS 2049 bytes → 400 input_invalid /context; exactly 2048 accepted; every row of caller-context.cases.json through the bridge",
     "B32.context_informational": "an approved repeat that reports another run runs once; the receipt keeps the hold's callerContext and stores callerContextRun",
-    "B32.sdk_local_refusal": "callApp with a context and no app_call_context cap → bridge_cap_missing before any call; {} sent without context; undeclared op wins; with the cap a bad key → local input_invalid",
+    "B32.sdk_local_refusal": "callApp with a context and no app_call_context cap → bridge_cap_missing before any call; {} accepted, no caller key reaches the target; undeclared op wins; with the cap a bad key → local input_invalid",
     "B32.context_tampered": "the context in the op body changed after the bridge signed the proof → the app refuses call_proof_invalid",
   }),
   claim: ids({

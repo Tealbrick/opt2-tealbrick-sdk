@@ -235,10 +235,14 @@ export class FakeBridge {
   /**
    * spec 0.1.77 (C367 P3, BRIDGE §8.3, cap `app_hold_status`): true = this fake routes `tb.hold_status` of an app caller when the presented
    * companion grant's `wf` lists it (else 403 `not_in_workflow`) and declares the cap in the slices it signs (when `bridgeCaps` is not set).
-   * false = a bridge without the cap: the op is not routed for an app caller (403 `not_in_workflow`). The target's SDK version is not
-   * gated here: the REAL peer app answers.
+   * false = a bridge without the cap: the op is not routed for an app caller (403 `not_in_workflow`).
+   * PK-D6 target gate (`peerSdkVersions`): for a peer product whose last reported sdkVersion was set with `control.setPeerSdkVersion`, the op
+   * reaches the peer only when that version is at least `APP_HOLD_STATUS_MIN_SDK` (a missing, malformed or lower one: 403 `not_in_workflow`,
+   * the peer is not called). A peer with no version set is not gated (the fake does not see a real peer's status pushes).
    */
   appHoldStatus = false;
+  /** PK-D6: the sdkVersion each peer product last "reported" (null = none reported); see `appHoldStatus` */
+  readonly peerSdkVersions = new Map<string, string | null>();
   /**
    * spec 0.1.77 (C367 P4, BRIDGE §8.5, cap `app_call_context`): true = this fake checks `CallEnvelope.context` with `callerContextProblem`
    * against the `prd` of the presented grant (400 `input_invalid`, `details.pointer`), hands the keys to the target (`PeerCall.context`) and
@@ -795,6 +799,8 @@ export class FakeBridge {
     const claims = peek(grant) as { wf?: unknown; prd?: unknown } | null;
     // spec 0.1.77 (BRIDGE §8.3, cap `app_hold_status`): gate() skips the CRUD ceiling and the workflow step for tb.hold_status (I4); an APP caller needs the op in its grant's wf
     if (env.op === "tb.hold_status" && !(this.appHoldStatus && Array.isArray(claims?.wf) && claims.wf.includes("tb.hold_status"))) throw new HttpError(403, "not_in_workflow", "tb.hold_status is not in the grant's workflow");
+    // spec 0.1.77 (BRIDGE §8.3, PK-D6): the target must report an sdkVersion that implements SDK-API §4.7 (fail closed)
+    if (env.op === "tb.hold_status" && this.peerSdkVersions.has(env.target) && !sdkVersionAtLeast(this.peerSdkVersions.get(env.target), APP_HOLD_STATUS_MIN_SDK)) throw new HttpError(403, "not_in_workflow", "the target app does not answer hold status for app callers yet");
     // spec 0.1.77 (BRIDGE §8.5, cap `app_call_context`): the caller context against the VERIFIED product of the grant (prd)
     let context: JsonObject | undefined;
     if (this.appCallContext && env.context !== undefined) {
@@ -821,6 +827,23 @@ export class FakeBridge {
     this.companionCalls.push({ envelope: env as CallEnvelope, caller: who.ins, answer: answer.status === "held" ? 202 : 200, at: Date.now(), grant });
     sendJson(res, answer.status === "held" ? 202 : 200, answer);
   }
+}
+
+/** BRIDGE §8.3 (PK-D6): the first miniapp-sdk release that implements SDK-API §4.7 */
+export const APP_HOLD_STATUS_MIN_SDK = "0.1.41";
+const SEMVER = /^(\d{1,9})\.(\d{1,9})\.(\d{1,9})(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
+/** Is `version` at least `min`? Missing or malformed is not (fail closed); a prerelease of `min` itself is below it. */
+export function sdkVersionAtLeast(version: unknown, min: string): boolean {
+  if (typeof version !== "string") return false;
+  const v = SEMVER.exec(version);
+  const m = SEMVER.exec(min);
+  if (!v || !m) return false;
+  for (let i = 1; i <= 3; i++) {
+    const a = Number(v[i]);
+    const b = Number(m[i]);
+    if (a !== b) return a > b;
+  }
+  return v[4] === undefined || m[4] !== undefined;
 }
 
 function flatHeaders(req: IncomingMessage): Record<string, string> {
@@ -966,6 +989,13 @@ export class FakeBridgeControl {
   setAppHoldStatus(on: boolean): Promise<number> {
     this.#b.appHoldStatus = on;
     return this.#b.rebuildSlice();
+  }
+  /** spec 0.1.77 (PK-D6): the sdkVersion a peer product "reported" last (undefined = none reported: `tb.hold_status` is refused); `clearPeerSdkVersion` removes the gate for it. */
+  setPeerSdkVersion(product: string, version: string | undefined): void {
+    this.#b.peerSdkVersions.set(product, version ?? null);
+  }
+  clearPeerSdkVersion(product: string): void {
+    this.#b.peerSdkVersions.delete(product);
   }
   /** spec 0.1.77 (C367 P4): true = this fake implements BRIDGE §8.5 and declares `app_call_context` (the next slice); false = a bridge without the cap. */
   setAppCallContext(on: boolean): Promise<number> {
