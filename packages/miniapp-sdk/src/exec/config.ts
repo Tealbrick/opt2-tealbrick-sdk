@@ -1,8 +1,10 @@
 // tb-exec configuration: the TB_* env of a companion service (SDK-API §13) + its entry in the app manifest.
 import { readFileSync } from "node:fs";
+import { isAbsolute, normalize } from "node:path";
 import { manifestDigest, validateManifest } from "@opt2-tealbrick/manifest";
 import type { InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest, Service } from "@opt2-tealbrick/spec/manifest";
+import type { Logger } from "@opt2-tealbrick/spec/sdk";
 import { readEnv, type SdkConfig } from "../server/env.ts";
 import { TbError } from "../server/errors.ts";
 
@@ -52,4 +54,47 @@ export function childEnv(base: Record<string, string | undefined>, keys: Readonl
   // after the key and role env went in: a role env name can no more bring a proxy back (M-MR-4 refuses such names too)
   if (opts.stripProxy) for (const k of Object.keys(out)) if (PROXY_ENV.test(k)) delete out[k];
   return out;
+}
+
+/**
+ * C373a: tb-exec's own service env (NOT `TB_*`: the manifest `envName` pattern refuses that prefix, so apps set these
+ * through `runtime.services[].env` like any other value). tb-exec reads them from its container env; the child sees them too.
+ */
+export const EXEC_ENV = {
+  /** decimal bytes; the cap of one streamed restore body (default {@link RESTORE_DEFAULT_MAX_BYTES}, hard bound {@link RESTORE_HARD_MAX_BYTES}) */
+  restoreMaxBytes: "TBEXEC_RESTORE_MAX_BYTES",
+  /** a path RELATIVE to TB_DATA_DIR (no `..`); the stats route reports its size, never its name */
+  mainDataFile: "TBEXEC_MAIN_DATA_FILE",
+} as const;
+
+export const RESTORE_DEFAULT_MAX_BYTES = 512 * 1024 * 1024;
+/** the hard upper bound in code: a larger env value clamps to this */
+export const RESTORE_HARD_MAX_BYTES = 16 * 1024 * 1024 * 1024;
+
+/** `TBEXEC_RESTORE_MAX_BYTES` → bytes: unset / empty / not a positive decimal integer → 512 MiB; above 16 GiB → 16 GiB. */
+export function restoreMaxBytesFrom(env: Record<string, string | undefined>, log?: Logger): number {
+  const raw = env[EXEC_ENV.restoreMaxBytes]?.trim();
+  if (!raw) return RESTORE_DEFAULT_MAX_BYTES;
+  const n = /^[0-9]{1,30}$/.test(raw) ? Number(raw) : Number.NaN;
+  if (!(n > 0)) {
+    log?.warn("restore cap env invalid; default used", { env: EXEC_ENV.restoreMaxBytes, bytes: RESTORE_DEFAULT_MAX_BYTES });
+    return RESTORE_DEFAULT_MAX_BYTES;
+  }
+  if (n > RESTORE_HARD_MAX_BYTES) {
+    log?.warn("restore cap env above the hard bound; clamped", { env: EXEC_ENV.restoreMaxBytes, bytes: RESTORE_HARD_MAX_BYTES });
+    return RESTORE_HARD_MAX_BYTES;
+  }
+  return n;
+}
+
+/** `TBEXEC_MAIN_DATA_FILE` → the normalised relative path, or null (unset, absolute, or leaving the data dir). */
+export function mainDataFileFrom(env: Record<string, string | undefined>, log?: Logger): string | null {
+  const raw = env[EXEC_ENV.mainDataFile]?.trim();
+  if (!raw) return null;
+  const rel = normalize(raw);
+  if (isAbsolute(rel) || rel === "." || rel.split(/[\\/]/).includes("..")) {
+    log?.warn("main data file env invalid; ignored", { env: EXEC_ENV.mainDataFile });
+    return null;
+  }
+  return rel;
 }

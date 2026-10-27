@@ -30,7 +30,7 @@ export interface ExecWorld {
   cleanup(): Promise<void>;
 }
 
-export async function execWorld(opts: { helper?: boolean; backup?: boolean; dropPrivileges?: boolean; modelRoles?: ModelRoleRequirement[]; settings?: Manifest["settings"]; runtimeEnv?: Manifest["runtime"]["env"] } = {}): Promise<ExecWorld> {
+export async function execWorld(opts: { helper?: boolean; backup?: boolean; restore?: (restoreFile: string) => string[]; dropPrivileges?: boolean; modelRoles?: ModelRoleRequirement[]; settings?: Manifest["settings"]; runtimeEnv?: Manifest["runtime"]["env"] } = {}): Promise<ExecWorld> {
   const t = tempDir("tb-exec-test-");
   const helperPort = await freePort();
   const helperTarget = await freePort();
@@ -51,7 +51,7 @@ export async function execWorld(opts: { helper?: boolean; backup?: boolean; drop
       : {
           backup: {
             dump: [process.execPath, "-e", "process.stdout.write('DUMP:' + (process.env.ENGINE_KEY ? 'with-key' : 'no-key'))"],
-            restore: [process.execPath, "-e", `const c=[];process.stdin.on('data',d=>c.push(d)).on('end',()=>require('fs').writeFileSync(${JSON.stringify(restoreFile)},Buffer.concat(c)))`],
+            restore: opts.restore?.(restoreFile) ?? [process.execPath, "-e", `const c=[];process.stdin.on('data',d=>c.push(d)).on('end',()=>require('fs').writeFileSync(${JSON.stringify(restoreFile)},Buffer.concat(c)))`],
             extension: "dump",
           },
         }),

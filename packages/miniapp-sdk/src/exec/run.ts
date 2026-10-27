@@ -15,12 +15,12 @@ import { TB_EXEC_CONTROL_PORT } from "../server/service-helper.ts";
 import { parseArgs } from "./args.ts";
 import { ServiceBridge } from "./bridge.ts";
 import { HelperProcess, Upstream } from "./child.ts";
-import { childEnv, type ExecConfig, loadExecConfig, SDK_VERSION } from "./config.ts";
+import { childEnv, type ExecConfig, loadExecConfig, mainDataFileFrom, restoreMaxBytesFrom, SDK_VERSION } from "./config.ts";
 import { type ClaimRecord, claimOrLoad, claimWith, loadServiceKey, retryable } from "./identity.ts";
 import { carriedSettings, type ExecRole, fetchRoles, rolesInForce } from "./roles.ts";
 import { startControlServer, startHelperProxy } from "./servers.ts";
 import { signalExitCode, sleep } from "./util.ts";
-import { appAssertionVerifier } from "./verify.ts";
+import { appAssertionVerifiers } from "./verify.ts";
 
 export const STOP_SIGNALS: readonly NodeJS.Signals[] = ["SIGTERM", "SIGINT", "SIGQUIT"];
 export const FORWARDED_SIGNALS: readonly NodeJS.Signals[] = [...STOP_SIGNALS, "SIGHUP", "SIGUSR1", "SIGUSR2"];
@@ -176,8 +176,9 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
     if (startup.signal.aborted) throw new TbError("stopped", "stopped before start", 500);
 
     // the app key accepted on the control / helper ports follows the claim record (a reclaim may bring a new one)
-    let appVerify = appAssertionVerifier(rec);
-    const verify: typeof appVerify = (req, body) => appVerify(req, body);
+    let appVerify = appAssertionVerifiers(rec);
+    const verify: typeof appVerify.body = (req, body) => appVerify.body(req, body);
+    const verifyHead: typeof appVerify.head = (req) => appVerify.head(req);
     const host = o.host ?? "0.0.0.0";
     const servers: Server[] = [];
     const up = new Upstream(args.command, log);
@@ -188,7 +189,22 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
         helper.start();
         servers.push(await startHelperProxy({ port: cfg.service.helper.port, host, paths: cfg.service.helper.paths, target: args.helperTarget, verify, log }));
       }
-      if (cfg.service.backup) servers.push(await startControlServer({ port: o.controlPort ?? TB_EXEC_CONTROL_PORT, host, backup: cfg.service.backup, verify, env: () => childEnv(o.env, keys.values, envOpts), log }));
+      if (cfg.service.backup) {
+        servers.push(
+          await startControlServer({
+            port: o.controlPort ?? TB_EXEC_CONTROL_PORT,
+            host,
+            backup: cfg.service.backup,
+            verify,
+            verifyHead,
+            env: () => childEnv(o.env, keys.values, envOpts),
+            log,
+            dataDir: cfg.env.dataDir,
+            restoreMaxBytes: restoreMaxBytesFrom(o.env, log),
+            mainDataFile: mainDataFileFrom(o.env, log),
+          }),
+        );
+      }
     } catch (e) {
       await helper?.stop();
       await closeAll(servers);
@@ -237,7 +253,7 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
         return false;
       }
       refused = false;
-      appVerify = appAssertionVerifier(rec);
+      appVerify = appAssertionVerifiers(rec);
       sliceRevision = 0;
       const next = await fetchKeys(rec, roles, bridge, secrets, log, polling.signal);
       const restart = next.fingerprint !== keys.fingerprint;
