@@ -20,10 +20,12 @@ Next release adds (C53):
 - No schema or dependency change; the only additions to the public surface are the kit `TOOLS` export and the `--package-name` flag. Spec 0.1.57 and manifest 0.1.30 as in 0.1.38. Apps get both by re-pinning `@opt2-tealbrick/miniapp-sdk` 0.1.39 in their own next release.
 ## Next (C373, G-2; spec 0.1.80 label, numbers set at merge): `ctx.topology()`
 
-- **`ctx.topology(): SliceTopology | null`** on every op context and on the start, event and job-handler contexts. It is a frozen deep copy of the CURRENT verified slice's `topology` (the workspace grant picture: `instances`, `edges`, `companions`, `connections`, `truncated?`), with only the spec members (unknown members are dropped). `null` when the slice is absent, older than 12 h, has no `topology`, or the topology is malformed (wrong type, unknown vocabulary value, a list over `TOPOLOGY_MAX`); it never throws.
-- Core sends it only to an app whose manifest declares `needsTopology: true` and whose owner accepted it at deploy or update (MANIFEST §9, CORE "v0.1.80").
+- **`ctx.topology(): SliceTopology | null`** on every op context and on the start, event and job-handler contexts. It is a deeply frozen copy of the CURRENT verified slice's `topology` in its compact tuple form: `{v: 1, instances: [ins, product, name, version][], edges: [agentIdx, instIdx, crud, mode, held, wfCount, paused][], companions: [fromIdx, toIdx, crud, opsCount][], connections: [con, agentIdx, method, status][], truncated?}` (CORE "v0.1.80"). `agentIdx` indexes the slice's `agents[]` (the `needsAgentDirectory` list); `held` is a bitmask over `MANIFEST_HOLD_FAMILIES`.
+- **Indexes.** A row with an index out of range is dropped and the copy says `truncated: true`; the other rows stay.
+- **null** when the slice is absent, older than 12 h, has no `topology`, or the topology is malformed (`v` not 1, wrong arity, a value outside its type, a list over `TOPOLOGY_MAX`); it never throws.
+- Core sends it only to an app whose manifest declares `needsTopology: true` (with `needsAgentDirectory: true`, M-TP-1) and whose owner granted the consent `topology` (MANIFEST §9).
 - **Display only.** Never authorize with it; the grant decides. Nothing in the SDK reads it for authorization (`test/topology.test.ts` pins the files that may name it). It is stale until the next slice revision.
-- SPEC-GAP until the spec pin carries 0.1.80: `SliceTopology` and `TOPOLOGY_MAX` are exported from this package as mirrors of `@opt2-tealbrick/spec/bridge` (`src/server/topology.ts`); they switch to the spec import with the re-pin.
+- SPEC-GAP until the spec pin carries 0.1.80: `SliceTopology`, the tuple aliases and `TOPOLOGY_MAX` are exported from this package as mirrors of `@opt2-tealbrick/spec/bridge` (`src/server/topology.ts`); they switch to the spec import with the re-pin (the decode helpers `topologyCrudActions` / `topologyHeldFamilies` come from the spec).
 
 ## 0.1.41 (C367 P3 + P4; the number is a reservation, the release lead assigns it at merge): `callApp` context, `tb.hold_status` for app callers (spec 0.1.77)
 

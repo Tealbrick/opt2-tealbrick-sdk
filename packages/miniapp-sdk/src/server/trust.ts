@@ -229,13 +229,14 @@ export class TrustState {
 
   /**
    * spec 0.1.80 (C373, G-2): the workspace grant picture from the CURRENT verified slice (`slice.topology`) as a frozen deep copy
-   * (spec members only); null when the slice is missing, older than 12 h (checked at `nowMs`), has none, or it is malformed.
+   * (tuple form; `agentIdx` checked against this slice's `agents.length`, out-of-range rows dropped with `truncated: true`); null
+   * when the slice is missing, older than 12 h (checked at `nowMs`), has none, or it is malformed.
    * DISPLAY ONLY: nothing in the SDK reads this for authorization; it is exposed only as `ctx.topology()`.
    */
   topology(nowMs: number): SliceTopology | null {
     const s = this.slice;
     if (!s || this.stale(nowMs)) return null;
-    return readTopology((s as { topology?: unknown }).topology);
+    return readTopology((s as { topology?: unknown }).topology, Array.isArray(s.agents) ? s.agents.length : 0);
   }
 
   /** v0.1.18 (C106a): the slice's scopeRequest of `agt`, only when it targets `product` */

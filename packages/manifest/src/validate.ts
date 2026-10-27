@@ -84,6 +84,13 @@ function needsTopologyGate(json: unknown): { json: unknown; issues: ManifestIssu
   return { json: rest, issues: [{ path: "/needsTopology", rule: "schema", code: "schema_invalid", message: "must be boolean (#/properties/needsTopology/type)" }] };
 }
 
+/** M-TP-1 (spec 0.1.80, C373): topology rows name agents by their index in the slice `agents[]`, so `needsTopology: true` needs the
+ *  full directory (`needsAgentDirectory: true`) → `topology_needs_directory`. */
+function topologyRules(m: Manifest, add: Add): void {
+  const t = m as Manifest & { needsTopology?: boolean };
+  if (t.needsTopology === true && m.needsAgentDirectory !== true) add("M-TP-1", "topology_needs_directory", "/needsTopology", "needsTopology requires needsAgentDirectory: true");
+}
+
 // ───────────────────────────── JSON Schema compile cache (operation input/output) ─────────────────────────────
 
 const ioAjv = new Ajv2020({ allErrors: true, strict: false, validateFormats: false, logger: false });
@@ -950,6 +957,7 @@ export function validateManifest(json: unknown): ManifestValidation {
   modelRoleRules(m, idx, add);
   hookRules(m, add);
   companionRules(m, add);
+  topologyRules(m, add);
   skillHintRules(m, idx, add);
   backupArtifactRouteRules(m, add);
   eventRules(m, add);

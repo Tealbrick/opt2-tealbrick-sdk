@@ -26,5 +26,5 @@ Runtime deps: `@opt2-tealbrick/spec`, `ajv`. Node 24+. Copying any of these prim
 
 ## Next (C373, G-2; spec 0.1.80 label, number set at merge): `needsTopology`
 
-`validateManifest` accepts top-level `needsTopology` as a boolean and refuses any other value (`schema` / `schema_invalid` at `/needsTopology`). SPEC-GAP until the spec pin carries 0.1.80: while the pinned schema does not know the field, `needsTopologyGate` (in `validate.ts`, outside `validateCompanions`) checks it and leaves it out of the schema check only; the manifest and its digest keep it. With the re-pin the schema decides and the gate passes everything through.
+`validateManifest` accepts top-level `needsTopology` as a boolean and refuses any other value (`schema` / `schema_invalid` at `/needsTopology`). M-TP-1 (`topologyRules`): `needsTopology: true` without `needsAgentDirectory: true` → `topology_needs_directory` at `/needsTopology`. SPEC-GAP until the spec pin carries 0.1.80: while the pinned schema does not know the field, `needsTopologyGate` (in `validate.ts`, outside `validateCompanions`) checks it and leaves it out of the schema check only; the manifest and its digest keep it. With the re-pin the schema decides and the gate passes everything through.
 

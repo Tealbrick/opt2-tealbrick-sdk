@@ -52,9 +52,10 @@ export interface CompanionTargetsView {
    */
   bridgeCaps(): readonly string[];
   /**
-   * spec 0.1.80 (C373, G-2): the workspace grant picture (`slice.topology`) from the CURRENT verified slice on every call: a frozen
-   * deep copy; null when the slice is absent, expired (older than 12 h), has none (the manifest lacks `needsTopology` or the owner
-   * did not accept it) or it is malformed. Never throws. DISPLAY ONLY: never authorize with it (the SDK authorizes every call from
+   * spec 0.1.80 (C373, G-2): the workspace grant picture (`slice.topology`, compact tuple form) from the CURRENT verified slice on
+   * every call: a frozen deep copy; null when the slice is absent, expired (older than 12 h), has none (the manifest lacks
+   * `needsTopology` or the owner did not grant the `topology` consent) or it is malformed. A row with an index out of range is
+   * dropped and the copy says `truncated: true`. `agentIdx` indexes the slice's agents (the `needsAgentDirectory` list). Never throws. DISPLAY ONLY: never authorize with it (the SDK authorizes every call from
    * the grant); stale until the next slice revision. Also on start, event and job-handler contexts.
    */
   topology(): SliceTopology | null;

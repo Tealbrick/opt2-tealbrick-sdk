@@ -1,94 +1,94 @@
 // spec 0.1.80 (C373, G-2; number set at merge): `ctx.topology()` — the workspace grant picture from the verified slice
-// (`slice.topology`), DISPLAY ONLY. Nothing in the SDK reads it for authorization; apps MUST NOT authorize with it.
+// (`slice.topology`, compact tuple form), DISPLAY ONLY. Nothing in the SDK reads it for authorization; apps MUST NOT
+// authorize with it.
 //
-// SPEC-GAP until the spec pin carries 0.1.80: `SliceTopology` and `TOPOLOGY_MAX` mirror `@opt2-tealbrick/spec/bridge`
-// (same names, same shape). When the pin moves, replace this mirror with the spec import (L1: one copy).
+// SPEC-GAP until the spec pin carries 0.1.80: `SliceTopology`, the tuple aliases and `TOPOLOGY_MAX` mirror
+// `@opt2-tealbrick/spec/bridge` (same names, same shape). When the pin moves, replace this mirror with the spec import (L1:
+// one copy); the decode helpers (`topologyCrudActions`, `topologyHeldFamilies`) come from the spec then.
 
 /** Mirror of spec `TOPOLOGY_MAX` (instance-slice.schema.json `maxItems`). */
-export const TOPOLOGY_MAX = { instances: 200, edges: 2000, companions: 500, connections: 500 } as const;
+export const TOPOLOGY_MAX = { instances: 40, edges: 600, companions: 100, connections: 300 } as const;
+const OPS_COUNT_MAX = 128;
+const HELD_MASK_MAX = 0x7fff_ffff;
+const CRUD_RE = /^c?r?u?d?$/;
 
-const CRUD = new Set(["create", "read", "update", "delete"]);
-const MODES = new Set(["free", "bound"]);
-const METHODS = new Set(["key", "pairing"]);
-const CON_STATUS = new Set(["active", "revoked"]);
-
-/** Mirror of spec `SliceTopology` (CORE "v0.1.80"). */
+/** Mirrors of the spec tuple aliases (CORE "v0.1.80"). */
+export type TopologyInstance = [ins: string, product: string, name: string, version: string];
+export type TopologyEdge = [agentIdx: number, instIdx: number, crud: string, mode: "f" | "b", held: number, wfCount: number, paused: 0 | 1];
+export type TopologyCompanion = [fromIdx: number, toIdx: number, crud: string, opsCount: number];
+export type TopologyConnection = [con: string, agentIdx: number, method: "k" | "p", status: "a" | "r"];
+/** Mirror of spec `SliceTopology`. */
 export interface SliceTopology {
-  instances: { ins: string; product: string; name: string; version: string }[];
-  edges: { agt: string; ins: string; product: string; crud: string[]; mode: "free" | "bound"; held: string[]; wf?: string[]; paused?: true }[];
-  companions: { from: string; to: string; product: string; crud: string[]; ops?: string[] }[];
-  connections: { con: string; agt: string; method: "key" | "pairing"; status: "active" | "revoked" }[];
+  v: 1;
+  instances: TopologyInstance[];
+  edges: TopologyEdge[];
+  companions: TopologyCompanion[];
+  connections: TopologyConnection[];
   truncated?: true;
 }
 
-/** Thrown inside {@link readTopology} only; never leaves it. */
 class Malformed extends Error {}
 const fail = (): never => {
   throw new Malformed();
 };
 
-type Obj = Record<string, unknown>;
-const obj = (v: unknown): Obj => (v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Obj) : fail());
-const str = (o: Obj, k: string): string => {
-  const v = o[k];
-  return typeof v === "string" && v !== "" ? v : fail();
-};
 const list = (v: unknown, max: number): unknown[] => (Array.isArray(v) && v.length <= max ? v : fail());
-const strings = (v: unknown, allowed?: Set<string>): string[] => {
-  const a = list(v, 256);
-  for (const x of a) if (typeof x !== "string" || x === "" || (allowed && !allowed.has(x))) fail();
-  return Object.freeze([...(a as string[])]) as string[];
-};
-const oneOf = <T extends string>(o: Obj, k: string, allowed: Set<string>): T => {
-  const v = str(o, k);
-  return allowed.has(v) ? (v as T) : fail();
-};
-/** an optional `true`-only flag: absent → not set, `true` → set, anything else → malformed */
-const flag = (o: Obj, k: string): boolean => (o[k] === undefined ? false : o[k] === true ? true : fail());
-const optStrings = (o: Obj, k: string): { [key: string]: string[] } => (o[k] === undefined ? {} : { [k]: strings(o[k]) });
+const tuple = (v: unknown, arity: number): unknown[] => (Array.isArray(v) && v.length === arity ? v : fail());
+const str = (v: unknown): string => (typeof v === "string" && v !== "" ? v : fail());
+const int = (v: unknown, max: number): number => (Number.isInteger(v) && (v as number) >= 0 && (v as number) <= max ? (v as number) : fail());
+/** an index: any integer is well-formed; whether it is IN RANGE is checked by the caller (out of range = drop the row) */
+const index = (v: unknown): number => (Number.isInteger(v) ? (v as number) : fail());
+const crud = (v: unknown): string => (typeof v === "string" && CRUD_RE.test(v) ? v : fail());
+const oneOf = <T extends string | number>(v: unknown, allowed: readonly T[]): T => (allowed.includes(v as T) ? (v as T) : fail());
+const inRange = (i: number, length: number): boolean => i >= 0 && i < length;
 
 /**
- * Validates `raw` (the slice's `topology` member) and returns a frozen deep copy that carries ONLY the spec members (unknown
- * members are dropped, so nothing else from the slice can reach the app through it). null when `raw` is absent or any part is
- * malformed (wrong type, unknown vocabulary value, a list over its bound). Never throws.
+ * Validates `raw` (the slice's `topology` member) and returns a deeply frozen copy. `agentsLength` = the length of the SAME
+ * slice's `agents[]` (what `agentIdx` indexes). A row whose index is out of range (0 ≤ idx < length fails) is DROPPED and the
+ * copy carries `truncated: true` (CORE "v0.1.80" rule 2). null when `raw` is absent or malformed: `v` is not 1, a list is
+ * missing, not an array or over its bound, a row has the wrong arity or a value outside its type. Never throws.
  */
-export function readTopology(raw: unknown): SliceTopology | null {
+export function readTopology(raw: unknown, agentsLength: number): SliceTopology | null {
   if (raw === undefined || raw === null) return null;
   try {
-    const t = obj(raw);
-    const freeze = <T extends object>(x: T): T => Object.freeze(x);
-    const instances = list(t.instances, TOPOLOGY_MAX.instances).map((e) => {
-      const o = obj(e);
-      return freeze({ ins: str(o, "ins"), product: str(o, "product"), name: str(o, "name"), version: str(o, "version") });
+    if (typeof raw !== "object" || Array.isArray(raw)) fail();
+    const t = raw as Record<string, unknown>;
+    if (t.v !== 1) fail();
+    if (t.truncated !== undefined && t.truncated !== true) fail();
+    let dropped = false;
+    const keep = <R>(row: R, ok: boolean): R[] => {
+      if (ok) return [Object.freeze(row) as R];
+      dropped = true;
+      return [];
+    };
+    const instances = list(t.instances, TOPOLOGY_MAX.instances).map((r) => {
+      const [ins, product, name, version] = tuple(r, 4);
+      return Object.freeze([str(ins), str(product), str(name), str(version)]) as TopologyInstance;
     });
-    const edges = list(t.edges, TOPOLOGY_MAX.edges).map((e) => {
-      const o = obj(e);
-      return freeze({
-        agt: str(o, "agt"),
-        ins: str(o, "ins"),
-        product: str(o, "product"),
-        crud: strings(o.crud, CRUD),
-        mode: oneOf<"free" | "bound">(o, "mode", MODES),
-        held: strings(o.held),
-        ...optStrings(o, "wf"),
-        ...(flag(o, "paused") ? { paused: true as const } : {}),
-      });
+    const n = instances.length;
+    const edges = list(t.edges, TOPOLOGY_MAX.edges).flatMap((r) => {
+      const [a, i, c, m, h, w, p] = tuple(r, 7);
+      const row: TopologyEdge = [index(a), index(i), crud(c), oneOf(m, ["f", "b"] as const), int(h, HELD_MASK_MAX), int(w, OPS_COUNT_MAX), oneOf(p, [0, 1] as const)];
+      return keep(row, inRange(row[0], agentsLength) && inRange(row[1], n));
     });
-    const companions = list(t.companions, TOPOLOGY_MAX.companions).map((e) => {
-      const o = obj(e);
-      return freeze({ from: str(o, "from"), to: str(o, "to"), product: str(o, "product"), crud: strings(o.crud, CRUD), ...optStrings(o, "ops") });
+    const companions = list(t.companions, TOPOLOGY_MAX.companions).flatMap((r) => {
+      const [f, to, c, o] = tuple(r, 4);
+      const row: TopologyCompanion = [index(f), index(to), crud(c), int(o, OPS_COUNT_MAX)];
+      return keep(row, inRange(row[0], n) && inRange(row[1], n));
     });
-    const connections = list(t.connections, TOPOLOGY_MAX.connections).map((e) => {
-      const o = obj(e);
-      return freeze({ con: str(o, "con"), agt: str(o, "agt"), method: oneOf<"key" | "pairing">(o, "method", METHODS), status: oneOf<"active" | "revoked">(o, "status", CON_STATUS) });
+    const connections = list(t.connections, TOPOLOGY_MAX.connections).flatMap((r) => {
+      const [con, a, m, s] = tuple(r, 4);
+      const row: TopologyConnection = [str(con), index(a), oneOf(m, ["k", "p"] as const), oneOf(s, ["a", "r"] as const)];
+      return keep(row, inRange(row[1], agentsLength));
     });
-    return freeze({
-      instances: freeze(instances),
-      edges: freeze(edges),
-      companions: freeze(companions),
-      connections: freeze(connections),
-      ...(flag(t, "truncated") ? { truncated: true as const } : {}),
-    }) as SliceTopology;
+    return Object.freeze({
+      v: 1 as const,
+      instances: Object.freeze(instances) as TopologyInstance[],
+      edges: Object.freeze(edges) as TopologyEdge[],
+      companions: Object.freeze(companions) as TopologyCompanion[],
+      connections: Object.freeze(connections) as TopologyConnection[],
+      ...(t.truncated === true || dropped ? { truncated: true as const } : {}),
+    });
   } catch {
     // Malformed, or (defensive) anything else a crafted value could raise: ctx.topology() never throws
     return null;
