@@ -23,6 +23,7 @@ import { sha256Bytes } from "./jcs.ts";
 import { findKey, publicKeyObject } from "./keys.ts";
 import { DATA_POLICIES, MODEL_ID_PATTERN, MODEL_ROLE_HINTS_MAX, MODEL_ROLES, PROVIDER_ID_PATTERN } from "./model-roles.ts";
 import { ULID_RE, ulid } from "./random.ts";
+import { WORKFLOW_GRANT_TTL_SEC, WORKFLOW_ID_PATTERN } from "./spec-p1.temp.ts";
 
 export type { JwsExpect, Refusal };
 
@@ -66,6 +67,8 @@ const heldC: Check = (v) => Array.isArray(v) && v.length <= 32 && v.every((x) =>
 const strArr = (maxItems: number, maxLen: number): Check => (v) => Array.isArray(v) && v.length <= maxItems && v.every(str(maxLen));
 /** v0.1.23 (spec 0.1.46, GRANT-PRD): a companion grant's `prd` = the product id of its calling instance (`^[a-z][a-z0-9-]{1,31}$`, CORE §1). */
 const productC = re(/^[a-z][a-z0-9-]{1,31}$/);
+/** v0.1.33 (spec 0.1.82, C373 P1): `wfl` on a per-workflow companion grant. */
+const workflowIdC = re(new RegExp(WORKFLOW_ID_PATTERN));
 const digestC = re(/^sha256:[0-9a-f]{64}$/);
 const wsC = re(idRe("ws"));
 const ulidC = re(ULID_RE);
@@ -160,9 +163,18 @@ const CLAIM_SPECS: Record<ClaimTyp, ClaimSpec> = {
     aud: INS,
     required: { ws: wsC, cnf: cnfC, crud: setOf(CRUD_ACTIONS), mode: oneOf(AGENT_MODES), held: heldC, caps: capsC, wf: strArr(1024, 128), polrev: int },
     // v0.1.23 (GRANT-PRD, spec 0.1.46): `prd` rides on companion grants; shape-checked here, read by the SDK only for an app caller
-    optional: { prd: productC },
-    // companion grants are always bound (CREDENTIALS §11, CORE I8)
-    cross: (c) => (String(c.sub).startsWith("tb:ins:") && c.mode !== "bound" ? "companion grant not bound" : null),
+    // v0.1.33 (spec 0.1.82, C373 P1): `wfl` = the workflow id of the calling app on a per-workflow companion grant (WORKFLOW_ID_PATTERN)
+    optional: { prd: productC, wfl: workflowIdC },
+    // companion grants are always bound (CREDENTIALS §11, CORE I8); a grant with `wfl` (WorkflowGrantClaims) is a companion grant that
+    // always carries `prd` and lives at most WORKFLOW_GRANT_TTL_SEC (exp − iat); anything else is refused as a whole (grant_invalid)
+    cross: (c) => {
+      const companion = String(c.sub).startsWith("tb:ins:");
+      if (companion && c.mode !== "bound") return "companion grant not bound";
+      if (!has(c, "wfl")) return null;
+      if (!companion) return "wfl on a non-companion grant";
+      if (!has(c, "prd")) return "wfl grant without prd";
+      return (c.exp as number) - (c.iat as number) > WORKFLOW_GRANT_TTL_SEC ? "wfl grant lifetime" : null;
+    },
   },
   [TYP.personTicket]: {
     iss: re(refRe("portal", "brg", "ins")),

@@ -18,6 +18,8 @@ export * from "./privilege.ts";
 export * from "./random.ts";
 export * from "./seal.ts";
 export * from "./skills.ts";
+// TEMP until spec 0.1.82 pin: the P1 spec names (re-exported from @opt2-tealbrick/spec after the pin, same names)
+export * from "./spec-p1.temp.ts";
 export * from "./tokens.ts";
 export * from "./validate.ts";
 export * from "./version.ts";

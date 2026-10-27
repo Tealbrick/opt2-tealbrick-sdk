@@ -5,6 +5,7 @@ import { CALLER_CONTEXT_MAX_BYTES, CALLER_CONTEXT_MAX_DEPTH, callerContextKeyPat
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 import { CALLER_CONTEXT_SUMMARY_MAX_CHARS, CALLER_CONTEXT_SUMMARY_VALUE_MAX_CHARS, CALLER_CONTEXT_SUMMARY_VALUE_SEGMENTS } from "@opt2-tealbrick/spec/sdk";
 import { canonicalize } from "./jcs.ts";
+import { WORKFLOW_GRANTS_CAP } from "./spec-p1.temp.ts";
 
 export {
   CALLER_CONTEXT_KEY_TAIL,
@@ -18,6 +19,12 @@ export { CALLER_CONTEXT_SUMMARY_MAX_CHARS, CALLER_CONTEXT_SUMMARY_VALUE_MAX_CHAR
 export const APP_CALL_CONTEXT_CAP = "app_call_context" as const;
 /** Bridge capability (`BRIDGE_CAPS`): the bridge routes the standard op `tb.hold_status` to an app caller whose companion grant lists it (BRIDGE §8.3, SDK-API §4.7). */
 export const APP_HOLD_STATUS_CAP = "app_hold_status" as const;
+/**
+ * v0.1.33 (spec 0.1.82, C373 P1; `BRIDGE_CAPS`): the bridge relays the workflow grant ops (`workflow_grant_request` / `_get` / `_release`) and
+ * gates `CallEnvelope.workflow` against the grant's `wfl` (BRIDGE §8.6). Without it `callApp({ workflow })` and `ctx.workflowGrants.*` throw
+ * `bridge_cap_missing` (409, details.cap).
+ */
+export const APP_WORKFLOW_GRANTS_CAP = WORKFLOW_GRANTS_CAP;
 
 /** A refused context: `pointer` is an RFC 6901 JSON pointer into the request (`/context` or `/context/<key>`). The message never repeats a value. */
 export interface CallerContextProblem {

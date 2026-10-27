@@ -3,6 +3,7 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import type {
+  Companion,
   Condition,
   JsonSchemaObject,
   Manifest,
@@ -12,7 +13,6 @@ import type {
   SettingField,
 } from "@opt2-tealbrick/spec/manifest";
 import { COMPANION_HOLD_STATUS_OP, RESERVED_EVENT_PREFIX } from "@opt2-tealbrick/spec/manifest";
-import manifestSchema from "@opt2-tealbrick/spec/schemas/manifest.schema.json" with { type: "json" };
 import type { Json, OperationView } from "@opt2-tealbrick/spec/sdk";
 import type { ErrorObject, ValidateFunction } from "ajv/dist/2020.js";
 import { Ajv2020 } from "ajv/dist/2020.js";
@@ -21,6 +21,7 @@ import { canonicalize, digest } from "./jcs.ts";
 import { DATA_POLICIES, declaredModelRoles, MODEL_ROLES, modelRoleEnvDenied } from "./model-roles.ts";
 import { DYNAMIC_CALL_INPUT_SCHEMA, derivedToolNames, standardOpInputSchema, toolNameFits } from "./ops.ts";
 import { parseSkillFile, parseVariable, skillTextViolation, VARIABLE_RE } from "./skill-text.ts";
+import { type CompanionPerWorkflow, manifestSchemaP1 } from "./spec-p1.temp.ts";
 
 type Add = (rule: string, code: string, path: string, message: string) => void;
 
@@ -56,7 +57,8 @@ const isReadOnly = (crud: readonly string[]): boolean => crud.length === 1 && cr
 // SPEC-GAP: no code is named for structural (schema) failures; they are reported as rule `schema`, code `schema_invalid`.
 let schemaCheck: ValidateFunction | undefined;
 function checkSchema(json: unknown): ManifestIssue[] {
-  schemaCheck ??= new Ajv2020({ allErrors: true, strict: true, strictRequired: false, allowUnionTypes: true }).compile(manifestSchema);
+  // TEMP until spec 0.1.82 pin: manifestSchemaP1() = the pinned schema + the 0.1.82 `companions[].perWorkflow` (spec-p1.temp.ts)
+  schemaCheck ??= new Ajv2020({ allErrors: true, strict: true, strictRequired: false, allowUnionTypes: true }).compile(manifestSchemaP1());
   if (schemaCheck(json)) return [];
   const out: ManifestIssue[] = [];
   const seen = new Set<string>();
@@ -804,6 +806,14 @@ function companionRules(m: Manifest, add: Add): void {
     if (c.product === "*" && (c.operations.length !== 1 || c.operations[0] !== HOLDS_PENDING_OP || c.crud.length !== 1 || c.crud[0] !== "read")) {
       add("M-CP-3", "companion_invalid", ptr("companions", i), `a wildcard companion ("*") needs exactly operations ["${HOLDS_PENDING_OP}"] and crud ["read"]`);
     }
+    // M-CP-4 (v0.1.33, spec 0.1.82, C373 P1): `perWorkflow` only on an entry for ONE product, never a standard op (the schema says
+    // both too; the rule keeps the code stable for a reader that runs the rules on a hand-built manifest). The target half of M-CP-4
+    // is validateCompanionWorkflows (below validateCompanions).
+    const pw = (c as Companion & { perWorkflow?: CompanionPerWorkflow }).perWorkflow;
+    if (pw === undefined) return;
+    if (c.product === "*") add("M-CP-4", "companion_invalid", ptr("companions", i, "perWorkflow"), 'a wildcard companion ("*") has no perWorkflow');
+    const stdPw = pw.operations.filter((o) => o.startsWith("tb."));
+    if (stdPw.length > 0) add("M-CP-4", "companion_invalid", ptr("companions", i, "perWorkflow", "operations"), `standard op ${stdPw.join(",")} cannot be a perWorkflow op`);
   });
 
   const unlocks = m.unlocks ?? [];
@@ -977,6 +987,45 @@ export function validateCompanions(manifest: Manifest, targets: readonly Manifes
     if (extra.length) add("M-CP-2", "companion_op_invalid", `${p}/crud`, `crud ${extra.join(",")} not needed by the listed operations`);
   });
   return errors.length ? { ok: false, errors } : { ok: true, manifest, digest: manifestDigest(manifest) };
+}
+
+/**
+ * M-CP-4, target half (v0.1.33, spec 0.1.82, C373 P1): each companion's `perWorkflow` is checked against its deployed target exactly as
+ * M-CP-2 checks `operations` / `crud`: every op exists with audience `agent`; each `op.crud ⊆ perWorkflow.crud`; `perWorkflow.crud ⊆` the
+ * union of the listed ops' crud, where a listed DYNAMIC op adds its `dynamic.crudCeiling` (C370a) → `companion_op_invalid`, pointer
+ * `/companions/<i>/perWorkflow/...`. Targets not in `targets` and the wildcard entry are skipped (as in M-CP-2).
+ * Spec 0.1.82 names `validateCompanions(m, targets)` as the caller; until that function calls this one (one line, after sdk#59 merges:
+ * the P5 change edits validateCompanions), Core and conformance call `validateCompanionWorkflows` next to it.
+ */
+export function validateCompanionWorkflows(manifest: Manifest, targets: readonly Manifest[]): ManifestValidation {
+  const { errors, add } = collector();
+  perWorkflowTargetRules(manifest, targets, add);
+  return errors.length ? { ok: false, errors } : { ok: true, manifest, digest: manifestDigest(manifest) };
+}
+
+function perWorkflowTargetRules(manifest: Manifest, targets: readonly Manifest[], add: Add): void {
+  const byId = new Map(targets.map((t) => [t.id, t]));
+  manifest.companions?.forEach((c, ci) => {
+    const pw = (c as Companion & { perWorkflow?: CompanionPerWorkflow }).perWorkflow;
+    if (pw === undefined || c.product === "*") return;
+    const target = byId.get(c.product);
+    if (!target) return;
+    const p = ptr("companions", ci, "perWorkflow");
+    const ops = new Map<string, Operation>(target.operations.map((o) => [o.id, o]));
+    const union = new Set<string>();
+    for (const id of pw.operations) {
+      const op = ops.get(id);
+      if (op?.audience !== "agent") {
+        add("M-CP-4", "companion_op_invalid", `${p}/operations`, `${c.product} has no agent operation ${id}`);
+        continue;
+      }
+      for (const x of op.crud) union.add(x);
+      if (op.dynamic) for (const x of op.dynamic.crudCeiling) union.add(x);
+      if (!isSubset(op.crud, pw.crud)) add("M-CP-4", "companion_op_invalid", `${p}/crud`, `${c.product}.${id} needs crud ${op.crud.join(",")}`);
+    }
+    const extra = pw.crud.filter((x) => !union.has(x));
+    if (extra.length) add("M-CP-4", "companion_op_invalid", `${p}/crud`, `crud ${extra.join(",")} not needed by the perWorkflow operations`);
+  });
 }
 
 // SPEC-GAP: MANIFEST §14 forbids hand-written copies without naming a code; `hand_written_artifact` is used.
