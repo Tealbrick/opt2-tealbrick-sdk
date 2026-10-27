@@ -13,6 +13,7 @@ import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import {
   bridgeOpProofClaims,
+  callerContextProblem,
   deriveIdempotencyKey,
   digest,
   dynamicToolNames,
@@ -150,6 +151,32 @@ export interface MiniFlags {
   ignoreHookEnabled?: boolean;
   /** C117: a hook whose app refuses the connection (down) is skipped instead of hook_failed (fails B27.hook_app_down) */
   skipDownHookApp?: boolean;
+  /**
+   * spec 0.1.77 (C367 P3, conformance 0.1.31, BRIDGE §8.3): `tb.hold_status` on the companion path is routed when the grant's wf lists it and only to
+   * a target whose last reported sdkVersion is at least 0.1.41; DECLARES the `app_hold_status` cap
+   */
+  appHoldStatus?: boolean;
+  /** one §8.3 rule broken (B31 sensitivity): `noWfCheck` routes it without the op in the grant's wf, `noTargetGate` ignores the target's sdkVersion */
+  appHoldStatusFaults?: { noWfCheck?: boolean; noTargetGate?: boolean };
+  /** spec 0.1.77 (C367 P4, BRIDGE §8.5): validates `CallEnvelope.context` against the grant's `prd` (callerContextProblem), merges it into the op context; DECLARES `app_call_context` */
+  appCallContext?: boolean;
+  /** one §8.5 rule broken (B32 sensitivity): `noValidation` accepts any context, `noMerge` drops it, `productFromContext` reads the caller product from the context's first key */
+  appCallContextFaults?: { noValidation?: boolean; noMerge?: boolean; productFromContext?: boolean };
+  /**
+   * a strict bridge without `app_call_context`: a companion envelope that carries a `context` member is refused 400 `input_invalid`
+   * (BRIDGE §8.5: such a bridge need not accept the field). B31 must still pass on a bridge that declares only `app_hold_status` (QA-SDK62-1).
+   */
+  rejectContext?: boolean;
+}
+
+/** Is `version` at least `min` (plain `major.minor.patch`; anything else is not)? */
+function sdkAtLeast(version: unknown, min: string): boolean {
+  const parse = (v: unknown) => (typeof v === "string" && /^\d+\.\d+\.\d+$/.test(v) ? v.split(".").map(Number) : null);
+  const a = parse(version);
+  const b = parse(min);
+  if (!a || !b) return false;
+  for (let i = 0; i < 3; i++) if ((a[i] as number) !== (b[i] as number)) return (a[i] as number) > (b[i] as number);
+  return true;
 }
 
 /** Identity kept across restarts of one mini bridge (same volume): a restart does not enrol again. */
@@ -256,7 +283,9 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     return fetch(`${portal}${path}`, { method, headers: { "content-type": "application/json", "TB-Assert": assertion }, body: raw, signal: AbortSignal.timeout(5000) });
   };
   /** spec 0.1.54 (C292): StatusReport.bridge.caps of every ack */
-  const declaredCaps: string[] = flags.declaredCaps ?? [...(flags.ownerRows || flags.events ? ["owner_rows"] : []), ...(flags.events ? ["events"] : [])];
+  const declaredCaps: string[] = flags.declaredCaps ?? [...(flags.ownerRows || flags.events ? ["owner_rows"] : []), ...(flags.events ? ["events"] : []), ...(flags.appHoldStatus ? ["app_hold_status"] : []), ...(flags.appCallContext ? ["app_call_context"] : [])];
+  /** last reported sdkVersion per instance (status pushes) */
+  const sdkVersions = new Map<string, unknown>();
   const ack = (extra: Record<string, unknown> = {}) =>
     cfg &&
     portalCall("POST", enrol.ackPath, {
@@ -425,8 +454,8 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     }
     return Math.max(1, Math.ceil((1 - b.tokens) / 2));
   };
-  const toolError = (code: string, details?: Record<string, unknown>) => {
-    const error = { code, message: code, requestId: "req_mini", ...(details ? { details } : {}) };
+  const toolError = (code: string, details?: Record<string, unknown>, message?: string) => {
+    const error = { code, message: message ?? code, requestId: "req_mini", ...(details ? { details } : {}) };
     return { isError: true, content: [{ type: "text", text: JSON.stringify({ error }) }], structuredContent: { error } };
   };
 
@@ -618,8 +647,10 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     if (flags.leakToPortal) await ack({ lastCall: { name, input: args, output: body } });
     if (r.status === 200) return { content: [{ type: "text", text: JSON.stringify(body.output) }], structuredContent: body.output };
     if (r.status === 202) return { content: [{ type: "text", text: "held" }], structuredContent: { status: "held", holdId: body.holdId, expiresAt: body.expiresAt, checkWith: mcpToolName(m.id, "tb_hold_status") } };
-    const code = (body.error as { code?: string } | undefined)?.code ?? "app_error";
-    return toolError(code);
+    // the app's own error text is relayed (the real bridge does), so an agent's unknown hold id carries the SDK's message (B31.hold_status_other_not_found)
+    const appError = body.error as { code?: string; message?: string } | undefined;
+    const code = appError?.code ?? "app_error";
+    return toolError(code, undefined, typeof appError?.message === "string" ? appError.message : undefined);
   };
 
   // ── spec 0.1.57 (BRIDGE §14): the per-agent event log (reference implementation, conformance src/event-log.ts) ──
@@ -764,7 +795,9 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     if (path === "/tb/v1/status" && req.method === "POST") {
       const ins = instanceOf(req, raw);
       if (!ins) return send(res, 401, { error: { code: "unauthenticated", message: "instance assertion refused", requestId: "req_mini" } });
-      const pushed = (JSON.parse(raw.toString() || "{}") as { sliceRevision?: number }).sliceRevision;
+      const body = JSON.parse(raw.toString() || "{}") as { sliceRevision?: number; sdkVersion?: unknown };
+      const pushed = body.sliceRevision;
+      sdkVersions.set(ins, body.sdkVersion);
       const wait = Math.min(10, Number(new URL(req.url ?? "/", "http://x").searchParams.get("wait") ?? 0) || 0);
       const end = Date.now() + wait * 1000;
       for (;;) {
@@ -803,7 +836,7 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
       if (!c) return err(503, "config_expired");
       const ins = instanceOf(req, raw);
       if (!ins) return err(401, "unauthenticated");
-      const env = JSON.parse(raw.toString() || "{}") as { target?: string; op?: string; input?: Json; idempotencyKey?: string; parentCall?: string };
+      const env = JSON.parse(raw.toString() || "{}") as { target?: string; op?: string; input?: Json; idempotencyKey?: string; parentCall?: string; context?: unknown };
       const grant = String(req.headers["tb-grant"] ?? "");
       if (!grant || peekJwt(grant).sub !== `tb:ins:${ins}`) return err(403, "grant_invalid");
       const target = c.apps.find((a) => a.product === env.target);
@@ -817,6 +850,21 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
       if (!flags.companionNoWfCheck) {
         const d = gate({ paused, grant, trust, op, declaredScopeTypes: (m.scopes ?? []).map((x) => x.type) });
         if (d.decision === "refuse") return err(403, d.reason);
+      }
+      // spec 0.1.77 (C367 P3, BRIDGE §8.3): the op must be in the presented grant's wf, and the target must report an sdkVersion that answers it
+      if (flags.appHoldStatus && op.id === "tb.hold_status") {
+        if (!flags.appHoldStatusFaults?.noWfCheck && !(g.claims.wf as readonly string[]).includes("tb.hold_status")) return err(403, "not_in_workflow");
+        if (!flags.appHoldStatusFaults?.noTargetGate && !sdkAtLeast(sdkVersions.get(target.ins), "0.1.41")) return err(403, "not_in_workflow");
+      }
+      // spec 0.1.77 (C367 P4, BRIDGE §8.5): the caller context, checked against the VERIFIED product of the grant (prd), merged into the op context
+      let callerContext: Record<string, Json> = {};
+      if (!flags.appCallContext && flags.rejectContext && env.context !== undefined) return send(res, 400, { error: { code: "input_invalid", message: "context is not accepted by this bridge", requestId: "req_mini", details: { pointer: "/context" } } });
+      if (flags.appCallContext && env.context !== undefined) {
+        const faults = flags.appCallContextFaults ?? {};
+        const prd = faults.productFromContext && isObj(env.context) ? (Object.keys(env.context)[0]?.split(".")[0] ?? null) : typeof (g.claims as { prd?: unknown }).prd === "string" ? ((g.claims as { prd?: unknown }).prd as string) : null;
+        const problem = faults.noValidation ? null : callerContextProblem(prd, env.context);
+        if (problem) return send(res, 400, { error: { code: "input_invalid", message: problem.message, requestId: "req_mini", details: { pointer: problem.pointer } } });
+        if (!faults.noMerge && isObj(env.context)) callerContext = { ...(env.context as Record<string, Json>) };
       }
       // A2A-10: a parentCall counts only while that call is in flight FOR this caller (its target, or the caller answers
       // one of its hooks now); anything else (forged, foreign, finished) is ignored → app-initiated (C85)
@@ -839,7 +887,7 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
       const inputProduct = isObj(env.input) && typeof env.input.product === "string" ? env.input.product : undefined;
       const product = !asApp || flags.noHookCallerProduct ? undefined : flags.hookCallerProductFromInput ? inputProduct : manifests.get(ins)?.id;
       const caller = { type: asApp ? ("app" as const) : ("system" as const), id: ins, ...(product !== undefined ? { product } : {}) };
-      const fwd = await pipeline({ caller, grant, grantJti: g.claims.jti, ins: target.ins, m, op, input: (env.input ?? null) as Json, context: {}, ...(env.idempotencyKey ? { idem: env.idempotencyKey } : {}), hooks: !flags.appCallsSkipHooks, depth });
+      const fwd = await pipeline({ caller, grant, grantJti: g.claims.jti, ins: target.ins, m, op, input: (env.input ?? null) as Json, context: callerContext, ...(env.idempotencyKey ? { idem: env.idempotencyKey } : {}), hooks: !flags.appCallsSkipHooks, depth });
       if ("error" in fwd) return err(fwd.error === "hook_denied" ? 403 : 502, fwd.error);
       return send(res, fwd.status, fwd.body);
     }

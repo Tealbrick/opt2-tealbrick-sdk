@@ -30,10 +30,21 @@ import type { AppEntry, EnrolCodeEntry, HookEntry, KeyRequirementEntry, SkillFil
 import { type AgentId, type BridgeId, type ConnectionId, type Ed25519PublicJwk, type FreeCaps, type InstanceId, type PersonId, type StandaloneState, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { AgentMode, CrudAction, HoldFamily, Manifest, Operation } from "@opt2-tealbrick/spec/manifest";
 import type { KeySet } from "@opt2-tealbrick/spec/sdk";
+import { capAppManifests } from "./cap-fixture.ts";
 import { FakeApp, type FakeAppWorld } from "./fake-app.ts";
 import { FakePortal } from "./fake-portal.ts";
 import { type AgentCapture, KeyAgent, OAuthAgent } from "./mcp-agent.ts";
 import { Mint, newId, nowS, peek, rawSign } from "./tokens.ts";
+
+/** A REAL SDK app listed in the config (C91 `realApp`, C367 `extraReals`): `jwk` is its instance key once the bridge reported the claim. */
+export interface RealSlot {
+  ins: InstanceId;
+  manifest: Manifest;
+  digest: string;
+  url: string;
+  jwk: Ed25519PublicJwk | null;
+  listed: boolean;
+}
 
 export interface BridgeStartResult {
   /** public listener origin (MCP, OAuth, /a, /p, /keys, health) */
@@ -274,7 +285,28 @@ export class BridgeWorld {
    * C91: the real SDK app slot. `listed`: in config apps[] with a slice and a free-agent grant; `jwk`: its instance key,
    * bound (config instanceKeys) once the bridge reported its claim — as Core binds a claimed key.
    */
-  realApp: { ins: InstanceId; manifest: Manifest; digest: string; url: string; jwk: Ed25519PublicJwk | null; listed: boolean } | null = null;
+  realApp: RealSlot | null = null;
+  /**
+   * conformance 0.1.31 (B31 / B32, C367 P3 P4): more REAL SDK apps listed beside `realApp` (the target of the hold-status and
+   * caller-context rows, and a real caller). Listed like `realApp`; emptied by the group that adds them.
+   */
+  readonly extraReals: RealSlot[] = [];
+  /** conformance 0.1.31: ports reserved at boot for the B31 / B32 real apps (their origins are on TB_OWN_INFRA_ORIGINS): [target proxy, real caller, real target] */
+  capPorts: number[] = [];
+  /**
+   * conformance 0.1.31 (B31 / B32): fake apps created with the world (origins on TB_OWN_INFRA_ORIGINS), listed in the config only
+   * while `capAppsListed` (the hold-status / caller-context group). Callers of the same PRODUCT are separate instances.
+   */
+  capApps: Map<string, FakeApp> = new Map();
+  capAppsListed = false;
+  /**
+   * conformance 0.1.31 (B31 / B32): companion grant shape per caller instance. `prd` (GRANT-PRD): the verified product the grant
+   * names; an instance without an entry gets a grant without `prd`. `wfExtra`: ops added to the `wf` of every grant of the caller
+   * (an op the manifest cannot list, e.g. tb.holds_pending). `sliceCaps`: `bridge.caps` of the slice the Portal signs for the instance.
+   */
+  readonly grantPrd = new Map<InstanceId, string>();
+  readonly grantWfExtra = new Map<InstanceId, string[]>();
+  readonly sliceCaps = new Map<InstanceId, string[]>();
   /**
    * conformance 0.1.28 (B-EV, BRIDGE §14): two apps that DECLARE events (`a`, `b`) and one app with product `tb`, created with the
    * world (their origins are on TB_OWN_INFRA_ORIGINS) but listed in the config only once the bridge declared the `events` cap
@@ -318,6 +350,10 @@ export class BridgeWorld {
     const mb = eventManifest(manifests[0] as Manifest, "tbconf-events-b", true);
     const mt = eventManifest(manifests[0] as Manifest, "tb", false);
     if (ma && mb && mt) w.eventApps = { a: await FakeApp.create(ma, adapter), b: await FakeApp.create(mb, adapter), tb: await FakeApp.create(mt, adapter) };
+    // conformance 0.1.31 (B31 / B32): the fake caller apps and the old fake target (listed only while their group runs)
+    const caps = capAppManifests(manifests[0] as Manifest);
+    if (caps) for (const [role, m] of Object.entries(caps)) w.capApps.set(role, await FakeApp.create(m, adapter));
+    for (const a of w.capApps.values()) a.marker = w.canary;
     await w.#agents();
     return w;
   }
@@ -438,12 +474,21 @@ export class BridgeWorld {
   /** Origins of the fake apps (they run on the suite's own host: own infrastructure, BRIDGE §5.7). */
   ownInfraOrigins(): string[] {
     const ev = this.eventApps ? [this.eventApps.a, this.eventApps.b, this.eventApps.tb] : [];
-    return [...[...this.apps, ...ev].map((a) => new URL(a.url).origin), ...(this.realAppPort ? [`http://127.0.0.1:${this.realAppPort}`] : [])];
+    return [
+      ...[...this.apps, ...ev, ...this.capApps.values()].map((a) => new URL(a.url).origin),
+      ...(this.realAppPort ? [`http://127.0.0.1:${this.realAppPort}`] : []),
+      ...this.capPorts.map((p) => `http://127.0.0.1:${p}`),
+    ];
   }
 
-  /** The event apps when listed (config apps[], instanceKeys, hooks), else []. */
+  /** The event apps and the B31 / B32 fake apps when listed (config apps[], instanceKeys, hooks), else []. */
   listedEventApps(): FakeApp[] {
-    return this.eventApps && this.eventAppsListed ? [this.eventApps.a, this.eventApps.b, this.eventApps.tb] : [];
+    return [...(this.eventApps && this.eventAppsListed ? [this.eventApps.a, this.eventApps.b, this.eventApps.tb] : []), ...(this.capAppsListed ? [...this.capApps.values()] : [])];
+  }
+
+  /** The listed REAL SDK apps: `realApp` (C91) and `extraReals` (B31 / B32). */
+  listedReals(): RealSlot[] {
+    return [this.realApp, ...this.extraReals].filter((r): r is RealSlot => r?.listed === true);
   }
 
   /** The current config grant JWS for (role, app). */
@@ -466,8 +511,7 @@ export class BridgeWorld {
     };
     for (const a of [...this.apps, ...this.listedEventApps()]) for (const h of a.manifest.hooks ?? []) add(a.ins, a.product, h);
     // the listed real SDK app's hooks (B25.real_hook_hold: a REAL before hook answering a hold verdict)
-    const real = this.realApp?.listed ? this.realApp : null;
-    if (real) for (const h of real.manifest.hooks ?? []) add(real.ins, real.manifest.id, h);
+    for (const real of this.listedReals()) for (const h of real.manifest.hooks ?? []) add(real.ins, real.manifest.id, h);
     return out;
   }
 
@@ -517,22 +561,36 @@ export class BridgeWorld {
       // v0.1.15 (C105, L1): agent grants carry the agent card default held families (Core mints a new card's policy so)
       this.grants.set(`${g.role}|${g.app.ins}`, await this.mint.grant({ sub: `tb:agt:${this.agents[g.role].agt}`, aud: `tb:ins:${g.app.ins}`, crud: g.crud, mode: g.mode, held: [...(g.held ?? DEFAULT_HELD_FAMILIES)], ...(g.caps ? { caps: g.caps } : {}), wf: g.wf, iat: nowS() - 5 }));
     }
-    const real = this.realApp?.listed ? this.realApp : null;
-    if (real) this.grants.set(`free|${real.ins}`, await this.mint.grant({ sub: `tb:agt:${this.agents.free.agt}`, aud: `tb:ins:${real.ins}`, crud: [...ALL_CRUD], mode: "free", held: [...DEFAULT_HELD_FAMILIES], wf: [], iat: nowS() - 5 }));
+    const reals = this.listedReals();
+    for (const real of reals)
+      this.grants.set(`free|${real.ins}`, await this.mint.grant({ sub: `tb:agt:${this.agents.free.agt}`, aud: `tb:ins:${real.ins}`, crud: [...ALL_CRUD], mode: "free", held: [...DEFAULT_HELD_FAMILIES], wf: [], iat: nowS() - 5 }));
     this.companionGrants.clear();
     // C85 (B26): the listed real SDK app gets the companion grant of its manifest edge too (app-initiated callApp)
-    const callers: { ins: InstanceId; manifest: Manifest }[] = [...this.apps, ...(real ? [real] : [])];
+    const callers: { ins: InstanceId; manifest: Manifest }[] = [...this.apps, ...this.listedEventApps(), ...reals];
+    const targetCandidates: { ins: InstanceId; product: string }[] = [...this.apps, ...this.listedEventApps(), ...reals.map((r) => ({ ins: r.ins, product: r.manifest.id }))];
     /** v0.1.14 (C90 / C102): per instance, the targets it holds a companion grant for and the callers that hold one to it */
     const targetsOf = new Map<string, { product: string; ins: InstanceId }[]>();
     const callersOf = new Map<string, { product: string; ins: InstanceId; name: string; provider: string }[]>();
+    const grantsOf = new Map<string, string[]>();
     for (const caller of callers)
       for (const comp of caller.manifest.companions ?? []) {
-        const target = this.apps.find((a) => a.product === comp.product);
+        const target = targetCandidates.find((a) => a.product === comp.product);
         if (!target) continue;
         // CORE I8 (C105a): companion grants hold the workspace apps policy (default DEFAULT_HELD_FAMILIES, imported)
-        this.companionGrants.set(caller.ins, await this.mint.grant({ sub: `tb:ins:${caller.ins}`, aud: `tb:ins:${target.ins}`, crud: comp.crud, mode: "bound", wf: comp.operations, held: [...this.appsPolicy.held] }));
+        const prd = this.grantPrd.get(caller.ins);
+        const grant = await this.mint.grant({
+          sub: `tb:ins:${caller.ins}`,
+          aud: `tb:ins:${target.ins}`,
+          crud: comp.crud,
+          mode: "bound",
+          wf: [...comp.operations, ...(this.grantWfExtra.get(caller.ins) ?? [])],
+          held: [...this.appsPolicy.held],
+          ...(prd !== undefined ? { prd } : {}),
+        });
+        this.companionGrants.set(caller.ins, grant);
         // one companionTargets entry per grant: the world keeps one companion grant per caller (its last edge)
         targetsOf.set(caller.ins, [{ product: target.product, ins: target.ins }]);
+        grantsOf.set(caller.ins, [grant]);
       }
     for (const caller of callers)
       for (const t of targetsOf.get(caller.ins) ?? []) {
@@ -554,7 +612,7 @@ export class BridgeWorld {
     const pause = { workspace: p.pause.workspace, agents: [] as AgentId[], instances: [...p.pause.instances] };
     const revoked = { jtis: p.revoked.map((r) => ({ jti: r.jti, exp: r.exp })) };
     const apps: AppEntry[] = [];
-    const entries: { ins: InstanceId; product: string; manifest: Manifest; digest: string; url: string }[] = [...this.apps, ...this.listedEventApps(), ...(real ? [{ ...real, product: real.manifest.id }] : [])];
+    const entries: { ins: InstanceId; product: string; manifest: Manifest; digest: string; url: string }[] = [...this.apps, ...this.listedEventApps(), ...reals.map((r) => ({ ...r, product: r.manifest.id }))];
     for (const a of entries) {
       const slice = await signSlice(
         {
@@ -569,11 +627,11 @@ export class BridgeWorld {
           product: a.product,
           portalKeys,
           ...(portalKeySet ? { portalKeySet } : {}),
-          bridge: { id: p.bridgeId, keys: [jwk] },
+          bridge: { id: p.bridgeId, keys: [jwk], ...(this.sliceCaps.has(a.ins) ? { caps: [...(this.sliceCaps.get(a.ins) as string[])] } : {}) },
           pause,
           revoked,
           personNbf: 0,
-          grants: this.companionGrants.has(a.ins) ? [this.companionGrants.get(a.ins) as string] : [],
+          grants: grantsOf.get(a.ins) ?? [],
           agents: p.agents.map((x) => ({ id: x.agt, name: x.name, mode: x.mode, status: p.pause.agents.has(x.agt) ? ("paused" as const) : ("active" as const) })),
           ...(standalone ? { standalone } : {}),
           // the shared slice shape (spec 0.1.15 InstanceSlice): companionTargets (C90), companionCallers (C102), appsPolicy (C105a)
@@ -603,7 +661,7 @@ export class BridgeWorld {
       bridge: { id: p.bridgeId, publicUrl: this.advertisedUrl },
       portalKeys,
       ...(portalKeySet ? { portalKeySet } : {}),
-      instanceKeys: [...[...this.apps, ...this.listedEventApps()].map((a) => ({ ins: a.ins, jwk: a.key.publicJwk })), ...(this.realApp?.jwk ? [{ ins: this.realApp.ins, jwk: this.realApp.jwk }] : [])],
+      instanceKeys: [...[...this.apps, ...this.listedEventApps()].map((a) => ({ ins: a.ins, jwk: a.key.publicJwk })), ...[this.realApp, ...this.extraReals].flatMap((r) => (r?.jwk ? [{ ins: r.ins, jwk: r.jwk }] : []))],
       grants: [...this.grants.values()],
       apps,
       hooks: this.hookEntries(),
@@ -682,7 +740,7 @@ export class BridgeWorld {
   }
 
   async close(): Promise<void> {
-    await Promise.all([...this.apps, ...(this.eventApps ? [this.eventApps.a, this.eventApps.b, this.eventApps.tb] : [])].map((a) => a.close()));
+    await Promise.all([...this.apps, ...(this.eventApps ? [this.eventApps.a, this.eventApps.b, this.eventApps.tb] : []), ...this.capApps.values()].map((a) => a.close()));
     await this.portal.close();
   }
 }

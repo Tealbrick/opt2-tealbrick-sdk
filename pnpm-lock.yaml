@@ -21,8 +21,8 @@ importers:
         specifier: workspace:*
         version: link:../miniapp-sdk
       '@opt2-tealbrick/spec':
-        specifier: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.64/opt2-tealbrick-spec-0.1.64.tgz
-        version: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.64/opt2-tealbrick-spec-0.1.64.tgz
+        specifier: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.78/opt2-tealbrick-spec-0.1.78.tgz
+        version: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.78/opt2-tealbrick-spec-0.1.78.tgz
     devDependencies:
       '@types/node':
         specifier: 24.19.2
@@ -145,10 +145,6 @@ packages:
     engines: {node: '>=14.21.3'}
     cpu: [x64]
     os: [win32]
-
-  '@opt2-tealbrick/spec@https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.64/opt2-tealbrick-spec-0.1.64.tgz':
-    resolution: {integrity: sha512-yuHuNo/SDvr13cf17KtZFqASTqQ8BN4ufHXpVW1/8H7Ze23cVitzwjsLgZF5Tf3bJj7KSreiOofdKSRSIsh4zA==, tarball: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.64/opt2-tealbrick-spec-0.1.64.tgz}
-    version: 0.1.64
 
   '@opt2-tealbrick/spec@https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.78/opt2-tealbrick-spec-0.1.78.tgz':
     resolution: {integrity: sha512-kDi3rZtU627gj6j3Hns3fSvE+xeCKirkdOhmGog4K5pU4BQkk5dyIvsPp2bBa07R8cjZghbRjDElkXAfDH1pqg==, tarball: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.78/opt2-tealbrick-spec-0.1.78.tgz}
@@ -367,8 +363,6 @@ snapshots:
 
   '@biomejs/cli-win32-x64@2.5.15':
     optional: true
-
-  '@opt2-tealbrick/spec@https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.64/opt2-tealbrick-spec-0.1.64.tgz': {}
 
   '@opt2-tealbrick/spec@https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.78/opt2-tealbrick-spec-0.1.78.tgz': {}
 
