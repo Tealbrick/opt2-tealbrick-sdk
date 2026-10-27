@@ -409,6 +409,58 @@ describe("validateCompanions (M-CP-2)", () => {
     expectIssue(validateCompanions(missing, [target([op({})])]), "M-CP-2", "companion_op_invalid", "/companions/0/operations");
   });
   test("targets not supplied are not checked", () => assert.equal(validateCompanions(base(), []).ok, true));
+
+  describe("v0.1.79 (C370a): a listed dynamic op reaches its crudCeiling", () => {
+    const dyn = (ceiling: string[], id = "tools") =>
+      op({
+        id,
+        title: "Tools",
+        description: "Search tools.",
+        input: undefined,
+        output: undefined,
+        idempotency: "supported",
+        dynamic: { mode: "search", crudCeiling: ceiling, effectCeiling: ceiling.length === 1 ? "read" : "money" },
+      });
+    const entry = (operations: string[], crud: string[]): Manifest => {
+      const m = base();
+      m.companions = [{ product: "calendar", operations, crud, purpose: "x" }];
+      return m;
+    };
+    const all = ["read", "create", "update", "delete"];
+    test("crud up to the ceiling is valid, including the whole ceiling", () => {
+      const t = target([dyn(all)]);
+      assert.equal(validateCompanions(entry(["tools"], ["read", "create", "update"]), [t]).ok, true);
+      assert.equal(validateCompanions(entry(["tools"], all), [t]).ok, true);
+    });
+    test("crud beyond the ceiling is refused", () => {
+      const t = target([dyn(["read", "create"])]);
+      expectIssue(validateCompanions(entry(["tools"], ["read", "create", "update"]), [t]), "M-CP-2", "companion_op_invalid", "/companions/0/crud");
+    });
+    test("read-only ceiling gives no write crud", () => {
+      expectIssue(validateCompanions(entry(["tools"], ["read", "create"]), [target([dyn(["read"])])]), "M-CP-2", "companion_op_invalid", "/companions/0/crud");
+    });
+    test("op.crud must still be within the entry crud", () => {
+      expectIssue(validateCompanions(entry(["tools"], ["create"]), [target([dyn(all)])]), "M-CP-2", "companion_op_invalid", "/companions/0/crud");
+    });
+    test("a static op cannot widen the entry; a dynamic op listed next to it supplies the ceiling", () => {
+      const statics = target([op({ id: "accounts_list" })]);
+      expectIssue(validateCompanions(entry(["accounts_list"], ["read", "create"]), [statics]), "M-CP-2", "companion_op_invalid", "/companions/0/crud");
+      const both = target([op({ id: "accounts_list" }), dyn(all)]);
+      assert.equal(validateCompanions(entry(["accounts_list", "tools"], ["read", "create", "update"]), [both]).ok, true);
+    });
+    test("an unlisted dynamic op adds nothing", () => {
+      const both = target([op({ id: "accounts_list" }), dyn(all)]);
+      expectIssue(validateCompanions(entry(["accounts_list"], ["read", "create"]), [both]), "M-CP-2", "companion_op_invalid", "/companions/0/crud");
+    });
+    test("tb.hold_status and tb.holds_pending behave as before next to a dynamic op", () => {
+      const t = target([dyn(all)]);
+      assert.equal(validateCompanions(entry(["tools", "tb.hold_status"], ["read", "create"]), [t]).ok, true);
+      // tb.hold_status adds nothing: with only a static read op it still cannot justify create
+      expectIssue(validateCompanions(entry(["event_get", "tb.hold_status"], ["read", "create"]), [target([op({})])]), "M-CP-2", "companion_op_invalid");
+      assert.equal(validateCompanions(entry(["tools", "tb.holds_pending"], ["read", "update"]), [t]).ok, true);
+      expectIssue(validateCompanions(entry(["tb.holds_pending"], ["update"]), [t]), "M-CP-2", "companion_op_invalid", "/companions/0/crud");
+    });
+  });
 });
 
 describe("validateInput", () => {
