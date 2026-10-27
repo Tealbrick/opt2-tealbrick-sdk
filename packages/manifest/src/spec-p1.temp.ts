@@ -1,5 +1,5 @@
 // TEMP until spec 0.1.82 pin (C373 P1, per-workflow companion grants).
-// A byte-for-byte mirror of the P1 additions on the spec branch `spec/c373-p1-workflow-grants` (Tealbrick/opt2-tealbrick-specs,
+// A mirror of the P1 additions on the spec branch `spec/c373-p1-workflow-grants` (Tealbrick/opt2-tealbrick-specs,
 // packages/spec/src/{credentials,manifest}.ts and schemas/manifest.schema.json). When the manifest package pins spec 0.1.82,
 // delete this file and import every name below from `@opt2-tealbrick/spec/*` instead (the names and values are the spec's).
 // Nothing here is a second definition: it is the spec text, held locally for the time between the two releases.
@@ -68,10 +68,13 @@ export type WorkflowGrantErrorCode =
   | "workflow_grant_withdrawn"
   /** 404 from Core: no applied workflow grant for (caller, workflow[, target]) */
   | "workflow_grant_missing"
-  /** 409: the gate is off for this target (bridge cap, caller SDK, target SDK; standalone); `details.product` names it */
+  /** 409: the gate is off for this target (bridge cap `app_workflow_grants`, caller app cap `app_workflow_grants`, target app cap
+   *  `grant_wfl`; standalone); `details.product` names it */
   | "workflow_grants_unsupported"
   /** 409 from Core: the caller has WORKFLOW_GRANTS_MAX requested + applied records */
-  | "workflow_grants_full";
+  | "workflow_grants_full"
+  /** 503: a workflow-grant relay got no answer from Core (Portal unreachable, or no answer within the json transport timeout) */
+  | "portal_unavailable";
 /** v0.1.82 (C373, P1): one withdrawal record (config only, never in a slice). The bridge refuses a presented grant with `wfl` when `sub`
  *  and `wfl` equal the grant's, `aud` is absent or equals the grant's, and grant `iat ≤ at` (`workflow_grant_withdrawn`). */
 export interface WorkflowGrantWithdrawal {
@@ -83,13 +86,19 @@ export interface WorkflowGrantWithdrawal {
 }
 /** v0.1.82 (C373, P1): config fields (`ConfigCredentialFields`), sent only to a bridge that declares `app_workflow_grants`. */
 export interface WorkflowGrantConfigFields {
+  /** withdrawn per-workflow grants (config only, never in a slice). Absent = none. */
   workflowGrantsWithdrawn?: WorkflowGrantWithdrawal[];
-  /** per caller instance ref: every wfl grant of that caller with `iat ≤` this value is withdrawn */
+  /** per caller instance ref (`tb:ins:<id>`): every wfl grant of that caller with `iat ≤` this value is withdrawn (the overflow path when
+   *  one instance has more than WORKFLOW_WITHDRAWN_MAX live records, and every change that re-mints the caller's base grant with other claims). */
   wflEpoch?: Record<InstanceRef, EpochS>;
+  /** per caller instance ref: the target instance refs whose companion edge is enabled and licensed AND whose companion entry has `perWorkflow`.
+   *  The bridge refuses a wfl grant whose `aud` is not listed for its `sub` (`workflow_grant_withdrawn`). Absent = no edge (fail closed). */
+  workflowGrantEdges?: Record<InstanceRef, InstanceRef[]>;
 }
 /** v0.1.82 (C373, P1): the cap name of per-workflow companion grants (one of BRIDGE_CAPS). */
 export const WORKFLOW_GRANTS_CAP = "app_workflow_grants" as const;
-/** v0.1.82 (C373, P1): live withdrawal records per caller instance that Core keeps in the config (then a `wflEpoch` bump). */
+/** v0.1.82 (C373, P1): live withdrawal records per caller instance that Core keeps in the config. A further withdrawal for that
+ *  instance inside the window becomes a `wflEpoch` bump instead (kill path; still-applied grants re-mint at once). */
 export const WORKFLOW_WITHDRAWN_MAX = 64;
 /** v0.1.82 (C373, P1): `CallEnvelope.workflow` — the caller's workflow id this call runs for; MUST equal the presented grant's `wfl`
  *  (`workflow_mismatch`); with a grant that has no `wfl` → `workflow_grant_required`. Gate-relevant; `context` stays informational. */
@@ -106,7 +115,8 @@ export interface WorkflowGrantTarget {
 }
 /** Limits of a request (Core refuses more with 400 `validation_failed` + `details.pointer`). */
 export const WORKFLOW_GRANT_REQUEST_LIMITS = { titleMaxChars: 120, reasonMaxChars: 280, targetsMax: 8, opsPerTargetMax: 64 } as const;
-/** The bridge's own bucket for the three relays, per caller instance (separate from the call bucket); over it → 429 `rate_limited`. */
+/** The bridge's own bucket for the three relays, per caller instance (separate from the call bucket); over it → 429
+ *  `rate_limited` + `Retry-After`. The SDK keeps using a cached grant until its `exp`. */
 export const WORKFLOW_GRANT_RELAY_LIMIT = { perMinute: 240, burst: 60 } as const;
 /** `POST /tb/v1/workflow-grants/request` body (app → bridge); relayed as `bridge_api.workflow_grant_request` with the TB-Assert instance. */
 export interface WorkflowGrantRequestBody {
@@ -118,7 +128,8 @@ export interface WorkflowGrantRequestBody {
   /** shown to the owner as "reported by the app"; ≤ 280 chars */
   reason?: string;
 }
-/** `POST /tb/v1/workflow-grants/get` body. Without `aud` = status only. With `aud` = status + a minted grant when applied for that target. */
+/** `POST /tb/v1/workflow-grants/get` body. Without `aud` = status only. With `aud` (the target instance, from the slice
+ *  `companionTargets`) = status + a minted grant when the record is applied for that target. */
 export interface WorkflowGrantGetBody {
   wfl: WorkflowId;
   aud?: InstanceId;
@@ -144,7 +155,9 @@ export interface WorkflowGrantStatus {
   rejectedDigest: Sha256Digest | null;
   updatedAt: IsoTime | null;
 }
-/** Answer of `workflow-grants/get`: `grant` (a K10 compact JWS with `wfl`) only with `aud` and state `applied` for that target. */
+/** Answer of `workflow-grants/get`: `grant` (a K10 compact JWS with `wfl`, `exp − iat` = WORKFLOW_GRANT_TTL_SEC) only with `aud` and state
+ *  `applied` for that target; refusals are error envelopes (`workflow_grant_missing` 404, `workflow_grant_withdrawn` 410,
+ *  `workflow_grants_unsupported` 409 with `details.product`). */
 export interface WorkflowGrantGetResult {
   status: WorkflowGrantStatus;
   grant?: CompactJws;
@@ -155,3 +168,14 @@ export const WORKFLOW_GRANT_PATHS = {
   workflowGrantGet: "/tb/v1/workflow-grants/get",
   workflowGrantRelease: "/tb/v1/workflow-grants/release",
 } as const;
+
+// ── spec/bridge APP_CAPS (v0.1.82; C354, lead §11.2: gate by capability, never by version) ──────────────────────
+/** The caller-side app cap: this SDK can request / fetch workflow grants and send `CallEnvelope.workflow` (`ctx.workflowGrants`,
+ *  `CallAppOptions.workflow`, SDK-API §22). Reported in `ClaimRequest.caps` and every `AppStatus.caps`. */
+export const APP_CAP_WORKFLOW_GRANTS = "app_workflow_grants" as const;
+/** The target-side app cap: this SDK's grant verifier knows the `wfl` claim. A cap only turns the gate ON; it never widens a grant. */
+export const APP_CAP_GRANT_WFL = "grant_wfl" as const;
+/** The spec's `APP_CAPS` at 0.1.82 (`person_op` is in the pinned spec already). */
+export const APP_CAPS_P1 = ["person_op", APP_CAP_WORKFLOW_GRANTS, APP_CAP_GRANT_WFL] as const;
+/** v0.1.82: `StatusReport.apps[].caps` = `AppStatus.caps` as the app instance last reported it (normalised by the APP_CAPS rules). */
+export type StatusReportAppCapsP1 = { caps?: (typeof APP_CAPS_P1)[number][] };

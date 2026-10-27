@@ -814,6 +814,9 @@ function companionRules(m: Manifest, add: Add): void {
     if (c.product === "*") add("M-CP-4", "companion_invalid", ptr("companions", i, "perWorkflow"), 'a wildcard companion ("*") has no perWorkflow');
     const stdPw = pw.operations.filter((o) => o.startsWith("tb."));
     if (stdPw.length > 0) add("M-CP-4", "companion_invalid", ptr("companions", i, "perWorkflow", "operations"), `standard op ${stdPw.join(",")} cannot be a perWorkflow op`);
+    // C5 S3-5: no "not narrowed" overlap. An op the app's own calls need stays in `operations` only (a workflow then cannot use it under a workflow grant).
+    const both = pw.operations.filter((o) => c.operations.includes(o));
+    if (both.length > 0) add("M-CP-4", "companion_invalid", ptr("companions", i, "perWorkflow", "operations"), `op ${both.join(",")} is in both operations and perWorkflow.operations`);
   });
 
   const unlocks = m.unlocks ?? [];

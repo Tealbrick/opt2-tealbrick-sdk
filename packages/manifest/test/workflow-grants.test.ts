@@ -32,32 +32,34 @@ const code = (r: { ok: boolean; code?: string }) => (r.ok ? "ok" : r.code);
 describe("M-CP-4 (manifest alone: schema + companionRules)", () => {
   test("a perWorkflow ceiling on a one-product entry validates; the digest covers it", () => {
     const plain = validateManifest(base());
-    const r = validateManifest(withPw({ operations: ["event_get", "event_create"], crud: ["read", "create"] }));
+    const r = validateManifest(withPw({ operations: ["event_find", "event_create"], crud: ["read", "create"] }));
     assert.equal(r.ok, true, JSON.stringify(issues(r)));
     assert.ok(plain.ok && r.ok && plain.digest !== r.digest, "perWorkflow changes the manifest digest");
   });
-  test("an op may be in operations and in perWorkflow.operations (not narrowed for that op)", () => {
-    assert.equal(validateManifest(withPw({ operations: ["event_get"], crud: ["read"] })).ok, true);
+  test("an op in BOTH operations and perWorkflow.operations → companion_invalid at /perWorkflow/operations (C5 S3-5, no not-narrowed overlap)", () => {
+    expectIssue(validateManifest(withPw({ operations: ["event_get"], crud: ["read"] })), "M-CP-4", "companion_invalid", "/companions/0/perWorkflow/operations");
+    expectIssue(validateManifest(withPw({ operations: ["event_find", "event_get"], crud: ["read"] })), "M-CP-4", "companion_invalid", "/companions/0/perWorkflow/operations");
+    assert.equal(validateManifest(withPw({ operations: ["event_find"], crud: ["read"] })).ok, true, "disjoint lists are valid");
   });
   test("perWorkflow on the wildcard entry is refused (schema)", () => {
     const m = base();
-    m.companions.push({ product: "*", operations: ["tb.holds_pending"], crud: ["read"], purpose: "x", perWorkflow: { operations: ["event_get"], crud: ["read"] } });
+    m.companions.push({ product: "*", operations: ["tb.holds_pending"], crud: ["read"], purpose: "x", perWorkflow: { operations: ["event_find"], crud: ["read"] } });
     expectIssue(validateManifest(m), "schema", "schema_invalid");
   });
   test("a standard op in perWorkflow is refused (tb.hold_status, tb.holds_pending, any tb.*)", () => {
     for (const op of ["tb.hold_status", "tb.holds_pending", "tb.receipts_list"]) {
-      expectIssue(validateManifest(withPw({ operations: ["event_get", op], crud: ["read"] })), "schema", "schema_invalid");
+      expectIssue(validateManifest(withPw({ operations: ["event_find", op], crud: ["read"] })), "schema", "schema_invalid");
     }
   });
   test("closed shape: unknown key, missing crud, empty ops, > 64 ops, duplicate ops, unknown crud are refused (schema)", () => {
     const bad: unknown[] = [
-      { operations: ["event_get"], crud: ["read"], scopes: [] },
-      { operations: ["event_get"] },
+      { operations: ["event_find"], crud: ["read"], scopes: [] },
+      { operations: ["event_find"] },
       { crud: ["read"] },
       { operations: [], crud: ["read"] },
       { operations: Array.from({ length: 65 }, (_, i) => `op_${i}`), crud: ["read"] },
-      { operations: ["event_get", "event_get"], crud: ["read"] },
-      { operations: ["event_get"], crud: ["read", "admin"] },
+      { operations: ["event_find", "event_find"], crud: ["read"] },
+      { operations: ["event_find"], crud: ["read", "admin"] },
       "event_get",
     ];
     for (const pw of bad) expectIssue(validateManifest(withPw(pw)), "schema", "schema_invalid");
@@ -75,9 +77,9 @@ describe("M-CP-4 (manifest alone: schema + companionRules)", () => {
 
 describe("M-CP-4 target half (validateCompanionWorkflows)", () => {
   const op = (extra: object) => ({
-    id: "event_get",
-    title: "Get event",
-    description: "Get one event.",
+    id: "event_find",
+    title: "Find events",
+    description: "Find events.",
     input: { type: "object" },
     output: { type: "object" },
     crud: ["read"],
@@ -88,8 +90,9 @@ describe("M-CP-4 target half (validateCompanionWorkflows)", () => {
     ...extra,
   });
   const create = op({ id: "event_create", crud: ["create"], effect: "write", idempotency: "required" });
-  const target = (ops: object[]): Manifest => ({ ...base(), id: "calendar", operations: ops });
-  const good = () => withPw({ operations: ["event_get", "event_create"], crud: ["read", "create"] });
+  // the base entry's own op (`event_get`) always exists on the target; the perWorkflow ops are the others
+  const target = (ops: object[]): Manifest => ({ ...base(), id: "calendar", operations: [op({ id: "event_get" }), ...ops] });
+  const good = () => withPw({ operations: ["event_find", "event_create"], crud: ["read", "create"] });
 
   test("matching target passes; validateCompanions (M-CP-2) ignores perWorkflow", () => {
     assert.equal(validateCompanionWorkflows(good(), [target([op({}), create])]).ok, true);
@@ -102,11 +105,11 @@ describe("M-CP-4 target half (validateCompanionWorkflows)", () => {
     expectIssue(validateCompanionWorkflows(good(), [target([op({}), { ...create, audience: "person" }])]), "M-CP-4", "companion_op_invalid", "/companions/0/perWorkflow/operations");
   });
   test("op.crud not within perWorkflow.crud → companion_op_invalid at /perWorkflow/crud", () => {
-    const m = withPw({ operations: ["event_get", "event_create"], crud: ["read"] });
+    const m = withPw({ operations: ["event_find", "event_create"], crud: ["read"] });
     expectIssue(validateCompanionWorkflows(m, [target([op({}), create])]), "M-CP-4", "companion_op_invalid", "/companions/0/perWorkflow/crud");
   });
   test("perWorkflow.crud wider than its ops need → companion_op_invalid", () => {
-    const m = withPw({ operations: ["event_get"], crud: ["read", "delete"] });
+    const m = withPw({ operations: ["event_find"], crud: ["read", "delete"] });
     expectIssue(validateCompanionWorkflows(m, [target([op({})])]), "M-CP-4", "companion_op_invalid", "/companions/0/perWorkflow/crud");
   });
   test("the base entry's crud is not the ceiling of perWorkflow (separate sets): base read, perWorkflow create is valid", () => {
@@ -127,12 +130,12 @@ describe("M-CP-4 target half (validateCompanionWorkflows)", () => {
 
 describe("bridge feature row and vocabulary", () => {
   test("requiredBridgeVersion: perWorkflow declared → per_workflow_grants row; absent → no row", () => {
-    const r = requiredBridgeVersion(withPw({ operations: ["event_get"], crud: ["read"] }));
+    const r = requiredBridgeVersion(withPw({ operations: ["event_find"], crud: ["read"] }));
     assert.ok(r.reasons.some((x) => x.includes("per-workflow companion grants")), JSON.stringify(r));
     assert.equal(r.bridge, "0.2.12");
     assert.equal(requiredBridgeVersion(base()).reasons.some((x) => x.includes("per-workflow")), false);
   });
-  test("cap constant = the spec cap name; error codes are the six spec codes", () => {
+  test("cap constant = the spec cap name; error codes are the seven spec codes", () => {
     assert.equal(APP_WORKFLOW_GRANTS_CAP, "app_workflow_grants");
     assert.equal(APP_WORKFLOW_GRANTS_CAP, WORKFLOW_GRANTS_CAP);
     assert.deepEqual([...WORKFLOW_GRANT_ERROR_CODES].sort(), [
@@ -142,7 +145,8 @@ describe("bridge feature row and vocabulary", () => {
       "workflow_grants_full",
       "workflow_grants_unsupported",
       "workflow_mismatch",
-    ]);
+      "portal_unavailable",
+    ].sort());
   });
 });
 

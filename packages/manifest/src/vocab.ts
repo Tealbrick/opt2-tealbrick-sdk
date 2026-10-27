@@ -137,4 +137,5 @@ export const WORKFLOW_GRANT_ERROR_CODES = [
   "workflow_grant_missing",
   "workflow_grants_unsupported",
   "workflow_grants_full",
+  "portal_unavailable",
 ] as const satisfies readonly WorkflowGrantErrorCode[];
