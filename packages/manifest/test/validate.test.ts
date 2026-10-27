@@ -672,3 +672,38 @@ describe("v0.1.21 (spec 0.1.43): viewer routes (M-PR-2) and listing (M-OP-11)", 
     expectIssue(mutate((m) => (m.contracts = { produces: ["messages/9"] })), "schema", "schema_invalid");
   });
 });
+
+describe("spec 0.1.80 (C373, G-2): needsTopology is boolean only", () => {
+  test("a manifest without needsTopology still validates", () => {
+    const m = base();
+    delete m.needsTopology;
+    const r = validateManifest(m);
+    assert.equal(r.ok, true, JSON.stringify(!r.ok && r.errors));
+  });
+  test("true and false validate; the manifest and its digest keep the flag", () => {
+    for (const v of [true, false]) {
+      const r = mutate((m) => (m.needsTopology = v));
+      assert.equal(r.ok, true, JSON.stringify(!r.ok && r.errors));
+      if (r.ok) {
+        assert.equal((r.manifest as { needsTopology?: boolean }).needsTopology, v);
+        assert.equal(r.digest, manifestDigest(r.manifest));
+      }
+    }
+    const on = mutate((m) => (m.needsTopology = true));
+    const off = validateManifest(base());
+    assert.ok(on.ok && off.ok && on.digest !== off.digest, "the flag is part of the signed manifest digest");
+  });
+  for (const bad of ["yes", "true", 1, 0, null, {}, []] as unknown[]) {
+    test(`needsTopology ${JSON.stringify(bad)} is refused (schema_invalid at /needsTopology)`, () => {
+      expectIssue(mutate((m) => (m.needsTopology = bad)), "schema", "schema_invalid", "/needsTopology");
+    });
+  }
+  test("a bad needsTopology is reported together with other schema problems", () => {
+    const r = mutate((m) => {
+      m.needsTopology = "yes";
+      m.unknownTopLevel = 1;
+    });
+    expectIssue(r, "schema", "schema_invalid", "/needsTopology");
+    expectIssue(r, "schema", "schema_invalid", "/unknownTopLevel");
+  });
+});
