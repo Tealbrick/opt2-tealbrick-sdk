@@ -966,7 +966,11 @@ export function validateManifest(json: unknown): ManifestValidation {
 
 /**
  * M-CP-2 (Core at deploy, conformance): each companion's target ops exist with audience agent, every op.crud ⊆ crud and
- * crud ⊆ ∪ op.crud. Companions whose target manifest is not in `targets` are not checked: the companion grant is minted
+ * crud ⊆ ∪ op.crud ∪ ∪ op.dynamic.crudCeiling over the listed ops. Since spec 0.1.79 (reservation, C370a) a listed DYNAMIC
+ * op adds its `dynamic.crudCeiling` to the union (its own `crud` is `["read"]`, discovery only, M-OP-10); a static op adds
+ * only its declared crud and cannot widen the entry. This is the declaration bound only: Core mints `edge crud ∩ declared
+ * crud`, and per call the bridge resolves the inner tool's crud BEFORE gate(), which checks it against the grant
+ * (`crud_exceeds_grant`). Companions whose target manifest is not in `targets` are not checked: the companion grant is minted
  * only once both apps are deployed (MANIFEST §9), and the caller passes the deployed targets.
  */
 export function validateCompanions(manifest: Manifest, targets: readonly Manifest[]): ManifestValidation {
@@ -992,6 +996,7 @@ export function validateCompanions(manifest: Manifest, targets: readonly Manifes
         continue;
       }
       for (const x of op.crud) union.add(x);
+      if (op.dynamic) for (const x of op.dynamic.crudCeiling) union.add(x); // v0.1.79 (C370a): a dynamic op reaches its crudCeiling
       if (!isSubset(op.crud, c.crud)) add("M-CP-2", "companion_op_invalid", `${p}/crud`, `${c.product}.${id} needs crud ${op.crud.join(",")}`);
     }
     const extra = c.crud.filter((x) => !union.has(x));
