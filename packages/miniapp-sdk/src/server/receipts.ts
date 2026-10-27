@@ -1,5 +1,5 @@
 // Receipts and holds — ONE table `tb_receipts` (SDK-API §4); idempotency results in `tb_idempotency` (§4.4).
-import { ulid } from "@opt2-tealbrick/manifest";
+import { callerContextSummary, ulid } from "@opt2-tealbrick/manifest";
 import type { FreeCaps, Sha256Digest } from "@opt2-tealbrick/spec/credentials";
 import type { Effect, HoldFamily } from "@opt2-tealbrick/spec/manifest";
 import type { AdmittedBy, Json, Receipt, ReceiptQuery, ReceiptStatus, ReceiptStore } from "@opt2-tealbrick/spec/sdk";
@@ -24,6 +24,17 @@ export function holdReasonOf(stored: unknown, family: unknown): string {
   return family === "money" ? "held_money" : family === "caps" ? "caps_exceeded" : "held_family";
 }
 
+/** v0.1.77 (C367 P4): the `tb.holds_pending` summary of a stored `meta` column (JSON text); computed at read time, nothing is stored. Never the meta itself. */
+function callerContextSummaryOf(meta: unknown): string | undefined {
+  if (typeof meta !== "string" || !meta.includes("callerContext")) return undefined;
+  try {
+    const m = JSON.parse(meta) as Json;
+    return m !== null && typeof m === "object" && !Array.isArray(m) ? callerContextSummary(m.callerContext) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** One pending hold (status `held`) as a summary row (tb.holds_pending): no input, view or meta. */
 export interface PendingHoldRow {
   id: string;
@@ -34,6 +45,8 @@ export interface PendingHoldRow {
   summary: string;
   caller: Receipt["caller"];
   createdAt: number;
+  /** v0.1.77 (C367 P4, SDK-API §18.6 item 6): the one-line summary of `meta.callerContext`, computed at read time; absent when the hold has none */
+  callerContext?: string;
 }
 
 export interface NewReceipt {
@@ -221,10 +234,12 @@ export class Receipts implements ReceiptStore {
   holdStatusSync(
     caller: string,
     holdId: string,
+    callerType?: "agent" | "app",
   ): { status: ReceiptStatus; decidedAt: number | null; expiresAt: number | null; family: Receipt["holdFamily"]; reason: string } | null {
+    // v0.1.77 (C367 P3, SDK-API §4.7): an app caller sees only a hold whose receipt has `caller_type = app` AND `caller_id` = its instance id
     const r = this.#db
-      .prepare("SELECT status, decided_at, expires_at, hold_family, hold_reason FROM tb_receipts WHERE id = ? AND caller_id = ? AND id LIKE 'hld\\_%' ESCAPE '\\'")
-      .get(holdId, caller) as Row | undefined;
+      .prepare(`SELECT status, decided_at, expires_at, hold_family, hold_reason FROM tb_receipts WHERE id = ? AND caller_id = ?${callerType ? " AND caller_type = ?" : ""} AND id LIKE 'hld\\_%' ESCAPE '\\'`)
+      .get(...(callerType ? [holdId, caller, callerType] : [holdId, caller])) as Row | undefined;
     if (!r) return null;
     return {
       status: String(r.status) as ReceiptStatus,
@@ -260,12 +275,13 @@ export class Receipts implements ReceiptStore {
     }
     const rows = this.#db
       .prepare(
-        `SELECT id, op, hold_family, hold_reason, held_by, summary, caller_type, caller_id, caller_name, caller_product, created_at FROM tb_receipts
+        `SELECT id, op, hold_family, hold_reason, held_by, summary, caller_type, caller_id, caller_name, caller_product, created_at, meta FROM tb_receipts
           WHERE ${where.join(" AND ")} ORDER BY created_at ASC, id ASC LIMIT ?`,
       )
       .all(...args, limit + 1) as Row[];
-    const items = rows.slice(0, limit).map(
-      (r): PendingHoldRow => ({
+    const items = rows.slice(0, limit).map((r): PendingHoldRow => {
+      const callerContext = callerContextSummaryOf(r.meta);
+      return {
         id: String(r.id),
         op: String(r.op),
         family: (r.hold_family as Receipt["holdFamily"]) ?? null,
@@ -274,8 +290,9 @@ export class Receipts implements ReceiptStore {
         summary: String(r.summary),
         caller: callerOf(r),
         createdAt: Number(r.created_at),
-      }),
-    );
+        ...(callerContext !== undefined ? { callerContext } : {}),
+      };
+    });
     const last = items.at(-1);
     return { items, nextCursor: rows.length > limit && last ? encodeCursor(last.createdAt, last.id) : null };
   }

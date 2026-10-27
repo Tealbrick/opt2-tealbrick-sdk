@@ -3,7 +3,7 @@
 // → authorize() (step 0 = slice pause) → handler. Holds and receipts are rows of the one receipts table.
 import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { authorize, canonicalize, DECISION_REASON, digest, EFFECTS, HOLDS_PENDING_OP, opInGrantWorkflow, validateAgainstSchema, validateInput, verifyCallProof, verifyGrant } from "@opt2-tealbrick/manifest";
+import { authorize, CALLER_CONTEXT_MAX_BYTES, canonicalize, DECISION_REASON, digest, EFFECTS, HOLDS_PENDING_OP, opInGrantWorkflow, validateAgainstSchema, validateInput, verifyCallProof, verifyGrant } from "@opt2-tealbrick/manifest";
 import { BRIDGE_HEADERS, type CompanionCaller, type OpCallBody, type OpResult } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, CallId, InstanceId, PersonId, Sha256Digest } from "@opt2-tealbrick/spec/credentials";
 import type { CrudAction, DynamicResolution, Effect, HoldFamily, Operation } from "@opt2-tealbrick/spec/manifest";
@@ -147,6 +147,58 @@ export function receiptHelpers(): { helpers: OpContext["receipt"]; summary: stri
   };
 }
 
+/**
+ * v0.1.77 (C367 P4, SDK-API §18.6 item 5): `meta.callerContext` of the receipts of an APP call = the final op `context` keys under
+ * `<verified caller product>.` (the product comes from the verified grant / slice, never from the body); undefined for an agent or person
+ * caller, without a verified product, or with no such key. Informational only: nothing in authorize(), the approval match, idempotency or
+ * policy reads it. A subset over CALLER_CONTEXT_MAX_BYTES (JCS) is not stored (only a same-product hook overwrite can cause that): a warning, no values.
+ */
+export function callerContextOf(rt: Pick<Runtime, "log">, caller: Pick<Caller, "type" | "product">, context: Record<string, Json>): Record<string, Json> | undefined {
+  if (caller.type !== "app" || caller.product === undefined) return undefined;
+  const prefix = `${caller.product}.`;
+  const subset: Record<string, Json> = {};
+  for (const k of Object.keys(context)) if (k.startsWith(prefix)) subset[k] = context[k] as Json;
+  if (Object.keys(subset).length === 0) return undefined;
+  try {
+    if (Buffer.byteLength(canonicalize(subset), "utf8") <= CALLER_CONTEXT_MAX_BYTES) return subset;
+  } catch {
+    /* not storable: the warning below */
+  }
+  rt.log.warn("caller context not stored", { reason: "too_large" });
+  return undefined;
+}
+
+/**
+ * Adds the caller context to a receipt `meta`. `current` = this call's subset; `held` = the approved hold this call repeats, if any.
+ * A repeat keeps the HOLD's `callerContext`; when its own context differs (JCS compare) it goes under `callerContextRun`. Same storage rules
+ * for both: `meta` must be an object (or empty) and stay within 4 KB, else the context is left out (a warning, never the values).
+ */
+export function receiptMetaWithContext(rt: Pick<Runtime, "log">, meta: Json, current: Record<string, Json> | undefined, held: Pick<Receipt, "meta"> | null = null): Json {
+  let stored: Json | undefined = current;
+  let run: Json | undefined;
+  if (held) {
+    const heldCc = isObj(held.meta) ? (held.meta.callerContext as Json | undefined) : undefined;
+    if (heldCc !== undefined) {
+      stored = heldCc;
+      if (current !== undefined && canonicalize(current) !== canonicalize(heldCc)) run = current;
+    } else {
+      stored = undefined;
+      run = current;
+    }
+  }
+  if (stored === undefined && run === undefined) return meta;
+  if (meta !== null && meta !== undefined && !isObj(meta)) {
+    rt.log.warn("caller context not stored", { reason: "meta_not_object" });
+    return meta;
+  }
+  const merged: Json = { ...((meta ?? {}) as Record<string, Json>), ...(stored !== undefined ? { callerContext: stored } : {}), ...(run !== undefined ? { callerContextRun: run } : {}) };
+  if (Buffer.byteLength(JSON.stringify(merged)) > META_MAX_BYTES) {
+    rt.log.warn("caller context not stored", { reason: "meta_too_large" });
+    return meta ?? null;
+  }
+  return merged;
+}
+
 export function buildContext(
   rt: Runtime,
   op: OperationView,
@@ -174,7 +226,7 @@ export function buildContext(
     receipt,
     getKey: (name) => rt.keys.getKey(name),
     modelRole: (role) => rt.keys.modelRole(role),
-    callApp: (product, opId, input, opts) => rt.callApp(product, opId, input, { idempotencyKey: opts?.idempotencyKey, parentCall: callId }),
+    callApp: (product, opId, input, opts) => rt.callApp(product, opId, input, { idempotencyKey: opts?.idempotencyKey, ...(opts?.context !== undefined ? { context: opts.context } : {}), parentCall: callId }),
     callServiceHelper: (serviceId, path, body) => rt.callServiceHelper(serviceId, path, body),
     db: rt.appDb,
     log: rt.log,
@@ -590,11 +642,15 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       rt.statusChanged();
       throw callerUnverifiedError();
     }
+    // v0.1.77 (C367 P4): informational only (never read by authorize(), the approval match, idempotency or policy)
+    const callerCtx = callerContextOf(rt, caller, body.context);
     // tb.hold_status: valid grant suffices (I4); only the caller's own holds; no receipt.
     if (op.standard && op.id === "tb.hold_status") {
       const v = validateInput(op, body.input);
       if (!v.ok) throw new TbError("input_invalid", "input does not match the schema", 400, { errors: v.errors });
-      const hs = rt.receipts.holdStatusSync(callerId, String((body.input as { holdId: string }).holdId));
+      // ONE lookup keyed by (id, caller type, caller id): a foreign hold and an unknown id take the same path and give the same answer.
+      // `hold_not_found` is a public code and stays for every caller, agent and app (SDK-API §4.7, C367); the message never holds the holdId.
+      const hs = rt.receipts.holdStatusSync(callerId, String((body.input as { holdId: string }).holdId), g.caller.type);
       if (!hs) throw new TbError("hold_not_found", "no such hold for this caller", 404);
       const output: Json = {
         status: hs.status,
@@ -693,14 +749,14 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       const meta0: Json = dyn ? { tool: dyn.tool } : null;
 
       if (decision.decision === "refuse") {
-        rt.receipts.insert({ ...base, kind: "rcp", holdFamily: null, status: "refused", summary: clampSummary(op.title), meta: { reason: decision.reason } });
+        rt.receipts.insert({ ...base, kind: "rcp", holdFamily: null, status: "refused", summary: clampSummary(op.title), meta: receiptMetaWithContext(rt, { reason: decision.reason }, callerCtx) });
         throw new TbError(decision.reason, `refused: ${decision.reason}`, grantFailStatus(decision.reason));
       }
       if (decision.decision === "hold") {
         // v0.1.23 (SDK-HV-1): a dynamic op with holdView → the app's view of the upstream content (time-boxed, never blocks)
         if (dyn && !heldText) heldText = await dynamicHoldText(rt, op, body.input, dyn, viewCtx);
         const holdMeta: Json = heldText && dyn ? { tool: dyn.tool, viewSha256: heldText.viewSha256 } : meta0;
-        const hold = createHold(rt, base, spec, op, body.input, decision, decision.reason === DECISION_REASON.heldByHook ? (proof.claims.hv?.r ?? null) : null, holdMeta, Date.now(), heldText);
+        const hold = createHold(rt, base, spec, op, body.input, decision, decision.reason === DECISION_REASON.heldByHook ? (proof.claims.hv?.r ?? null) : null, receiptMetaWithContext(rt, holdMeta, callerCtx), Date.now(), heldText);
         idem?.held(hold.id);
         rt.statusChanged();
         return sendJson(res, 202, { status: "held", holdId: hold.id, expiresAt: iso(hold.expiresAt ?? now2 + HOLD_TTL_MS) } satisfies OpResult);
@@ -738,8 +794,8 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       } catch (e) {
         const err = toTbError(e, rt);
         const meta = rh.meta ?? meta0;
-        if (approved) rt.receipts.finish(approved.id, "failed", { meta, ...admit });
-        else if (writeReceipt) rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "failed", summary: rh.summary ?? clampSummary(op.title), meta: { ...(isObj(meta) ? meta : {}), error: err.code } });
+        if (approved) rt.receipts.finish(approved.id, "failed", { meta: receiptMetaWithContext(rt, meta, callerCtx, approved), ...admit });
+        else if (writeReceipt) rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "failed", summary: rh.summary ?? clampSummary(op.title), meta: receiptMetaWithContext(rt, { ...(isObj(meta) ? meta : {}), error: err.code }, callerCtx) });
         throw err;
       } finally {
         sig.done();
@@ -747,10 +803,10 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       const summary = rh.summary ?? clampSummary(spec?.redact ? spec.redact(body.input, output) : op.title);
       let receiptId: string | undefined;
       if (approved) {
-        rt.receipts.finish(approved.id, "run", { summary, meta: rh.meta ?? meta0, ...admit });
+        rt.receipts.finish(approved.id, "run", { summary, meta: receiptMetaWithContext(rt, rh.meta ?? meta0, callerCtx, approved), ...admit });
         receiptId = approved.id;
       } else if (writeReceipt) {
-        receiptId = rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "run", summary, meta: rh.meta ?? meta0 }).id;
+        receiptId = rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "run", summary, meta: receiptMetaWithContext(rt, rh.meta ?? meta0, callerCtx) }).id;
       }
       sendJson(res, 200, receiptId ? ({ status: "ok", output, receiptId } satisfies OpResult) : ({ status: "ok", output } satisfies OpResult));
     } catch (e) {
@@ -962,6 +1018,8 @@ export function holdsPending(
       createdAt: iso(h.createdAt) as HoldsPendingItem["createdAt"],
       ageS: Math.max(0, Math.floor((now - h.createdAt) / 1000)),
       decidePath: `/holds/${h.id}`,
+      // v0.1.77 (C367 P4): the summary of the receipt's meta.callerContext, read time only; never the whole context
+      ...(h.callerContext !== undefined ? { callerContext: h.callerContext } : {}),
     }),
   );
   return { items, nextCursor: page.nextCursor };

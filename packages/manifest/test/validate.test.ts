@@ -304,6 +304,28 @@ describe("M-HK, M-CP, M-UL, M-SK, M-HH, M-BK, M-AR, M-PR", () => {
     // the schema refuses tb.holds_list already (only tb.holds_pending is allowed as a standard companion op)
     assert.equal(mutate((m) => (m.companions[0].operations = ["tb.holds_list"])).ok, false);
   });
+  // v0.1.77 (C367, P3): the one extra standard op, tb.hold_status, in an entry for ONE product next to an op of that product
+  test("M-CP-3 v0.1.77: tb.hold_status next to an op of the same product is valid (no crud needed)", () => {
+    const r = mutate((m) => m.companions[0].operations.push("tb.hold_status"));
+    assert.equal(r.ok, true, JSON.stringify(!r.ok && r.errors));
+  });
+  test("M-CP-3 v0.1.77: tb.hold_status first in the list is valid too", () => {
+    assert.equal(mutate((m) => m.companions[0].operations.unshift("tb.hold_status")).ok, true);
+  });
+  test("M-CP-3 v0.1.77: tb.hold_status as the only op of an entry", refuses("M-CP-3", "companion_invalid", (m) => (m.companions[0].operations = ["tb.hold_status"]), "/companions/0/operations"));
+  test("M-CP-3 v0.1.77: tb.hold_status next to only standard ops", refuses("M-CP-3", "companion_invalid", (m) => (m.companions[0].operations = ["tb.holds_pending", "tb.hold_status"]), "/companions/0/operations"));
+  test("M-CP-3 v0.1.77: tb.hold_status in a wildcard entry", refuses("M-CP-3", "companion_invalid", (m) => m.companions.push({ product: "*", operations: ["tb.holds_pending", "tb.hold_status"], crud: ["read"], purpose: "x" })));
+  test("M-CP-3 v0.1.77: tb.hold_status alone in a wildcard entry", refuses("M-CP-3", "companion_invalid", (m) => m.companions.push({ product: "*", operations: ["tb.hold_status"], crud: ["read"], purpose: "x" })));
+  test("M-CP-3 v0.1.77: any other standard op next to a product op is still refused", () => {
+    for (const std of ["tb.holds_decide", "tb.export", "tb.receipts_list", "tb.key_set"]) {
+      const r = mutate((m) => m.companions[0].operations.push(std));
+      assert.equal(r.ok, false, std);
+    }
+  });
+  test("M-CP-3 v0.1.77: tb.hold_status does not change the holds_pending wildcard rule", () => {
+    assert.equal(mutate((m) => m.companions.push({ product: "*", operations: ["tb.holds_pending"], crud: ["read"], purpose: "x" })).ok, true);
+    expectIssue(mutate((m) => m.companions.push({ product: "*", operations: ["tb.holds_pending", "event_get"], crud: ["read"], purpose: "x" })), "M-CP-3", "companion_invalid");
+  });
   test("M-UL-1 requires non-companion", refuses("M-UL-1", "unlock_invalid", (m) => (m.unlocks[0].requires = "ghost")));
   test("M-UL-1 provides unknown op", refuses("M-UL-1", "unlock_invalid", (m) => (m.unlocks[0].provides.operations = ["ghost"])));
   test("M-UL-1 provides unknown skill", refuses("M-UL-1", "unlock_invalid", (m) => (m.unlocks[0].provides.skills = ["ghost"])));
@@ -374,6 +396,17 @@ describe("validateCompanions (M-CP-2)", () => {
     const m = base();
     m.companions[0].crud = ["read", "update"];
     expectIssue(validateCompanions(m, [target([op({})])]), "M-CP-2", "companion_op_invalid");
+  });
+  test("v0.1.77 M-CP-2 ignores tb.hold_status: it needs no crud and adds nothing to the union", () => {
+    const m = base();
+    m.companions[0].operations = ["event_get", "tb.hold_status"];
+    assert.equal(validateCompanions(m, [target([op({})])]).ok, true);
+    // the op list the target must provide is still checked, and crud stays tied to the product ops only
+    m.companions[0].crud = ["read", "update"];
+    expectIssue(validateCompanions(m, [target([op({})])]), "M-CP-2", "companion_op_invalid");
+    const missing = base();
+    missing.companions[0].operations = ["other", "tb.hold_status"];
+    expectIssue(validateCompanions(missing, [target([op({})])]), "M-CP-2", "companion_op_invalid", "/companions/0/operations");
   });
   test("targets not supplied are not checked", () => assert.equal(validateCompanions(base(), []).ok, true));
 });

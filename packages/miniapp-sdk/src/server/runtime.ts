@@ -105,6 +105,6 @@ export interface Runtime {
   /** first sight of an agent edge (§7.2): agentAdded event, then manifest defaultGrants */
   ensureAgent(agent: SliceAgent): Promise<void>;
   /** `parentCall: null` = app-initiated (C85: StartContext / EventContext / timers) */
-  callApp<O = Json>(product: string, op: string, input: Json, opts: { idempotencyKey?: string; parentCall: string | null }): Promise<CompanionResult<O>>;
+  callApp<O = Json>(product: string, op: string, input: Json, opts: { idempotencyKey?: string; context?: Record<string, Json>; parentCall: string | null }): Promise<CompanionResult<O>>;
   callServiceHelper<O = Json>(serviceId: string, path: string, body: Json): Promise<O>;
 }
