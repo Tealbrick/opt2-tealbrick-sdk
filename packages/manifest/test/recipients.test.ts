@@ -1,5 +1,5 @@
 // spec 0.1.81 (unreleased label; C373, G-6): recipients of an outward call — extractRecipients, recipientSpecsProblem and
-// M-OP-13 in validateManifest. Each rule has a quiet case and a firing case (L34).
+// M-OP-14 in validateManifest. Each rule has a quiet case and a firing case (L34).
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import example from "@opt2-tealbrick/spec/examples/notes.manifest.json" with { type: "json" };
@@ -117,11 +117,11 @@ function issues(fn: (m: any) => void) {
   return r.ok ? [] : r.errors;
 }
 
-test("C373 M-OP-13: recipients on an outward op validate", () => {
+test("C373 M-OP-14: recipients on an outward op validate", () => {
   assert.deepEqual(issues((m) => (outwardOp(m).recipients = [email("/to"), { pointer: "/channel", kind: "slack" }])), []);
 });
 
-test("C373 M-OP-13: fires on a non-outward op, bad pointer, > 8, unknown kind, duplicates — rule M-OP-13, code recipients_invalid", () => {
+test("C373 M-OP-14: fires on a non-outward op, bad pointer, > 8, unknown kind, duplicates — rule M-OP-14, code recipients_invalid", () => {
   const writeOp = (m: any) => m.operations.find((o: any) => o.effect === "write");
   const cases: [string, (m: any) => void][] = [
     ["write op", (m) => (writeOp(m).recipients = [email("/to")])],
@@ -136,7 +136,7 @@ test("C373 M-OP-13: fires on a non-outward op, bad pointer, > 8, unknown kind, d
     const errs = issues(fn);
     assert.ok(errs.length > 0, name);
     assert.ok(
-      errs.every((e) => e.rule === "M-OP-13" && e.code === "recipients_invalid"),
+      errs.every((e) => e.rule === "M-OP-14" && e.code === "recipients_invalid"),
       `${name}: ${JSON.stringify(errs)}`,
     );
   }

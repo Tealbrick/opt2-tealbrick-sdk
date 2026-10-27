@@ -189,7 +189,7 @@ export async function handleBridgeOp(rt: Runtime, req: IncomingMessage, res: Ser
         if (!r) throw new TbError("dynamic_resolve_failed", "unknown dynamic tool", 404);
         if (!withinCeiling(op, r)) throw new TbError("dynamic_ceiling_exceeded", "resolved tool exceeds the operation's ceiling", 403);
         // spec 0.1.81 (unreleased label; C373, G-6): recipient PLACES of this tool (pointers into the call's arguments) pass through
-        // only on an outward resolution and only in the M-OP-13 shape; anything else is dropped with a warning (absent = unknown, so
+        // only on an outward resolution and only in the M-OP-14 shape; anything else is dropped with a warning (absent = unknown, so
         // a policy fails closed). Never a value: a resolution is per tool and the bridge caches it. Read structurally until the
         // spec pin types `DynamicResolution.recipients`.
         const places = (r as { recipients?: unknown }).recipients;

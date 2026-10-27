@@ -1,7 +1,7 @@
-// Recipients of an outward call (spec 0.1.81 unreleased label; C373, G-6; MANIFEST M-OP-13, BRIDGE "hook recipients").
+// Recipients of an outward call (spec 0.1.81 unreleased label; C373, G-6; MANIFEST M-OP-14, BRIDGE "hook recipients").
 // An op (`operations[].recipients`) or a dynamic resolution (`DynamicResolution.recipients`) names PLACES in the call input;
 // the bridge reads the values of each call with `extractRecipients` and puts the canonical handles into the hook target.
-// The one implementation (L1): the validator (M-OP-13), the SDK (resolution pass-through) and the bridge import it.
+// The one implementation (L1): the validator (M-OP-14), the SDK (resolution pass-through) and the bridge import it.
 // No Node APIs: browser bundles may import it.
 import { HANDLE_CHANNELS, normalizeHandle } from "./handles.ts";
 
@@ -32,7 +32,7 @@ function specProblem(s: unknown): string | null {
 }
 
 /**
- * M-OP-13 shape of a `recipients` list (op or resolution): an array of 1..RECIPIENT_SPECS_MAX `{pointer, kind}` entries, no two
+ * M-OP-14 shape of a `recipients` list (op or resolution): an array of 1..RECIPIENT_SPECS_MAX `{pointer, kind}` entries, no two
  * with the same pointer and kind. The problem as a short message (never a value from a call), or null. The effect rule
  * (outward only) is the caller's: the validator checks it on the op, the SDK and the bridge on the resolution.
  */

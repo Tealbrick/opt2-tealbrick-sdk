@@ -565,9 +565,9 @@ function eventRules(m: Manifest, add: Add): void {
 function eventSchemaIssue(issue: ManifestIssue): ManifestIssue {
   const mr = /^\/settings\/modelRoles\/\d+\/(role|minPolicy|usedBy)(\/|$)/.exec(issue.path);
   if (mr) return { ...issue, rule: mr[1] === "role" ? "M-MR-1" : mr[1] === "minPolicy" ? "M-MR-2" : "M-MR-3", code: "model_role_invalid" };
-  // spec 0.1.81 (C373): schema failures of `operations[].recipients` (shape, and the outward-only dependentSchemas) are M-OP-13
+  // spec 0.1.81 (C373): schema failures of `operations[].recipients` (shape, and the outward-only dependentSchemas) are M-OP-14
   if (/^\/operations\/\d+\/recipients(\/|$)/.test(issue.path) || (/^\/operations\/\d+\/effect$/.test(issue.path) && issue.message.includes("dependentSchemas/recipients"))) {
-    return { ...issue, rule: "M-OP-13", code: "recipients_invalid" };
+    return { ...issue, rule: "M-OP-14", code: "recipients_invalid" };
   }
   const m = /^\/events\/\d+\/(name|payloadSchema|visibleWith)(\/|$)/.exec(issue.path);
   if (!m) return issue;
@@ -905,7 +905,7 @@ function backupArtifactRouteRules(m: Manifest, add: Add): void {
     const recipients = (op as { recipients?: unknown }).recipients;
     if (recipients !== undefined) {
       const problem = op.effect !== "outward" ? "recipients are allowed only on outward operations" : recipientSpecsProblem(recipients);
-      if (problem) add("M-OP-13", "recipients_invalid", ptr("operations", i, "recipients"), problem);
+      if (problem) add("M-OP-14", "recipients_invalid", ptr("operations", i, "recipients"), problem);
     }
   });
 }

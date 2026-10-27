@@ -1,5 +1,5 @@
 // spec 0.1.81 (unreleased label; C373, G-6): the resolve bridge op passes `DynamicResolution.recipients` (recipient PLACES of
-// a tool) through, only on an outward resolution and only in the M-OP-13 shape. Real HTTP over a fake bridge. Fires on bad:
+// a tool) through, only on an outward resolution and only in the M-OP-14 shape. Real HTTP over a fake bridge. Fires on bad:
 // without the pass-through the bridge never sees places (every dynamic outward call reads "unknown"); without the shape and
 // effect check an app could hand the bridge a malformed list.
 import assert from "node:assert/strict";

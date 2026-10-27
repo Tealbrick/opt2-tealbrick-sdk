@@ -20,7 +20,7 @@ Next release adds (C53):
 - No schema or dependency change; the only additions to the public surface are the kit `TOOLS` export and the `--package-name` flag. Spec 0.1.57 and manifest 0.1.30 as in 0.1.38. Apps get both by re-pinning `@opt2-tealbrick/miniapp-sdk` 0.1.39 in their own next release.
 ## Next (C373, G-6; the number is assigned at merge): recipient places in dynamic resolutions (spec 0.1.81 unreleased label)
 
-Needs `@opt2-tealbrick/manifest` with `recipientSpecsProblem` (same PR). The resolve bridge op passes `DynamicResolution.recipients` (pointers into the inner tool `arguments`, never values; part of the cached per-tool resolution) through when the resolution is `outward` and the list has the M-OP-13 shape; anything else is dropped with a warning log (absent = unknown, a policy fails closed). Test: `test/c373-recipients.test.ts`.
+Needs `@opt2-tealbrick/manifest` with `recipientSpecsProblem` (same PR). The resolve bridge op passes `DynamicResolution.recipients` (pointers into the inner tool `arguments`, never values; part of the cached per-tool resolution) through when the resolution is `outward` and the list has the M-OP-14 shape; anything else is dropped with a warning log (absent = unknown, a policy fails closed). Test: `test/c373-recipients.test.ts`.
 
 ## 0.1.41 (C367 P3 + P4; the number is a reservation, the release lead assigns it at merge): `callApp` context, `tb.hold_status` for app callers (spec 0.1.77)
 
