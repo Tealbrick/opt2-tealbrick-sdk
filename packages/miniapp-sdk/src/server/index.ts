@@ -104,4 +104,4 @@ export { HOLD_VIEW_BUDGET_MS, HOLD_VIEW_UNREADABLE } from "./ops.ts";
 export { CSRF_HEADER, SESSION_COOKIE } from "./person.ts";
 export { TB_EXEC_CONTROL_PORT } from "./service-helper.ts";
 // spec 0.1.80 (C373, G-2): ctx.topology() shape (mirror until the spec pin carries it; display only)
-export { type SliceTopology, TOPOLOGY_MAX, type TopologyCompanion, type TopologyConnection, type TopologyEdge, type TopologyInstance } from "./topology.ts";
+export { type SliceTopology, type SliceTopologyView, TOPOLOGY_MAX, type TopologyCompanion, type TopologyConnection, type TopologyEdge, type TopologyInstance } from "./topology.ts";

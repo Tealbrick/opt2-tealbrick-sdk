@@ -9,8 +9,8 @@ import { fileURLToPath } from "node:url";
 import { ulid } from "@opt2-tealbrick/manifest";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json, RunningApp } from "@opt2-tealbrick/spec/sdk";
-import { defineApp, type SdkOpContext, type SliceTopology, startApp, TOPOLOGY_MAX } from "../src/server/index.ts";
-import { readTopology } from "../src/server/topology.ts";
+import { defineApp, type SdkOpContext, type SliceTopology, type SliceTopologyView, startApp, TOPOLOGY_MAX } from "../src/server/index.ts";
+import { readTopology, topologyView } from "../src/server/topology.ts";
 import { TrustState } from "../src/server/trust.ts";
 import { fixtureManifest } from "./fixtures/manifest.ts";
 import { callProof, FakeBridge, freePort, grant, migrationsDir, slice, tempDir, testRoots, ticket, until, type World, world } from "./helpers.ts";
@@ -232,8 +232,30 @@ describe("TrustState.topology (unit)", T, () => {
     assert.equal(run({ slice: null, stale: () => false }), null);
     assert.equal(run({ slice: { agents, topology: sample() }, stale: () => true }), null);
     assert.equal(run({ slice: { agents }, stale: () => false }), null);
-    assert.deepEqual(run({ slice: { agents, topology: sample() }, stale: () => false }), sample());
+    assert.deepEqual(run({ slice: { agents, topology: sample() }, stale: () => false }), { ...sample(), agentIds: ["a", "b"] });
     assert.equal(run({ slice: { agents: [agents[0]], topology: sample() }, stale: () => false })?.truncated, true);
+  });
+});
+
+describe("topologyView: topology + agentIds from ONE slice object (unit)", T, () => {
+  const agents = [{ id: "agt_a", name: "A" }, { id: "agt_b", name: "B" }];
+  test("agentIds = slice.agents ids in slice order, deeply frozen with the topology", T, () => {
+    const v = topologyView({ agents, topology: sample() });
+    assert.deepEqual(v, { ...sample(), agentIds: ["agt_a", "agt_b"] });
+    assert.ok(deepFrozen(v));
+    const r = topologyView({ agents: [...agents].reverse(), topology: sample() });
+    assert.deepEqual(r?.agentIds, ["agt_b", "agt_a"], "the order is the slice's order");
+  });
+  test("agents malformed (not an array, an entry without a string id) → null; topology absent → null", T, () => {
+    assert.equal(topologyView({ agents: "x", topology: sample() }), null);
+    assert.equal(topologyView({ agents: [{ id: "agt_a" }, { name: "B" }], topology: sample() }), null);
+    assert.equal(topologyView({ agents: [{ id: "agt_a" }, null], topology: sample() }), null);
+    assert.equal(topologyView({ agents }), null);
+  });
+  test("agentIds length bounds the agentIdx check", T, () => {
+    const v = topologyView({ agents: [agents[0]], topology: sample() });
+    assert.equal(v?.truncated, true);
+    assert.deepEqual(v?.agentIds, ["agt_a"]);
   });
 });
 
@@ -259,7 +281,7 @@ function manifestWithProbes(port: number): Manifest {
   return m;
 }
 
-const stash: { fn?: () => SliceTopology | null } = {};
+const stash: { fn?: () => SliceTopologyView | null } = {};
 const seenJob: unknown[] = [];
 
 function testApp(port: number, migrations: string) {
@@ -282,6 +304,7 @@ function testApp(port: number, migrations: string) {
             ["set name", () => ((t.instances[0] as string[])[2] = "Evil")],
             ["set crud", () => ((t.edges[0] as unknown[])[2] = "crud")],
             ["set truncated", () => ((t as { truncated?: true }).truncated = true)],
+            ["push agentId", () => (t.agentIds as string[]).push("agt_evil")],
           ];
           for (const [k, f] of tries) {
             try {
@@ -404,6 +427,8 @@ describe("ctx.topology (C373, spec 0.1.80)", T, () => {
   });
   after(async () => b.cleanup());
   const topo = async () => (await personOp(b, s, "topo_person")).body.output.topology;
+  /** the view the SDK returns for the default slice agents (Agent A, Agent B) */
+  const withIds = (t: object) => ({ ...t, agentIds: [b.w.agents.a, b.w.agents.b] });
 
   test("a manifest with needsTopology: true boots (the validator accepts the boolean)", T, () => {
     assert.equal(b.running.status(), "ok");
@@ -413,7 +438,7 @@ describe("ctx.topology (C373, spec 0.1.80)", T, () => {
     await b.push({ topology: sample() });
     const r = await personOp(b, s, "topo_person");
     assert.equal(r.status, 200, JSON.stringify(r.body));
-    assert.deepEqual(r.body.output.topology, sample());
+    assert.deepEqual(r.body.output.topology, withIds(sample()));
     assert.equal(r.body.output.frozen, true);
   });
 
@@ -421,8 +446,8 @@ describe("ctx.topology (C373, spec 0.1.80)", T, () => {
     await b.push({ topology: sample() });
     const r = await personOp(b, s, "topo_person", { mutate: true });
     assert.equal(r.status, 200, JSON.stringify(r.body));
-    assert.deepEqual(r.body.output.threw, ["push edge", "set name", "set crud", "set truncated"]);
-    assert.deepEqual(r.body.output.after, sample(), "the next read is unchanged");
+    assert.deepEqual(r.body.output.threw, ["push edge", "set name", "set crud", "set truncated", "push agentId"]);
+    assert.deepEqual(r.body.output.after, withIds(sample()), "the next read is unchanged");
     assert.equal(r.body.output.fresh, true);
   });
 
@@ -442,13 +467,13 @@ describe("ctx.topology (C373, spec 0.1.80)", T, () => {
 
   test("a slice update changes what a later call sees", T, async () => {
     await b.push({ topology: sample() });
-    assert.deepEqual(await topo(), sample());
+    assert.deepEqual(await topo(), withIds(sample()));
     const next = { ...sample(), edges: [], truncated: true as const };
     await b.push({ topology: next });
-    assert.deepEqual(await topo(), next);
+    assert.deepEqual(await topo(), withIds(next));
     // an index beyond the slice's agents (2 by default) drops the row and marks the copy truncated
     await b.push({ topology: { ...sample(), edges: [...sample().edges, [5, 0, "r", "f", 0, 0, 0]] } });
-    assert.deepEqual(await topo(), { ...sample(), truncated: true });
+    assert.deepEqual(await topo(), withIds({ ...sample(), truncated: true }));
   });
 
   test("an expired slice (older than 12 h) → null; a stashed function reads the current slice", T, async () => {
@@ -456,7 +481,7 @@ describe("ctx.topology (C373, spec 0.1.80)", T, () => {
     assert.equal((await personOp(b, s, "topo_stash")).status, 200);
     const fn = stash.fn;
     assert.ok(fn);
-    assert.deepEqual(fn(), sample());
+    assert.deepEqual(fn(), withIds(sample()));
     const real = Date.now();
     const m = mock.method(Date, "now", () => real + 12 * 3600_000 + 60_000);
     try {
@@ -464,7 +489,7 @@ describe("ctx.topology (C373, spec 0.1.80)", T, () => {
     } finally {
       m.mock.restore();
     }
-    assert.deepEqual(fn(), sample(), "fresh again when the clock is back");
+    assert.deepEqual(fn(), withIds(sample()), "fresh again when the clock is back");
   });
 
   test("an agent op and a handler job (event-context family) see it too", T, async () => {
@@ -472,9 +497,32 @@ describe("ctx.topology (C373, spec 0.1.80)", T, () => {
     seenJob.length = 0;
     const a = await agentOp(b, "topo_agent", { job: true });
     assert.equal(a.status, 200, JSON.stringify(a.body));
-    assert.deepEqual(a.body.output, { topology: sample(), caller: "agent" });
+    assert.deepEqual(a.body.output, { topology: withIds(sample()), caller: "agent" });
     await until(async () => seenJob.length > 0);
-    assert.deepEqual(seenJob[0], sample());
+    assert.deepEqual(seenJob[0], withIds(sample()));
+  });
+
+  test("agents reordered in a new slice revision: agentIdx still resolves to the right agent through agentIds", T, async () => {
+    const A = b.w.agents.a;
+    const B = b.w.agents.b;
+    const agentA = { id: A, name: "Agent A", mode: "free" as const, status: "active" as const };
+    const agentB = { id: B, name: "Agent B", mode: "free" as const, status: "active" as const };
+    // Core writes agentIdx against the agents[] of the slice it mints. Edge 0 = agent A's grant (crud "cr"), edge 1 = agent B's (crud "r").
+    const mint = (order: (typeof agentA)[]) => {
+      const idx = (id: string) => order.findIndex((x) => x.id === id);
+      return {
+        agents: order,
+        topology: { ...sample(), edges: [[idx(A), 1, "cr", "b", 0, 0, 0], [idx(B), 0, "r", "f", 0, 0, 1]], connections: [[sample().connections[0][0], idx(A), "p", "a"]] },
+      };
+    };
+    const grantsByAgent = (t: any): Record<string, string> => Object.fromEntries(t.edges.map((e: any[]) => [t.agentIds[e[0]], e[2]]));
+    for (const order of [[agentA, agentB], [agentB, agentA], [agentA, agentB]]) {
+      await b.push(mint(order) as never);
+      const t = await topo();
+      assert.deepEqual(t.agentIds, order.map((x) => x.id), "agentIds in this slice's order");
+      assert.deepEqual(grantsByAgent(t), { [A]: "cr", [B]: "r" }, "each grant maps to its own agent after the reorder");
+      assert.equal(t.agentIds[t.connections[0][1]], A, "the connection maps to agent A");
+    }
   });
 });
 

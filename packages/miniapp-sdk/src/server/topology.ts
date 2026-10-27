@@ -94,3 +94,29 @@ export function readTopology(raw: unknown, agentsLength: number): SliceTopology 
     return null;
   }
 }
+
+/** What `ctx.topology()` returns: the topology AND the agent ids of the SAME verified slice, in slice order (`agentIds[i]` =
+ *  `slice.agents[i].id`), so `agentIdx` resolves without a second read that a newer slice could change in between. */
+export type SliceTopologyView = SliceTopology & { agentIds: readonly string[] };
+
+/**
+ * Builds the view from ONE slice object (`slice.topology` + `slice.agents`, read together). null when the topology is absent or
+ * malformed (readTopology) or when `agents` is not an array of entries with a non-empty string `id`. Deeply frozen. Never throws.
+ */
+export function topologyView(slice: { topology?: unknown; agents?: unknown }): SliceTopologyView | null {
+  try {
+    const agents = slice.agents;
+    if (!Array.isArray(agents)) return null;
+    const agentIds: string[] = [];
+    for (const a of agents) {
+      const id = a !== null && typeof a === "object" ? (a as { id?: unknown }).id : undefined;
+      if (typeof id !== "string" || id === "") return null;
+      agentIds.push(id);
+    }
+    const t = readTopology(slice.topology, agentIds.length);
+    return t ? Object.freeze({ ...t, agentIds: Object.freeze(agentIds) }) : null;
+  } catch {
+    return null;
+  }
+}
+
