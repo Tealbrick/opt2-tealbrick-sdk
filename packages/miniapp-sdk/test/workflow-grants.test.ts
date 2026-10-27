@@ -188,7 +188,7 @@ describe("A12.app_caps: the SDK reports app_workflow_grants and grant_wfl (no ve
   after(async () => b.cleanup());
   test("ClaimRequest.caps and every AppStatus.caps carry both caps", async () => {
     assert.deepEqual(b.bridge.claimBodies[0]?.caps, [CAP, "grant_wfl"]);
-    assert.ok(b.bridge.statuses.length >= 1);
+    await until(async () => b.bridge.statuses.length >= 1); // the first AppStatus push is async (slower on CI)
     for (const s of b.bridge.statuses) assert.deepEqual(s.caps, [CAP, "grant_wfl"]);
   });
 });
