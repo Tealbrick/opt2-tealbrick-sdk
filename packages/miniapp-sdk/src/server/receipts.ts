@@ -4,6 +4,7 @@ import type { FreeCaps, Sha256Digest } from "@opt2-tealbrick/spec/credentials";
 import type { Effect, HoldFamily } from "@opt2-tealbrick/spec/manifest";
 import type { AdmittedBy, Json, Receipt, ReceiptQuery, ReceiptStatus, ReceiptStore } from "@opt2-tealbrick/spec/sdk";
 import { clampLimit, decodeCursor, encodeCursor } from "./audit.ts";
+import { HOLD_INPUT_KEEP_MS } from "./hold-view.ts";
 import { type RawDb, type Row, tx } from "./store.ts";
 
 export const HOLD_TTL_MS = 15 * 60_000;
@@ -14,6 +15,10 @@ export const RECEIPT_RETENTION_MS = 90 * 86400_000;
 const CAP_WINDOW_MS = { hour: 3600_000, day: 86400_000 } as const;
 /** v0.1.13 (G4): tb.holds_pending page size (1..100, default 50) */
 export const HOLDS_PENDING_MAX = 100;
+/** v0.1.42 (C369 D4): sealing purpose of the input kept with a hold (id = the hold id). */
+export const HOLD_INPUT_PURPOSE = "hold-input";
+/** v0.1.42 (C369 D3): `Receipt.holdReason` is at most this long (the same value `tb.holds_pending` returns). */
+const HOLD_REASON_MAX = 280;
 
 /**
  * v0.1.13: the reason shown by tb.hold_status / tb.holds_pending — the stored hook verdict reason or SDK hold reason;
@@ -35,6 +40,19 @@ function callerContextSummaryOf(meta: unknown): string | undefined {
   }
 }
 
+/** v0.1.42 (C369): `HoldsPendingItem.tool` = the stored `meta.tool` when it is a tool name (`^[a-z][a-z0-9_]{1,62}$`); never other meta. */
+export const PENDING_TOOL_RE = /^[a-z][a-z0-9_]{1,62}$/;
+function pendingToolOf(meta: unknown): string | undefined {
+  if (typeof meta !== "string" || !meta.includes('"tool"')) return undefined;
+  try {
+    const m = JSON.parse(meta) as Json;
+    const t = m !== null && typeof m === "object" && !Array.isArray(m) ? m.tool : undefined;
+    return typeof t === "string" && PENDING_TOOL_RE.test(t) ? t : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** One pending hold (status `held`) as a summary row (tb.holds_pending): no input, view or meta. */
 export interface PendingHoldRow {
   id: string;
@@ -47,6 +65,8 @@ export interface PendingHoldRow {
   createdAt: number;
   /** v0.1.77 (C367 P4, SDK-API §18.6 item 6): the one-line summary of `meta.callerContext`, computed at read time; absent when the hold has none */
   callerContext?: string;
+  /** v0.1.42 (C369, spec 0.1.84 HoldsPendingItem.tool): the resolved dynamic tool name (`meta.tool`); absent for static ops. Never input. */
+  tool?: string;
 }
 
 export interface NewReceipt {
@@ -69,7 +89,37 @@ export interface NewReceipt {
   idempotencyKey: string | null;
   view?: string | null;
   expiresAt?: number | null;
+  /** v0.1.42 (C369 D4): holds only — the redacted input, sealed at insert with the new row's id, or `too_large` (not kept) */
+  heldInput?: { state: "kept"; seal: (id: string) => string } | { state: "too_large" };
 }
+
+/** v0.1.42 (C369 D4): one hold row for `tb.hold_details` (the receipt plus the sealed input columns; never leaves the SDK as is). */
+export interface HoldDetailsRow {
+  receipt: Receipt;
+  holdReason: string | null;
+  /** 'kept' | 'too_large' | 'unreadable' (boot reseal could not open it); 'none' for a hold written before sdk_receipt_hold_input */
+  inputState: "kept" | "too_large" | "unreadable" | "none";
+  inputSealed: string | null;
+  inputWipeAt: number | null;
+}
+
+/** QA-C369-4: `viewSha256` of the stored meta carried into a new meta (an object or null; another JSON shape is kept as is). */
+function withViewHash(next: Json, row: Row | undefined): Json {
+  let hash: unknown;
+  try {
+    const old = row ? (JSON.parse(String(row.meta)) as Json) : null;
+    hash = old !== null && typeof old === "object" && !Array.isArray(old) ? old.viewSha256 : undefined;
+  } catch {
+    hash = undefined;
+  }
+  if (typeof hash !== "string") return next;
+  if (next === null) return { viewSha256: hash };
+  if (typeof next !== "object" || Array.isArray(next)) return next;
+  return { ...next, viewSha256: hash };
+}
+
+/** Statuses after which a hold's input is kept 7 more days, then wiped (D4; a lapsed approval counts from its expiry). */
+const TERMINAL_STATUSES: readonly ReceiptStatus[] = ["run", "failed", "denied", "refused", "after_failed"];
 
 /**
  * One `tb_idempotency` row (§4.4). v0.1.22 (SDK-01): `pending` = reserved before the handler runs (one wins, the INSERT
@@ -116,6 +166,8 @@ function toReceipt(r: Row, withView: boolean): Receipt {
     decidedBy: (r.decided_by as Receipt["decidedBy"]) ?? null,
   };
   if (withView && typeof r.view === "string") rec.view = r.view;
+  // v0.1.42 (C369 D3): the hold reason on hold rows (tb.holds_list, tb.receipts_list); never input, view or meta
+  if (String(r.id).startsWith("hld_")) (rec as Receipt & { holdReason?: string }).holdReason = holdReasonOf(r.hold_reason, r.hold_family).slice(0, HOLD_REASON_MAX);
   return rec;
 }
 
@@ -281,6 +333,7 @@ export class Receipts implements ReceiptStore {
       .all(...args, limit + 1) as Row[];
     const items = rows.slice(0, limit).map((r): PendingHoldRow => {
       const callerContext = callerContextSummaryOf(r.meta);
+      const tool = pendingToolOf(r.meta);
       return {
         id: String(r.id),
         op: String(r.op),
@@ -291,6 +344,7 @@ export class Receipts implements ReceiptStore {
         caller: callerOf(r),
         createdAt: Number(r.created_at),
         ...(callerContext !== undefined ? { callerContext } : {}),
+        ...(tool !== undefined ? { tool } : {}),
       };
     });
     const last = items.at(-1);
@@ -300,10 +354,12 @@ export class Receipts implements ReceiptStore {
   // ── internal (SDK only) ──
   insert(n: NewReceipt, now = Date.now()): Receipt {
     const id = `${n.kind}_${ulid(now)}`;
+    const held = n.kind === "hld" ? n.heldInput : undefined;
     this.#db
       .prepare(
         `INSERT INTO tb_receipts (id, call_id, caller_type, caller_id, caller_name, op, effect, hold_family, status, input_digest,
-          summary, meta, idempotency_key, view, created_at, expires_at, held_by, hold_reason, caller_product, admitted_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          summary, meta, idempotency_key, view, created_at, expires_at, held_by, hold_reason, caller_product, admitted_by, input_state, input_sealed)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -326,19 +382,25 @@ export class Receipts implements ReceiptStore {
         n.holdReason ?? null,
         n.caller.type === "app" ? (n.caller.product ?? null) : null,
         n.admittedBy ?? null,
+        held ? held.state : null,
+        held?.state === "kept" ? held.seal(id) : null,
       );
     return this.getSync(id) as Receipt;
   }
 
-  /** Terminal statuses drop the hold view (§4.1). */
-  finish(id: string, status: ReceiptStatus, patch: { summary?: string; meta?: Json; consumed?: boolean; admittedBy?: AdmittedBy } = {}): void {
+  /** Terminal statuses drop the hold view (§4.1) and start the 7-day window of the kept input (v0.1.42, D4). */
+  finish(id: string, status: ReceiptStatus, patch: { summary?: string; meta?: Json; consumed?: boolean; admittedBy?: AdmittedBy } = {}, now = Date.now()): void {
     const keepView = status === "held" || status === "approved";
+    // QA-C369-4: the hash of the view the owner approved stays in `meta` when the run or failure writes its own meta
+    if (patch.meta !== undefined) patch = { ...patch, meta: withViewHash(patch.meta, this.#db.prepare("SELECT meta FROM tb_receipts WHERE id = ?").get(id) as Row | undefined) };
+    const wipeAt = TERMINAL_STATUSES.includes(status) ? now + HOLD_INPUT_KEEP_MS : null;
     this.#db
       .prepare(
         `UPDATE tb_receipts SET status = ?, summary = COALESCE(?, summary), meta = COALESCE(?, meta),
-          consumed = CASE WHEN ? THEN 1 ELSE consumed END, view = CASE WHEN ? THEN view ELSE NULL END, admitted_by = COALESCE(?, admitted_by) WHERE id = ?`,
+          consumed = CASE WHEN ? THEN 1 ELSE consumed END, view = CASE WHEN ? THEN view ELSE NULL END, admitted_by = COALESCE(?, admitted_by),
+          input_wipe_at = CASE WHEN ? IS NOT NULL AND input_sealed IS NOT NULL AND input_wipe_at IS NULL THEN ? ELSE input_wipe_at END WHERE id = ?`,
       )
-      .run(status, patch.summary ?? null, patch.meta === undefined ? null : JSON.stringify(patch.meta), patch.consumed ? 1 : 0, keepView ? 1 : 0, patch.admittedBy ?? null, id);
+      .run(status, patch.summary ?? null, patch.meta === undefined ? null : JSON.stringify(patch.meta), patch.consumed ? 1 : 0, keepView ? 1 : 0, patch.admittedBy ?? null, wipeAt, wipeAt, id);
   }
 
   /** v0.1.38: the decision and its `tb.hold.decided` outbox row in ONE transaction (only when the row was still held). */
@@ -348,9 +410,10 @@ export class Receipts implements ReceiptStore {
         this.#db
           .prepare(
             `UPDATE tb_receipts SET status = ?, decided_at = ?, decided_by = ?, expires_at = ?,
-              view = CASE WHEN ? = 'approved' THEN view ELSE NULL END WHERE id = ? AND status = 'held'`,
+              view = CASE WHEN ? = 'approved' THEN view ELSE NULL END,
+              input_wipe_at = CASE WHEN ? = 'denied' AND input_sealed IS NOT NULL THEN ? ELSE input_wipe_at END WHERE id = ? AND status = 'held'`,
           )
-          .run(status, now, by, status === "approved" ? now + APPROVAL_WINDOW_MS : null, status, id).changes ?? 0,
+          .run(status, now, by, status === "approved" ? now + APPROVAL_WINDOW_MS : null, status, status, now + HOLD_INPUT_KEEP_MS, id).changes ?? 0,
       );
       if (changed === 1 && this.#onDecided) {
         const r = this.#db.prepare("SELECT id, op, caller_type, caller_id FROM tb_receipts WHERE id = ?").get(id) as Row;
@@ -374,6 +437,50 @@ export class Receipts implements ReceiptStore {
     return Number(this.#db.prepare("UPDATE tb_receipts SET consumed = 1 WHERE id = ? AND status = 'approved' AND consumed = 0").run(id).changes) === 1;
   }
 
+  /** v0.1.42 (C369 D4): a hold row with its kept-input columns (tb.hold_details only); null for an unknown id or a non-hold receipt. */
+  holdDetailsRow(id: string): HoldDetailsRow | null {
+    const r = this.#db.prepare("SELECT * FROM tb_receipts WHERE id = ? AND id LIKE 'hld\\_%' ESCAPE '\\'").get(id) as Row | undefined;
+    if (!r) return null;
+    const state = r.input_state === "kept" || r.input_state === "too_large" || r.input_state === "unreadable" ? r.input_state : "none";
+    return {
+      receipt: toReceipt(r, false),
+      holdReason: typeof r.hold_reason === "string" ? r.hold_reason : null,
+      inputState: state,
+      inputSealed: typeof r.input_sealed === "string" ? r.input_sealed : null,
+      inputWipeAt: r.input_wipe_at === null || r.input_wipe_at === undefined ? null : Number(r.input_wipe_at),
+    };
+  }
+
+  /**
+   * v0.1.42 (C369 D4): KEK rotation (CREDENTIALS §9.1) — reseal kept hold inputs sealed under TB_KEK_PREVIOUS. Never throws
+   * (QA-C369-8): a blob that cannot be opened (its KEK is gone) is dropped and its state becomes `unreadable` (disposable data,
+   * 7 days at most). Returns the counts; the caller logs one line.
+   */
+  resealHoldInputs(sealer: { stale(blob: string): boolean; sealText(p: string, id: string, t: string): string; unsealText(p: string, id: string, b: string): string }): { resealed: number; unreadable: number } {
+    let resealed = 0;
+    let unreadable = 0;
+    for (const r of this.#db.prepare("SELECT id, input_sealed FROM tb_receipts WHERE input_sealed IS NOT NULL").all() as Row[]) {
+      const blob = String(r.input_sealed);
+      const id = String(r.id);
+      let stale: boolean;
+      try {
+        stale = sealer.stale(blob);
+        if (!stale) sealer.unsealText(HOLD_INPUT_PURPOSE, id, blob);
+      } catch {
+        stale = true;
+      }
+      if (!stale) continue;
+      try {
+        this.#db.prepare("UPDATE tb_receipts SET input_sealed = ? WHERE id = ?").run(sealer.sealText(HOLD_INPUT_PURPOSE, id, sealer.unsealText(HOLD_INPUT_PURPOSE, id, blob)), id);
+        resealed += 1;
+      } catch {
+        this.#db.prepare("UPDATE tb_receipts SET input_sealed = NULL, input_state = 'unreadable' WHERE id = ?").run(id);
+        unreadable += 1;
+      }
+    }
+    return { resealed, unreadable };
+  }
+
   byCall(callId: string): Receipt | null {
     const r = this.#db.prepare("SELECT * FROM tb_receipts WHERE call_id = ? ORDER BY created_at DESC LIMIT 1").get(callId) as Row | undefined;
     return r ? toReceipt(r, false) : null;
@@ -391,13 +498,20 @@ export class Receipts implements ReceiptStore {
       const rows = this.#onDecided ? (this.#db.prepare("SELECT id, op, caller_type, caller_id FROM tb_receipts WHERE status = 'held' AND expires_at <= ? ORDER BY created_at, id").all(now) as Row[]) : [];
       const n = Number(
         this.#db
-          .prepare("UPDATE tb_receipts SET status = 'denied', decided_by = 'expiry', decided_at = ?, view = NULL WHERE status = 'held' AND expires_at <= ?")
-          .run(now, now).changes,
+          .prepare(
+            "UPDATE tb_receipts SET status = 'denied', decided_by = 'expiry', decided_at = ?, view = NULL, input_wipe_at = CASE WHEN input_sealed IS NOT NULL THEN ? ELSE input_wipe_at END WHERE status = 'held' AND expires_at <= ?",
+          )
+          .run(now, now + HOLD_INPUT_KEEP_MS, now).changes,
       );
       for (const r of rows) this.#onDecided?.({ id: String(r.id), op: String(r.op), caller: { type: String(r.caller_type), id: String(r.caller_id) } }, "expired");
       return n;
     });
     this.#db.prepare("UPDATE tb_receipts SET view = NULL WHERE status = 'approved' AND view IS NOT NULL AND expires_at <= ?").run(now);
+    // v0.1.42 (C369 D4): a lapsed approval is terminal at its expiry; the kept input is wiped 7 days after the terminal status
+    this.#db
+      .prepare("UPDATE tb_receipts SET input_wipe_at = expires_at + ? WHERE status = 'approved' AND input_sealed IS NOT NULL AND input_wipe_at IS NULL AND expires_at <= ?")
+      .run(HOLD_INPUT_KEEP_MS, now);
+    this.#db.prepare("UPDATE tb_receipts SET input_sealed = NULL WHERE input_sealed IS NOT NULL AND input_wipe_at IS NOT NULL AND input_wipe_at <= ?").run(now);
     this.#db.prepare("DELETE FROM tb_receipts WHERE created_at < ?").run(now - RECEIPT_RETENTION_MS);
     this.#db.prepare("DELETE FROM tb_idempotency WHERE expires_at <= ?").run(now);
     this.#db.prepare("DELETE FROM tb_cap_usage WHERE created_at < ?").run(now - CAP_WINDOW_MS.day);

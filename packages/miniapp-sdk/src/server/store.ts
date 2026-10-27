@@ -192,6 +192,16 @@ INSERT INTO tb_cap_usage (id, caller_id, effect, op, state, created_at)
     name: "sdk_event_outbox",
     sql: "CREATE TABLE tb_event_outbox (id TEXT PRIMARY KEY, kind TEXT NOT NULL, key TEXT NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL) STRICT;\nCREATE INDEX tb_event_outbox_age ON tb_event_outbox (created_at);",
   },
+  {
+    // v0.1.42 (C369 D4, spec 0.1.84 reservation, SDK-API §4.9): the input kept with a hold for the owner's tb.hold_details.
+    // `input_state` = 'kept' | 'too_large' (NULL = a hold written before this migration: nothing was kept); `input_sealed` = the JCS
+    // text of the redacted input sealed with TB_KEK (purpose `hold-input`, id = the hold id; backups carry only this sealed blob, the
+    // export leaves the column out); `input_wipe_at` = terminal status + 7 days, after which the sweep sets `input_sealed` to NULL.
+    // Additive and nullable; existing rows keep NULL and nothing is rewritten (precedent sdk_receipt_caller_product).
+    version: 12,
+    name: "sdk_receipt_hold_input",
+    sql: "ALTER TABLE tb_receipts ADD COLUMN input_state TEXT;\nALTER TABLE tb_receipts ADD COLUMN input_sealed TEXT;\nALTER TABLE tb_receipts ADD COLUMN input_wipe_at INTEGER;\nCREATE INDEX tb_receipts_input_wipe ON tb_receipts (input_wipe_at) WHERE input_sealed IS NOT NULL;",
+  },
 ];
 
 function sha256(text: string | Uint8Array): string {

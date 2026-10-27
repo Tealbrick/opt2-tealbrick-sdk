@@ -82,6 +82,27 @@ export type {
   StopContext,
 } from "./context.ts";
 export { requireViewUrl, TbError, VIEW_ORIGIN_MISSING, viewOriginMissing } from "./errors.ts";
+// v0.1.42 (C369 D1/D4, spec 0.1.84 reservation): the default hold view renderer, tb.hold_details and its types. Mirror of the spec
+// 0.1.84 names until the spec pin moves (then the types come from @opt2-tealbrick/spec/sdk and these re-export them).
+export {
+  clean as holdViewClean,
+  dynamicHoldTitle,
+  HOLD_DETAILS_OP,
+  HOLD_INPUT_KEEP_MS,
+  HOLD_INPUT_MAX_BYTES,
+  HOLD_INPUT_REDACTED,
+  HOLD_SECRET_KEY_PARTS,
+  HOLD_SECRET_KEY_WORDS,
+  HOLD_VIEW_HIDDEN,
+  HOLD_VIEW_LIMITS,
+  HOLD_VIEW_MAX_CHARS,
+  type HoldDetails,
+  type HoldInputState,
+  holdViewElidedLine,
+  isSecretKey,
+  redactHoldInput,
+  renderHoldView,
+} from "./hold-view.ts";
 // v0.1.21 (Scribe R1, SDK-1/SDK-2, RUL-11): the job runner
 export type {
   EnqueueOptions,

@@ -420,6 +420,11 @@ export async function startApp(
   const bridge = cfg.standalone || !cfg.bridgeUrl ? null : new BridgeClient({ baseUrl: cfg.bridgeUrl, instanceId, key: instanceKey, bridgeId: () => trust.bridgeId });
   const receipts = new Receipts(db);
   // v0.1.22 (SDK-01): keys reserved by a process that stopped mid-run have an unknown outcome — never run them again
+  // v0.1.42 (C369 D4): kept hold inputs sealed under TB_KEK_PREVIOUS are resealed like app keys (CREDENTIALS §9.1)
+  closeOnFail(() => {
+    const r = receipts.resealHoldInputs(sealer);
+    if (r.unreadable > 0) log.warn("kept hold inputs could not be opened after a KEK change; they read as unreadable", { count: r.unreadable });
+  });
   const crashedKeys = receipts.idemRecoverCrashed(Date.now());
   if (crashedKeys > 0) log.warn("idempotency keys of an interrupted run marked unknown_outcome", { count: crashedKeys });
   const kick = () => link?.kick();

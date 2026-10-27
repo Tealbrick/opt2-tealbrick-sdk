@@ -265,9 +265,10 @@ describe("SDK-HV-1 dynamic hold view", () => {
     assert.equal(r.status, 202);
     const h = holdRow(b, r.body.holdId);
     assert.equal(h.status, "held", "a failure never approves");
-    assert.ok(h.view?.startsWith(`${HOLD_VIEW_UNREADABLE}\n\nConnected tools\n`), h.view ?? "");
-    assert.match(h.view ?? "", /"draft_id": "d4"/);
-    assert.equal(h.summary, "Connected tools");
+    // v0.1.42 (C369 D1): the default view is labelled lines over the tool arguments (no catalog entry here: line 1 names the tool)
+    assert.ok(h.view?.startsWith(`${HOLD_VIEW_UNREADABLE}\n\nConnected tools: send_draft\n`), h.view ?? "");
+    assert.match(h.view ?? "", /\nDraft id: d4$/);
+    assert.equal(h.summary, "Connected tools", "the receipt summary carries no input (C90)");
     assert.ok(lines.some((l) => l.includes("hold view failed")), "the failure is logged (code only)");
     assert.ok(!lines.join("").includes(SECRET_UPSTREAM_TEXT), "upstream error text never reaches the log");
   });
@@ -326,7 +327,7 @@ describe("SDK-HV-1 dynamic hold view", () => {
     const plain = await send(b, "d6");
     assert.equal(plain.status, 202);
     const hp = holdRow(b, plain.body.holdId);
-    assert.ok(hp.view?.startsWith("Connected tools\n"), hp.view ?? "");
+    assert.equal(hp.view, "Connected tools: send_draft\nDraft id: d6");
     assert.ok(!hp.view?.includes(HOLD_VIEW_UNREADABLE));
     await approve(b, String(plain.body.holdId));
     assert.equal((await send(b, "d6")).status, 200, "a null view is stable: the approval matches");
@@ -340,7 +341,7 @@ describe("SDK-HV-1 dynamic hold view", () => {
     const held = await sendInput(b, { tool: "send_draft", arguments: { draft_id: "g7a", cc: "carol@example.com", z: 1 } });
     assert.equal(held.status, 202);
     const view = holdRow(b, held.body.holdId).view ?? "";
-    assert.ok(view.startsWith("Connected tools\n"), view);
+    assert.equal(view, "Connected tools: send_draft\nCc: carol@example.com\nDraft id: g7a\nZ: 1", view);
     await approve(b, String(held.body.holdId));
     // same input, other key order at both levels (what another client or a JSON round trip sends)
     const run = await sendInput(b, { arguments: { z: 1, cc: "carol@example.com", draft_id: "g7a" }, tool: "send_draft" });
