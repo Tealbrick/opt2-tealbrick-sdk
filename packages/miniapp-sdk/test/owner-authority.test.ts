@@ -1102,7 +1102,7 @@ describe("C283b/c: SDK schema 10 sdk_scope_crud_snapshot (backfill, once, audite
       const applied = applySdkMigrations(db as never, undefined, { manifest: m });
       // v0.1.38: schema 11 (sdk_event_outbox) follows in the same run
       assert.deepEqual(applied.map((x) => `${x.version}:${x.name}`), ["10:sdk_scope_crud_snapshot", "11:sdk_event_outbox", "12:sdk_receipt_hold_input"]);
-      assert.equal(SDK_SCHEMA, 11);
+      assert.equal(SDK_SCHEMA, 12); // v0.1.42: schema 12 sdk_receipt_hold_input (C369 D4)
       const rows = (db.prepare("SELECT agent, crud_snapshot AS c FROM tb_scopes ORDER BY agent").all() as { agent: string; c: string | null }[]).map((r) => ({ agent: r.agent, c: r.c }));
       assert.deepEqual(rows, [
         { agent: "agt_app", c: null },
