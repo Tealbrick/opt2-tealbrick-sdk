@@ -6,7 +6,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { authorize, CALLER_CONTEXT_MAX_BYTES, canonicalize, DECISION_REASON, digest, EFFECTS, HOLDS_PENDING_OP, opInGrantWorkflow, validateAgainstSchema, validateInput, verifyCallProof, verifyGrant } from "@opt2-tealbrick/manifest";
 import { BRIDGE_HEADERS, type CompanionCaller, type OpCallBody, type OpResult } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, CallId, InstanceId, PersonId, Sha256Digest } from "@opt2-tealbrick/spec/credentials";
-import { type CrudAction, type DynamicCatalogEntry, type DynamicResolution, dynamicVariantBase, type Effect, type HoldFamily, type Operation } from "@opt2-tealbrick/spec/manifest";
+import type { CrudAction, DynamicResolution, Effect, HoldFamily, Operation } from "@opt2-tealbrick/spec/manifest";
 import type {
   AuthorizeInput,
   Caller,
@@ -46,8 +46,6 @@ const IDEM_PURPOSE = "idempotency";
 export const HOLD_VIEW_BUDGET_MS = 5_000;
 /** v0.1.23: the line the owner sees when the app could not read the content of a held dynamic call. */
 export const HOLD_VIEW_UNREADABLE = "Tealbrick could not read the content of this request.";
-/** v0.1.42 (C369 D1, SDK-API §4.8): time budget of the catalog lookup that gives a dynamic default view its titles. */
-export const HOLD_VIEW_CATALOG_BUDGET_MS = 2_000;
 
 type ManifestOp = Operation & { standard: false };
 interface EffectiveOp {
@@ -491,7 +489,7 @@ function toTbError(e: unknown, rt: Runtime): TbError {
 }
 
 /** Dynamic ops (MANIFEST §5.3): crud/effect/holdFamily come from the app's own `resolve`, never from the agent. */
-async function resolveDynamic(rt: Runtime, op: ManifestOp, input: Json): Promise<{ eff: EffectiveOp; tool: string; args: Record<string, unknown> }> {
+async function resolveDynamic(rt: Runtime, op: ManifestOp, input: Json): Promise<{ eff: EffectiveOp; tool: string; args: Record<string, unknown>; recipients?: unknown }> {
   if (!isObj(input) || typeof input.tool !== "string" || !isObj(input.arguments)) throw new TbError("input_invalid", "dynamic call input must be { tool, arguments }", 400);
   const d = rt.def.dynamic?.[op.id];
   const hctx: SdkHookContext = { log: rt.log, db: rt.appDb, getKey: (n) => rt.keys.getKey(n), modelRole: (r) => rt.keys.modelRole(r), signal: AbortSignal.timeout(2000), secrets: rt.secretsStore };
@@ -502,6 +500,8 @@ async function resolveDynamic(rt: Runtime, op: ManifestOp, input: Json): Promise
     eff: { id: op.id, crud: res.crud, effect: res.effect, ...(res.holdFamily ? { holdFamily: res.holdFamily } : {}), ...(op.scopeType ? { scopeType: op.scopeType } : {}) },
     tool: input.tool,
     args: input.arguments,
+    // v0.1.42 (C369 §4.8): the resolution's recipient places (C373 M-OP-14 shape), read structurally for the hold view only
+    recipients: (res as { recipients?: unknown }).recipients,
   };
 }
 
@@ -527,48 +527,25 @@ export const holdViewDigest = (view: string): string => `sha256:${createHash("sh
 const textOf = (view: string, summary: string | null, readable: boolean): HoldText => ({ view, summary, viewSha256: holdViewDigest(view), readable });
 const UNREADABLE_TEXT: HoldText = { view: "", summary: null, viewSha256: "", readable: false };
 
-/**
- * v0.1.42 (C369 D1): the catalog entry of a dynamic tool (its base name for a variant), for the default view's line 1 and labels.
- * Asked once with `{ query: <base>, limit: 20 }` within HOLD_VIEW_CATALOG_BUDGET_MS; not found, a throw or the budget → null
- * (the view then uses the tool name and humanized keys). Never logs the error text.
- */
-async function catalogEntry(rt: Runtime, opId: string, tool: string): Promise<DynamicCatalogEntry | null> {
-  const d = rt.def.dynamic?.[opId];
-  if (!d) return null;
-  const base = dynamicVariantBase(tool) ?? tool;
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(new TbError("hold_view_timeout", "catalog lookup took too long", 504)), HOLD_VIEW_CATALOG_BUDGET_MS);
-  timer.unref();
-  try {
-    const hctx: SdkHookContext = { log: rt.log, db: rt.appDb, getKey: (n) => rt.keys.getKey(n), modelRole: (r) => rt.keys.modelRole(r), signal: ac.signal, secrets: rt.secretsStore };
-    const aborted = new Promise<never>((_, reject) => ac.signal.addEventListener("abort", () => reject(ac.signal.reason), { once: true }));
-    aborted.catch(() => {});
-    const entries = await Promise.race([d.catalog({ query: base, limit: 20 }, hctx), aborted]);
-    const e = Array.isArray(entries) ? entries.find((x) => isObj(x) && x.name === base) : undefined;
-    return e && typeof e.title === "string" ? e : null;
-  } catch (e) {
-    rt.log.info("hold view catalog lookup failed", { op: opId, code: e instanceof TbError ? e.code : "catalog_failed" });
-    return null;
-  } finally {
-    clearTimeout(timer);
-    if (!ac.signal.aborted) ac.abort(new TbError("hold_view_done", "catalog lookup finished", 499));
-  }
-}
+/** A dynamic call as the hold path sees it: tool, arguments and (structurally, may be absent) the resolution's `recipients` places. */
+type DynCall = { tool: string; args: Record<string, unknown>; recipients?: unknown };
 
 /**
- * v0.1.42 (C369 D1, SDK-API §4.8): the default view of a call. Static op: op title, the input, the op's input schema. Dynamic op:
- * line 1 `<op title>: <entry title> (<tool>)`, the tool ARGUMENTS, the catalog entry's inputSchema titles. Deterministic for the
- * same input, schema and titles (the JCS member order is built in), so a replay with keys in another order gives the same hash (G7).
+ * v0.1.42 (C369 D1, SDK-API §4.8; QA-C369-5): the default view of a dynamic call: line 1 `<op title>: <tool>`, the tool ARGUMENTS
+ * with humanized labels, the resolution's `recipients` places first. No catalog lookup: the hashed text depends on the call only.
+ * Deterministic (JCS member order), so a replay with keys in another order gives the same hash (G7).
  */
-async function defaultHoldView(rt: Runtime, op: OperationView, dyn: { tool: string; args: Record<string, unknown> }): Promise<string> {
-  const entry = await catalogEntry(rt, op.id, dyn.tool);
-  return renderHoldView(dynamicHoldTitle(op.title, dyn.tool, entry ? entry.title : null), dyn.args as Json, entry ? entry.inputSchema : null).view;
+function defaultHoldView(op: OperationView, dyn: DynCall): string {
+  return renderHoldView(dynamicHoldTitle(op.title, dyn.tool), dyn.args as Json, null, dyn.recipients).view;
 }
+
+/** The op's manifest `recipients` places (MANIFEST M-OP-14, read structurally: absent on an older manifest package). */
+const placesOf = (op: OperationView): unknown => (op.standard ? undefined : (op as { recipients?: unknown }).recipients);
 
 /** Static op (sync): the app's `holdView(input)`, else the D1 default view (op title, input, the op's input schema). Throws what holdView throws. */
 function staticHoldText(op: OperationView, spec: HandlerSpec | null, input: Json): HoldText {
   if (spec?.holdView) return textOf(spec.holdView(input), null, true);
-  return textOf(renderHoldView(op.title, input, op.standard ? null : (op.input ?? null)).view, null, true);
+  return textOf(renderHoldView(op.title, input, op.standard ? null : (op.input ?? null), placesOf(op)).view, null, true);
 }
 
 /**
@@ -577,11 +554,11 @@ function staticHoldText(op: OperationView, spec: HandlerSpec | null, input: Json
  * created; it is never approved by a failure). `null` → the default view. Returns null when the app has no holdView.
  * `makeCtx(signal)` builds the OpContext of the call (same caller, scope access and account the call would use).
  */
-export async function dynamicHoldText(rt: Runtime, op: OperationView, tool: { tool: string; args: Record<string, unknown> }, makeCtx: (signal: AbortSignal) => OpContext, budgetMs = HOLD_VIEW_BUDGET_MS): Promise<HoldText | null> {
+export async function dynamicHoldText(rt: Runtime, op: OperationView, tool: DynCall, makeCtx: (signal: AbortSignal) => OpContext, budgetMs = HOLD_VIEW_BUDGET_MS): Promise<HoldText | null> {
   const fn = rt.def.dynamic?.[op.id]?.holdView;
   if (!fn) return null;
   const fallback = async (): Promise<HoldText> => {
-    return textOf(`${HOLD_VIEW_UNREADABLE}\n\n${await defaultHoldView(rt, op, tool)}`, null, false);
+    return textOf(`${HOLD_VIEW_UNREADABLE}\n\n${defaultHoldView(op, tool)}`, null, false);
   };
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(new TbError("hold_view_timeout", "hold view took too long", 504)), budgetMs);
@@ -599,7 +576,7 @@ export async function dynamicHoldText(rt: Runtime, op: OperationView, tool: { to
     clearTimeout(timer);
     if (!ac.signal.aborted) ac.abort(new TbError("hold_view_done", "hold view finished", 499));
   }
-  if (r === null) return textOf(await defaultHoldView(rt, op, tool), null, true);
+  if (r === null) return textOf(defaultHoldView(op, tool), null, true);
   if (!isObj(r) || typeof r.view !== "string" || r.view.length === 0 || r.view.length > HOLD_VIEW_MAX || (r.summary !== undefined && typeof r.summary !== "string")) {
     rt.log.warn("hold view not usable", { op: op.id, reason: isObj(r) && typeof r.view === "string" && r.view.length > HOLD_VIEW_MAX ? "hold_view_too_large" : "hold_view_invalid" });
     return fallback();
@@ -612,10 +589,10 @@ export async function dynamicHoldText(rt: Runtime, op: OperationView, tool: { to
  * static op (app holdView, else the default view). `repeat` = computed again for an approved repeat: a static holdView that throws
  * then gives an unreadable text (the approval is not used) instead of failing the call.
  */
-async function holdTextFor(rt: Runtime, op: OperationView, spec: HandlerSpec | null, input: Json, dyn: { tool: string; args: Record<string, unknown> } | null, makeCtx: (signal: AbortSignal) => OpContext, repeat: boolean): Promise<HoldText> {
+async function holdTextFor(rt: Runtime, op: OperationView, spec: HandlerSpec | null, input: Json, dyn: DynCall | null, makeCtx: (signal: AbortSignal) => OpContext, repeat: boolean): Promise<HoldText> {
   if (dyn) {
     const t = await dynamicHoldText(rt, op, dyn, makeCtx);
-    return t ?? textOf(await defaultHoldView(rt, op, dyn), null, true);
+    return t ?? textOf(defaultHoldView(op, dyn), null, true);
   }
   if (!repeat) return staticHoldText(op, spec, input);
   try {
@@ -744,13 +721,13 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
 
     // effective op (dynamic → resolved values) and input schema
     let eff: EffectiveOp = { id: op.id, crud: op.crud, effect: op.effect, ...(op.holdFamily ? { holdFamily: op.holdFamily } : {}), ...(op.scopeType ? { scopeType: op.scopeType } : {}) };
-    let dyn: { tool: string; args: Record<string, unknown> } | null = null;
+    let dyn: DynCall | null = null;
     const v = validateInput(op, body.input);
     if (!v.ok) throw new TbError("input_invalid", "input does not match the schema", 400, { errors: v.errors });
     if (op.dynamic) {
       const r = await resolveDynamic(rt, op, body.input);
       eff = r.eff;
-      dyn = { tool: r.tool, args: r.args };
+      dyn = { tool: r.tool, args: r.args, recipients: r.recipients };
     }
 
     // first sight (§7.2): agent from the slice (an agent outside it was refused above), or a companion app caller
@@ -1117,7 +1094,9 @@ export function holdsPending(
       decidePath: `/holds/${h.id}`,
       // v0.1.77 (C367 P4): the summary of the receipt's meta.callerContext, read time only; never the whole context
       ...(h.callerContext !== undefined ? { callerContext: h.callerContext } : {}),
-    }),
+      // v0.1.42 (C369, spec 0.1.84): the resolved dynamic tool name; absent for static ops (no input, C90)
+      ...(h.tool !== undefined ? { tool: h.tool } : {}),
+    }) as HoldsPendingItem,
   );
   return { items, nextCursor: page.nextCursor };
 }

@@ -91,11 +91,14 @@ export {
   HOLD_INPUT_KEEP_MS,
   HOLD_INPUT_MAX_BYTES,
   HOLD_INPUT_REDACTED,
+  HOLD_SECRET_KEY_PARTS,
   HOLD_SECRET_KEY_WORDS,
+  HOLD_VIEW_HIDDEN,
   HOLD_VIEW_LIMITS,
   HOLD_VIEW_MAX_CHARS,
   type HoldDetails,
   type HoldInputState,
+  holdViewElidedLine,
   isSecretKey,
   redactHoldInput,
   renderHoldView,
@@ -117,7 +120,7 @@ export type {
   ScheduleWhen,
 } from "./jobs.ts";
 export { JOB_DEFAULTS, OP_JOB_KIND, OP_JOB_MAX_ATTEMPTS } from "./jobs.ts";
-// v0.1.23 (SDK-HV-1): dynamic hold view budget and the fallback line (SDK-API §4.6); v0.1.42: the catalog lookup budget (§4.8)
-export { HOLD_VIEW_BUDGET_MS, HOLD_VIEW_CATALOG_BUDGET_MS, HOLD_VIEW_UNREADABLE } from "./ops.ts";
+// v0.1.23 (SDK-HV-1): dynamic hold view budget and the fallback line (SDK-API §4.6)
+export { HOLD_VIEW_BUDGET_MS, HOLD_VIEW_UNREADABLE } from "./ops.ts";
 export { CSRF_HEADER, SESSION_COOKIE } from "./person.ts";
 export { TB_EXEC_CONTROL_PORT } from "./service-helper.ts";

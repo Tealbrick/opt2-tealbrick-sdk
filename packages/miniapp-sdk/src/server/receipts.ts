@@ -40,6 +40,19 @@ function callerContextSummaryOf(meta: unknown): string | undefined {
   }
 }
 
+/** v0.1.42 (C369): `HoldsPendingItem.tool` = the stored `meta.tool` when it is a tool name (`^[a-z][a-z0-9_]{1,62}$`); never other meta. */
+export const PENDING_TOOL_RE = /^[a-z][a-z0-9_]{1,62}$/;
+function pendingToolOf(meta: unknown): string | undefined {
+  if (typeof meta !== "string" || !meta.includes('"tool"')) return undefined;
+  try {
+    const m = JSON.parse(meta) as Json;
+    const t = m !== null && typeof m === "object" && !Array.isArray(m) ? m.tool : undefined;
+    return typeof t === "string" && PENDING_TOOL_RE.test(t) ? t : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** One pending hold (status `held`) as a summary row (tb.holds_pending): no input, view or meta. */
 export interface PendingHoldRow {
   id: string;
@@ -52,6 +65,8 @@ export interface PendingHoldRow {
   createdAt: number;
   /** v0.1.77 (C367 P4, SDK-API §18.6 item 6): the one-line summary of `meta.callerContext`, computed at read time; absent when the hold has none */
   callerContext?: string;
+  /** v0.1.42 (C369, spec 0.1.84 HoldsPendingItem.tool): the resolved dynamic tool name (`meta.tool`); absent for static ops. Never input. */
+  tool?: string;
 }
 
 export interface NewReceipt {
@@ -82,10 +97,25 @@ export interface NewReceipt {
 export interface HoldDetailsRow {
   receipt: Receipt;
   holdReason: string | null;
-  /** 'kept' | 'too_large'; 'none' for a hold written before sdk_receipt_hold_input */
-  inputState: "kept" | "too_large" | "none";
+  /** 'kept' | 'too_large' | 'unreadable' (boot reseal could not open it); 'none' for a hold written before sdk_receipt_hold_input */
+  inputState: "kept" | "too_large" | "unreadable" | "none";
   inputSealed: string | null;
   inputWipeAt: number | null;
+}
+
+/** QA-C369-4: `viewSha256` of the stored meta carried into a new meta (an object or null; another JSON shape is kept as is). */
+function withViewHash(next: Json, row: Row | undefined): Json {
+  let hash: unknown;
+  try {
+    const old = row ? (JSON.parse(String(row.meta)) as Json) : null;
+    hash = old !== null && typeof old === "object" && !Array.isArray(old) ? old.viewSha256 : undefined;
+  } catch {
+    hash = undefined;
+  }
+  if (typeof hash !== "string") return next;
+  if (next === null) return { viewSha256: hash };
+  if (typeof next !== "object" || Array.isArray(next)) return next;
+  return { ...next, viewSha256: hash };
 }
 
 /** Statuses after which a hold's input is kept 7 more days, then wiped (D4; a lapsed approval counts from its expiry). */
@@ -303,6 +333,7 @@ export class Receipts implements ReceiptStore {
       .all(...args, limit + 1) as Row[];
     const items = rows.slice(0, limit).map((r): PendingHoldRow => {
       const callerContext = callerContextSummaryOf(r.meta);
+      const tool = pendingToolOf(r.meta);
       return {
         id: String(r.id),
         op: String(r.op),
@@ -313,6 +344,7 @@ export class Receipts implements ReceiptStore {
         caller: callerOf(r),
         createdAt: Number(r.created_at),
         ...(callerContext !== undefined ? { callerContext } : {}),
+        ...(tool !== undefined ? { tool } : {}),
       };
     });
     const last = items.at(-1);
@@ -359,6 +391,8 @@ export class Receipts implements ReceiptStore {
   /** Terminal statuses drop the hold view (§4.1) and start the 7-day window of the kept input (v0.1.42, D4). */
   finish(id: string, status: ReceiptStatus, patch: { summary?: string; meta?: Json; consumed?: boolean; admittedBy?: AdmittedBy } = {}, now = Date.now()): void {
     const keepView = status === "held" || status === "approved";
+    // QA-C369-4: the hash of the view the owner approved stays in `meta` when the run or failure writes its own meta
+    if (patch.meta !== undefined) patch = { ...patch, meta: withViewHash(patch.meta, this.#db.prepare("SELECT meta FROM tb_receipts WHERE id = ?").get(id) as Row | undefined) };
     const wipeAt = TERMINAL_STATUSES.includes(status) ? now + HOLD_INPUT_KEEP_MS : null;
     this.#db
       .prepare(
@@ -407,7 +441,7 @@ export class Receipts implements ReceiptStore {
   holdDetailsRow(id: string): HoldDetailsRow | null {
     const r = this.#db.prepare("SELECT * FROM tb_receipts WHERE id = ? AND id LIKE 'hld\\_%' ESCAPE '\\'").get(id) as Row | undefined;
     if (!r) return null;
-    const state = r.input_state === "kept" || r.input_state === "too_large" ? r.input_state : "none";
+    const state = r.input_state === "kept" || r.input_state === "too_large" || r.input_state === "unreadable" ? r.input_state : "none";
     return {
       receipt: toReceipt(r, false),
       holdReason: typeof r.hold_reason === "string" ? r.hold_reason : null,
@@ -417,17 +451,34 @@ export class Receipts implements ReceiptStore {
     };
   }
 
-  /** v0.1.42 (C369 D4): KEK rotation (CREDENTIALS §9.1) — reseal kept hold inputs sealed under TB_KEK_PREVIOUS. Returns the count. */
-  resealHoldInputs(sealer: { stale(blob: string): boolean; sealText(p: string, id: string, t: string): string; unsealText(p: string, id: string, b: string): string }): number {
-    let n = 0;
+  /**
+   * v0.1.42 (C369 D4): KEK rotation (CREDENTIALS §9.1) — reseal kept hold inputs sealed under TB_KEK_PREVIOUS. Never throws
+   * (QA-C369-8): a blob that cannot be opened (its KEK is gone) is dropped and its state becomes `unreadable` (disposable data,
+   * 7 days at most). Returns the counts; the caller logs one line.
+   */
+  resealHoldInputs(sealer: { stale(blob: string): boolean; sealText(p: string, id: string, t: string): string; unsealText(p: string, id: string, b: string): string }): { resealed: number; unreadable: number } {
+    let resealed = 0;
+    let unreadable = 0;
     for (const r of this.#db.prepare("SELECT id, input_sealed FROM tb_receipts WHERE input_sealed IS NOT NULL").all() as Row[]) {
       const blob = String(r.input_sealed);
-      if (!sealer.stale(blob)) continue;
       const id = String(r.id);
-      this.#db.prepare("UPDATE tb_receipts SET input_sealed = ? WHERE id = ?").run(sealer.sealText(HOLD_INPUT_PURPOSE, id, sealer.unsealText(HOLD_INPUT_PURPOSE, id, blob)), id);
-      n += 1;
+      let stale: boolean;
+      try {
+        stale = sealer.stale(blob);
+        if (!stale) sealer.unsealText(HOLD_INPUT_PURPOSE, id, blob);
+      } catch {
+        stale = true;
+      }
+      if (!stale) continue;
+      try {
+        this.#db.prepare("UPDATE tb_receipts SET input_sealed = ? WHERE id = ?").run(sealer.sealText(HOLD_INPUT_PURPOSE, id, sealer.unsealText(HOLD_INPUT_PURPOSE, id, blob)), id);
+        resealed += 1;
+      } catch {
+        this.#db.prepare("UPDATE tb_receipts SET input_sealed = NULL, input_state = 'unreadable' WHERE id = ?").run(id);
+        unreadable += 1;
+      }
     }
-    return n;
+    return { resealed, unreadable };
   }
 
   byCall(callId: string): Receipt | null {

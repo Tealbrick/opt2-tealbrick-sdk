@@ -468,8 +468,9 @@ async function runExport(ctx: BackupContext, db: RawDb): Promise<{ file: string;
       // SPEC-GAP: §7.3 names "one JSONL file per app table" beside receipts.jsonl/audit.jsonl; app tables live under
       // tables/ so an app table called `receipts` or `audit` cannot collide with them.
       for (const t of tables) await dump(`tables/${encodeURIComponent(t.name)}.jsonl`, `SELECT * FROM ${quoteIdent(t.name)}`);
-      // v0.1.42 (C369 D4): the sealed input kept with a hold (`input_sealed`) never leaves in the export (a sealed blob is useless there)
-      await dump("receipts.jsonl", "SELECT * FROM tb_receipts ORDER BY created_at, id", ["input_sealed"]);
+      // v0.1.42 (C369 D4, QA-C369-2): neither the sealed input kept with a hold (`input_sealed`) nor the hold `view` (it shows the
+      // input) leaves in the export; `meta.viewSha256` stays
+      await dump("receipts.jsonl", "SELECT * FROM tb_receipts ORDER BY created_at, id", ["input_sealed", "view"]);
       await dump("audit.jsonl", "SELECT * FROM tb_audit ORDER BY at, id");
       // v0.1.26 (OD-3): the manifest `backups.files` paths travel under files/<volume>/<path> with a files.json index
       // [{path, volume, bytes, sha256}] (additive: an app without backups.files gets exactly the archive it had before).

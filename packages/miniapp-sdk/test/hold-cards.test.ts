@@ -17,18 +17,23 @@ import {
   HOLD_INPUT_KEEP_MS,
   HOLD_INPUT_MAX_BYTES,
   HOLD_INPUT_REDACTED,
+  HOLD_SECRET_KEY_PARTS,
+  HOLD_SECRET_KEY_WORDS,
+  HOLD_VIEW_HIDDEN,
   HOLD_VIEW_LIMITS,
   HOLD_VIEW_MAX_CHARS,
   type HoldDetails,
+  holdViewElidedLine,
   isSecretKey,
   keptHoldInput,
   redactHoldInput,
   renderHoldView,
 } from "../src/server/hold-view.ts";
-import { decideHold, defineApp, startApp } from "../src/server/index.ts";
+import { decideHold, defineApp, type JobsApi, type SdkOpContext, startApp } from "../src/server/index.ts";
 import { holdDetails } from "../src/server/ops.ts";
-import type { Receipts } from "../src/server/receipts.ts";
+import { type Receipts, Receipts as ReceiptsImpl } from "../src/server/receipts.ts";
 import type { Runtime } from "../src/server/runtime.ts";
+import { applySdkMigrations, openDb } from "../src/server/store.ts";
 import { bufferSink, readTarGz } from "../src/server/tar.ts";
 import { fixtureManifest } from "./fixtures/manifest.ts";
 import { callProof, FakeBridge, freePort, grant, migrationsDir, nowS, slice, tempDir, testRoots, ticket, until, type World, world } from "./helpers.ts";
@@ -38,10 +43,11 @@ import { callProof, FakeBridge, freePort, grant, migrationsDir, nowS, slice, tem
 interface Case {
   name: string;
   note: string;
-  dynamic?: { opTitle: string; tool: string; entryTitle: string | null };
+  dynamic?: { opTitle: string; tool: string };
   title: string;
   schema: Json;
   input: Json;
+  recipients?: Json;
   view: string;
   summary: string;
 }
@@ -55,8 +61,8 @@ describe("C369 D1 default hold view: the spec fixture", () => {
   });
   for (const c of fx.cases) {
     test(`row ${c.name}: ${c.note}`, () => {
-      if (c.dynamic) assert.equal(dynamicHoldTitle(c.dynamic.opTitle, c.dynamic.tool, c.dynamic.entryTitle), c.title, "line 1 of a dynamic op");
-      const out = renderHoldView(c.title, c.input, c.schema);
+      if (c.dynamic) assert.equal(dynamicHoldTitle(c.dynamic.opTitle, c.dynamic.tool), c.title, "line 1 of a dynamic op");
+      const out = renderHoldView(c.title, c.input, c.schema, c.recipients);
       assert.equal(out.view, c.view);
       assert.equal(out.summary, c.summary);
       assert.ok(out.view.length <= HOLD_VIEW_MAX_CHARS);
@@ -68,16 +74,46 @@ describe("C369 D1 default hold view: the spec fixture", () => {
     const b = renderHoldView("T", { a: "z", b: { x: [1, 2], y: 1 } }, null);
     assert.equal(a.view, b.view);
   });
+  test("QA-C369-1: anything not shown → line 2 is the fixed warning with the count; nothing elided → no warning line", () => {
+    const rows = fx.cases.filter((c) => c.view.split("\n")[1]?.startsWith("Not every field is shown ("));
+    assert.ok(rows.length >= 5, rows.map((r) => r.name).join(","));
+    for (const r of rows) assert.match(r.view.split("\n")[1] as string, /^Not every field is shown \([0-9,]+ more\)\. Open More details before you approve\.$/);
+    assert.equal(holdViewElidedLine(1234), "Not every field is shown (1,234 more). Open More details before you approve.");
+    assert.ok(!renderHoldView("T", { a: 1 }, null).view.includes("Not every field"));
+    // the attack row: recipients places first, so the recipient is on the card although the cap drops lines
+    const atk = fx.cases.find((c) => c.name === "elision_cap_recipients_first") as Case;
+    assert.deepEqual(atk.view.split("\n").slice(0, 4), ["Send mail", holdViewElidedLine(25), "To: attacker@evil.example", "Bcc: boss@evil.example"]);
+  });
+  test("QA-C369-2: a value under a secret key is (hidden) in the view, never its text", () => {
+    const v = renderHoldView("T", { api_key: "sk-live-1", nested: { clientSecret: { a: "deep-secret" } }, to: "b@example.com" }, null).view;
+    assert.ok(v.includes(`Api key: ${HOLD_VIEW_HIDDEN}`) && v.includes(`Nested › Client secret: ${HOLD_VIEW_HIDDEN}`));
+    assert.ok(!v.includes("sk-live-1") && !v.includes("deep-secret"));
+  });
 });
 
 describe("C369 D4 kept input: redaction and the 60 000-byte cap", () => {
-  test("secret keys by word: api_key, apiKey, accessToken, Authorization, session_cookie; not keyword or monkey", () => {
-    for (const k of ["api_key", "apiKey", "APIKEY", "accessToken", "Authorization", "session_cookie", "client-secret", "password", "x.credentials"]) assert.ok(isSecretKey(k), k);
-    for (const k of ["keyword", "monkey", "tokenizer_mode", "to", "subject", "keys_count"]) assert.ok(!isSecretKey(k), k);
+  test("QA-C369-6 secret-key rule: the folded key contains a part, or a word equals auth/pwd/otp/pin/sig/signature", () => {
+    assert.deepEqual([...HOLD_SECRET_KEY_PARTS], ["token", "secret", "password", "passwd", "passphrase", "apikey", "authorization", "cookie", "credential", "bearer", "jwt", "privatekey", "clientsecret"]);
+    assert.deepEqual([...HOLD_SECRET_KEY_WORDS], ["auth", "pwd", "otp", "pin", "sig", "signature"]);
+    const secret = ["api_key", "apiKey", "APIKEY", "x-api-key", "accessToken", "ACCESSTOKEN", "accesstoken", "Authorization", "session_cookie", "Set-Cookie", "client-secret", "clientSecret", "password", "passwords", "x.credentials", "secrets", "tokens", "privateKey", "private_key", "SECRETKEY", "bearerToken", "jwt", "auth", "x-auth", "auth_header", "pwd", "otp", "pin", "pin_code", "sig", "Signature", "pass_phrase", "passPhrase", "refresh_token", "tokenizer_mode"];
+    const plain = ["keyword", "monkey", "to", "subject", "keys_count", "issue_key", "author", "authority", "pinned", "design", "signal", "otpx", "spin"];
+    for (const k of secret) assert.ok(isSecretKey(k), k);
+    for (const k of plain) assert.ok(!isSecretKey(k), k);
+    // only ASCII case folding: U+212A KELVIN SIGN + "ey" never folds to "key"; U+0130 + "n" is not "pin"
+    assert.ok(!isSecretKey(`${String.fromCodePoint(0x212a)}eyword`));
+    assert.ok(!isSecretKey(`p${String.fromCodePoint(0x130)}n`));
+  });
+  test("QA-C369-3: `__proto__` members stay data in the kept input (null-prototype objects), at any depth", () => {
+    const input = JSON.parse('{"to":"x","__proto__":{"bcc":"e","token":"t"},"n":{"__proto__":"s"},"l":[{"__proto__":1}]}') as Json;
+    const out = redactHoldInput(input) as Record<string, any>;
+    assert.equal(Object.getPrototypeOf(out), null);
+    assert.ok(Object.hasOwn(out, "__proto__"));
+    assert.equal(canonicalize(out), '{"__proto__":{"bcc":"e","token":"[redacted]"},"l":[{"__proto__":1}],"n":{"__proto__":"s"},"to":"x"}');
+    assert.equal(keptHoldInput(input, canonicalize), canonicalize(out));
   });
   test("every member under a secret key is replaced at every depth; other values stay", () => {
     const input: Json = { to: "bob@example.com", api_key: "sk-live-1", nested: { accessToken: { a: 1 }, list: [{ password: "p", ok: true }] } };
-    assert.deepEqual(redactHoldInput(input), { to: "bob@example.com", api_key: HOLD_INPUT_REDACTED, nested: { accessToken: HOLD_INPUT_REDACTED, list: [{ password: HOLD_INPUT_REDACTED, ok: true }] } });
+    assert.deepEqual(JSON.parse(JSON.stringify(redactHoldInput(input))), { to: "bob@example.com", api_key: HOLD_INPUT_REDACTED, nested: { accessToken: HOLD_INPUT_REDACTED, list: [{ password: HOLD_INPUT_REDACTED, ok: true }] } });
   });
   test("the kept text is the JCS text of the redacted input; more than 60 000 UTF-8 bytes → not kept", () => {
     assert.equal(keptHoldInput({ b: 1, a: "x" }, canonicalize), '{"a":"x","b":1}');
@@ -99,6 +135,57 @@ describe("C369 D4 tb.hold_details owner check (fire-on-bad, unit)", () => {
     refused({ ...owner, type: "agent" });
     refused({ ...owner, type: "app" });
     refused(null);
+  });
+});
+
+describe("QA-C369-8 boot reseal of kept hold inputs never throws", () => {
+  test("stale blob → resealed under the current KEK; a blob no KEK opens → dropped, inputState unreadable; counts returned", () => {
+    const t = tempDir();
+    try {
+      const db = openDb(t.dir);
+      applySdkMigrations(db);
+      const receipts = new ReceiptsImpl(db);
+      // a fake sealer: "cur:" = current KEK, "old:" = TB_KEK_PREVIOUS, "lost:" = a KEK that is gone
+      const sealer = {
+        stale: (blob: string) => blob.startsWith("old:"),
+        sealText: (_p: string, _id: string, text: string) => `cur:${text}`,
+        unsealText: (_p: string, _id: string, blob: string) => {
+          if (blob.startsWith("cur:") || blob.startsWith("old:")) return blob.slice(4);
+          throw new Error("unseal_failed");
+        },
+      };
+      const hold = (prefix: string) =>
+        receipts.insert({
+          kind: "hld",
+          callId: null,
+          caller: { type: "agent", id: "agt_1" as never, name: "A" },
+          op: "mail_send",
+          effect: "outward",
+          holdFamily: "outward",
+          status: "held",
+          inputDigest: "sha256:x" as never,
+          summary: "s",
+          meta: null,
+          idempotencyKey: null,
+          view: "v",
+          expiresAt: Date.now() + 60_000,
+          heldInput: { state: "kept", seal: () => `${prefix}{"a":1}` },
+        }).id;
+      const ok = hold("cur:");
+      const stale = hold("old:");
+      const lost = hold("lost:");
+      assert.deepEqual(receipts.resealHoldInputs(sealer), { resealed: 1, unreadable: 1 });
+      assert.equal(receipts.holdDetailsRow(ok)?.inputSealed, 'cur:{"a":1}');
+      assert.equal(receipts.holdDetailsRow(stale)?.inputSealed, 'cur:{"a":1}', "resealed under the current KEK");
+      const gone = receipts.holdDetailsRow(lost);
+      assert.equal(gone?.inputSealed, null);
+      assert.equal(gone?.inputState, "unreadable");
+      // a second boot changes nothing and still never throws
+      assert.deepEqual(receipts.resealHoldInputs(sealer), { resealed: 0, unreadable: 0 });
+      db.close();
+    } finally {
+      t.cleanup();
+    }
   });
 });
 
@@ -140,11 +227,23 @@ const shareOp = {
   audience: "agent",
 } as unknown as Operation;
 
+const toolsOp = {
+  id: "tools",
+  title: "Connected tools",
+  description: "Call connected tools (test op, no app holdView).",
+  crud: ["read"],
+  effect: "read",
+  idempotency: "supported",
+  receipt: false,
+  audience: "agent",
+  dynamic: { mode: "search", crudCeiling: ["read", "create", "update"], effectCeiling: "outward" },
+} as unknown as Operation;
+
 interface Booted {
   w: World;
   base: string;
   dataDir: string;
-  running: RunningApp;
+  running: RunningApp & { jobs: JobsApi };
   cleanup(): Promise<void>;
 }
 
@@ -155,7 +254,7 @@ async function boot(): Promise<Booted> {
   const bridge = new FakeBridge(w);
   const bridgeUrl = await bridge.start(await slice(w, PRODUCT, { companionCallers: [{ product: "evolution", ins: INS_APP, name: "Evolution" }] }));
   const manifest = fixtureManifest(port);
-  manifest.operations.push(sendOp, shareOp);
+  manifest.operations.push(sendOp, shareOp, toolsOp);
   const count = (id: string) => {
     ran[id] = (ran[id] ?? 0) + 1;
   };
@@ -165,7 +264,13 @@ async function boot(): Promise<Booted> {
     migrations: migrationsDir(t.dir),
     handlers: {
       note_create: { scope: (input) => String((input as { notebook: string }).notebook), run: noop },
-      note_get: noop,
+      // the scheduling op (S3-9): `{ id, share }` schedules doc_share { doc: share } in 150 ms
+      note_get: async (input, c) => {
+        const i = input as { id: string; share?: string };
+        if (!i.share) return {} as Json;
+        const job = (c as SdkOpContext).schedule({ op: "doc_share", input: { doc: i.share } }, { at: Date.now() + 150 });
+        return { job: job.id };
+      },
       note_delete: noop,
       notebook_rename: noop,
       mail_send: async () => {
@@ -181,6 +286,17 @@ async function boot(): Promise<Booted> {
         holdView: (input) => `Share ${(input as { doc: string }).doc} as "${share.label}"`,
       },
     },
+    // a dynamic op without holdView whose resolution names recipient places (C373 shape): the default view shows them first
+    dynamic: {
+      tools: {
+        catalog: async () => [],
+        resolve: async (tool) => (tool === "mail_out" ? ({ tool, crud: ["create"], effect: "outward", holdFamily: "outward", recipients: [{ pointer: "/to", kind: "email" }] } as never) : null),
+        call: async () => {
+          count("tools");
+          return { sent: true };
+        },
+      },
+    },
   });
   const running = await startApp(
     app,
@@ -193,7 +309,7 @@ async function boot(): Promise<Booted> {
       TB_DATA_EPHEMERAL: "1",
       TB_LOG_LEVEL: "error",
     },
-    testRoots(w),
+    { ...testRoots(w), jobs: { pollMs: 40, drainMs: 300 } },
   ).catch(async (e) => {
     await bridge.stop();
     t.cleanup();
@@ -285,7 +401,8 @@ describe("C369 hold cards on a running app (D1–D4)", () => {
     assert.equal(r.status, 202, r.text);
     const id = body(r).holdId as string;
     const row = dbRow(b, id);
-    assert.equal(row.view, `Send mail\nApi key: sk-live-SECRET-77\nSubject: ${SUBJECT}\nRecipient: bob@example.com`);
+    // QA-C369-2: the secret value is (hidden) on the card and in the stored view
+    assert.equal(row.view, `Send mail\nApi key: ${HOLD_VIEW_HIDDEN}\nSubject: ${SUBJECT}\nRecipient: bob@example.com`);
     const meta = JSON.parse(String(row.meta)) as Record<string, unknown>;
     assert.match(String(meta.viewSha256), /^sha256:[0-9a-f]{64}$/);
     assert.equal(row.summary, "Send mail", "no input in the receipt summary (tb.holds_pending, C90)");
@@ -449,7 +566,69 @@ describe("C369 hold cards on a running app (D1–D4)", () => {
     assert.equal(ran.mail_send ?? 0, before);
   });
 
-  test("D4: the export never carries the sealed input column", async () => {
+  test("QA-C369-4: viewSha256 stays in meta after the approved repeat runs (and in tb.hold_details)", async () => {
+    const input = { ...mail, to: "jo@example.com" };
+    const id = body(await agentCall(b, "mail_send", input)).holdId as string;
+    const hash = JSON.parse(String(dbRow(b, id).meta)).viewSha256 as string;
+    await approve(b, id);
+    assert.equal((await agentCall(b, "mail_send", input)).status, 200);
+    assert.equal(dbRow(b, id).status, "run");
+    assert.equal(JSON.parse(String(dbRow(b, id).meta)).viewSha256, hash);
+    assert.equal((body(await personOp(b, s, HOLD_DETAILS_OP, { holdId: id })).output as HoldDetails).viewSha256, hash);
+  });
+
+  test("QA-C369-3: a `__proto__` member is held like any member (no 500) and stays in tb.hold_details", async () => {
+    const input = JSON.parse('{"to":"kim@example.com","subject":"p","__proto__":{"bcc":"e@example.com"}}') as Json;
+    const r = await agentCall(b, "mail_send", input);
+    assert.equal(r.status, 202, r.text);
+    const id = body(r).holdId as string;
+    assert.ok(String(dbRow(b, id).view).includes("Proto › Bcc: e@example.com"));
+    const d = body(await personOp(b, s, HOLD_DETAILS_OP, { holdId: id })).output as HoldDetails;
+    assert.ok(d.input !== null && Object.hasOwn(d.input as object, "__proto__"));
+    assert.deepEqual(Object.getOwnPropertyDescriptor(d.input as object, "__proto__")?.value, { bcc: "e@example.com" });
+  });
+
+  test("dynamic default view: line 1 `<op title>: <tool>`, the resolution's recipient places first; tb.holds_pending rows name the tool (static rows do not)", async () => {
+    const r = await agentCall(b, "tools", { tool: "mail_out", arguments: { body: "Hi", to: "lee@example.com" } });
+    assert.equal(r.status, 202, r.text);
+    const id = body(r).holdId as string;
+    assert.equal(dbRow(b, id).view, "Connected tools: mail_out\nTo: lee@example.com\nBody: Hi");
+    const g = await grant(b.w, b.w.agents.a, { held: ["outward"] });
+    const pend = await agentCall(b, "tb.holds_pending", { limit: 100 }, g);
+    assert.equal(pend.status, 200, pend.text);
+    const items = body(pend).output.items as Record<string, unknown>[];
+    assert.equal(items.find((i) => i.id === id)?.tool, "mail_out");
+    const statics = items.filter((i) => i.op === "mail_send");
+    assert.ok(statics.length > 0 && statics.every((i) => !("tool" in i)));
+    assert.ok(!pend.text.includes("lee@example.com"), "no input in tb.holds_pending (C90)");
+  });
+
+  test("S3-9: a scheduled op whose own approved hold no longer shows the same view ends refused / hold_view_changed; the handler never runs", async () => {
+    share.label = "Sched v1";
+    const before = ran.doc_share ?? 0;
+    const sch = await agentCall(b, "note_get", { id: "x", share: "s9" });
+    assert.equal(sch.status, 200, sch.text);
+    const jobId = body(sch).output.job as string;
+    const waiting = await until(async () => {
+      const j = b.running.jobs.get(jobId);
+      return j?.status === "waiting" && j.holdId ? j : null;
+    });
+    const hid = waiting.holdId as string;
+    assert.equal(dbRow(b, hid).view, 'Share s9 as "Sched v1"');
+    assert.match(String(JSON.parse(String(dbRow(b, hid).meta)).viewSha256), /^sha256:/);
+    share.label = "Sched v2 (changed)";
+    await approve(b, hid);
+    const done = await until(async () => {
+      const j = b.running.jobs.get(jobId);
+      return j && j.status !== "waiting" && j.status !== "queued" ? j : null;
+    });
+    assert.equal(done.status, "refused");
+    assert.equal(done.lastError, "hold_view_changed");
+    assert.equal(ran.doc_share ?? 0, before);
+  });
+
+  test("D4 + QA-C369-2: the export carries neither the sealed input nor the view; meta.viewSha256 stays", async () => {
+
     const ex = await b.running.backups.exportNow();
     for await (const _ of ex.stream) void _;
     const files = new Map<string, Buffer>();
@@ -457,7 +636,13 @@ describe("C369 hold cards on a running app (D1–D4)", () => {
     await readTarGz(join(b.dataDir, "backup", ex.file), async (e) => bufferSink(64 * 1024 * 1024, (buf) => files.set(e.name, buf)));
     const lines = (files.get("receipts.jsonl")?.toString() ?? "").split("\n").filter(Boolean);
     assert.ok(lines.length > 0);
-    for (const l of lines) assert.ok(!("input_sealed" in (JSON.parse(l) as Record<string, unknown>)), "no input_sealed key");
+    for (const l of lines) {
+      const row = JSON.parse(l) as Record<string, unknown>;
+      assert.ok(!("input_sealed" in row), "no input_sealed key");
+      assert.ok(!("view" in row), "no view key");
+    }
+    assert.ok(!lines.join("").includes(SUBJECT), "no input text of a hold");
+    assert.ok(lines.some((l) => String((JSON.parse(l) as { meta?: string }).meta).includes("viewSha256")));
     assert.ok(lines.some((l) => "input_state" in (JSON.parse(l) as Record<string, unknown>)));
   });
 });
