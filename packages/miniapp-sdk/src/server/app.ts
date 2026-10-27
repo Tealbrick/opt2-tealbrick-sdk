@@ -19,11 +19,11 @@ import { readEnv, type SdkConfig } from "./env.ts";
 import { TbError } from "./errors.ts";
 import { EventOutbox } from "./events.ts";
 import { startFailedMode } from "./failed.ts";
-import { JOB_KIND_RE, JobRunner, type JobsApi, jobsView, RUNNER_DEFAULTS, sealGrant } from "./jobs.ts";
+import { JOB_KIND_RE, JobRunner, type JobsApi, jobsView, RUNNER_DEFAULTS, sealGrant, unsealGrant } from "./jobs.ts";
 import { createKeys } from "./keys.ts";
 import { BridgeLink } from "./link.ts";
 import { createLogger, SecretRegistry } from "./log.ts";
-import { decide, fireScheduledOp } from "./ops.ts";
+import { callAppOpts, decide, fireScheduledOp, workflowOfGrant } from "./ops.ts";
 import { createPersonAuth } from "./person.ts";
 import { dropPrivileges, type PrivilegeProc } from "./privilege.ts";
 import { Receipts } from "./receipts.ts";
@@ -32,6 +32,7 @@ import { createScopeStore } from "./scopes.ts";
 import { createSealer, loadInstanceKey, resolveKeks, type Sealer } from "./secrets.ts";
 import { createHttpServer } from "./server.ts";
 import { createServiceHelperCaller } from "./service-helper.ts";
+import type { WorkflowGrantsApi } from "./spec-p1.temp.ts";
 import { AttentionReader, PendingCounter, pickAttention, StatusPusher } from "./status.ts";
 import {
   type AppliedMigration,
@@ -52,6 +53,7 @@ import {
 } from "./store.ts";
 import { TrustState } from "./trust.ts";
 import { type BootFailure, type BootPhase, bootFailure, type Clock, META, MigrationLock, type PreUpdateSnapshot, readUpgradeMeta, realClock, recordBoot } from "./upgrade.ts";
+import { workflowGrantsWithoutBridge } from "./workflow-grants.ts";
 
 export const SDK_VERSION: string = (JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version: string }).version;
 /**
@@ -438,7 +440,13 @@ export async function startApp(
   // v0.1.13 (C85/C86): callApp without parentCall (app-initiated), statusChanged and ownerLink outside op handlers
   const appCallApp: StartContext["callApp"] = (product, op, input, opts) => {
     if (!link) return Promise.reject(new TbError("no_bridge", "companion calls need the bridge", 503));
-    return link.call(product, op, input, { ...(opts?.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}), ...(opts?.context !== undefined ? { context: opts.context } : {}), parentCall: null });
+    return link.call(product, op, input, callAppOpts(opts, null));
+  };
+  // v0.1.42 (spec 0.1.82, C373 P1, SDK-API §22): `ctx.workflowGrants` on every ctx; the link owns the cache (memory only)
+  const workflowGrants: WorkflowGrantsApi = {
+    request: (body) => (link ? link.workflowGrants.api().request(body) : workflowGrantsWithoutBridge({ trust }).request(body)),
+    status: (wfl) => (link ? link.workflowGrants.api().status(wfl) : workflowGrantsWithoutBridge({ trust }).status(wfl)),
+    release: (wfl) => (link ? link.workflowGrants.api().release(wfl) : workflowGrantsWithoutBridge({ trust }).release(wfl)),
   };
   /** v0.1.13 (C86) ownerLink / v0.1.20 ownerLinkFor: ONE builder; the path passes the shared launch-path rule (L1). */
   const ownerLinkFor = (product: string, path: string): string | null => {
@@ -467,6 +475,7 @@ export async function startApp(
     log,
     scopes,
     callApp: appCallApp,
+    workflowGrants,
     statusChanged,
     ownerLink,
     companionTargets,
@@ -557,7 +566,15 @@ export async function startApp(
     noteGrant(callerId, token, iat) {
       try {
         const store = jobRunner().store;
-        if (store.hasPendingOps(callerId, iat)) store.refreshGrant(callerId, sealGrant(rt, callerId, token), iat);
+        if (!store.hasPendingOps(callerId, iat)) return;
+        // v0.1.42 (spec 0.1.82, C373 P1): a newer grant replaces only stored grants of the SAME workflow identity (`wfl`, or none): a
+        // workflow grant never widens a base-grant op or another workflow's op, and a base grant never replaces a workflow grant
+        const wfl = workflowOfGrant(token);
+        const ids = store
+          .pendingOpGrants(callerId, iat)
+          .filter((r) => (r.sealed === null ? undefined : workflowOfGrant(unsealGrant(rt, callerId, r.sealed))) === wfl)
+          .map((r) => r.id);
+        if (ids.length) store.refreshGrantRows(ids, sealGrant(rt, callerId, token), iat);
       } catch (e) {
         log.warn("job grant refresh failed", { error: e instanceof Error ? e.message : "unknown" });
       }
@@ -658,6 +675,7 @@ export async function startApp(
       if (!link) throw new TbError("no_bridge", "companion calls need the bridge", 503);
       return link.call(product, op, input, opts);
     },
+    workflowGrants,
     callServiceHelper: helper,
   };
 

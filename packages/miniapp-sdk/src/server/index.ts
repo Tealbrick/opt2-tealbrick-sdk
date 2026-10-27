@@ -80,6 +80,7 @@ export type {
   SdkPublicContext,
   StartContext,
   StopContext,
+  WorkflowGrantsView,
 } from "./context.ts";
 export { requireViewUrl, TbError, VIEW_ORIGIN_MISSING, viewOriginMissing } from "./errors.ts";
 // v0.1.21 (Scribe R1, SDK-1/SDK-2, RUL-11): the job runner
@@ -103,3 +104,5 @@ export { JOB_DEFAULTS, OP_JOB_KIND, OP_JOB_MAX_ATTEMPTS } from "./jobs.ts";
 export { HOLD_VIEW_BUDGET_MS, HOLD_VIEW_UNREADABLE } from "./ops.ts";
 export { CSRF_HEADER, SESSION_COOKIE } from "./person.ts";
 export { TB_EXEC_CONTROL_PORT } from "./service-helper.ts";
+// v0.1.42 (spec 0.1.82, C373 P1, SDK-API §22). TEMP until spec 0.1.82 pin: then `CallAppOptions` / `Caller` / `WorkflowGrantsApi` come from the spec
+export type { CallAppOptionsP1, CallerP1, WorkflowGrantsApi } from "./spec-p1.temp.ts";

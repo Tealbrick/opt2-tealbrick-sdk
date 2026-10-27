@@ -33,6 +33,7 @@ import { type ClaimedJob, jobsView, type OpFireOutcome, unsealGrant } from "./jo
 import { HOLD_TTL_MS, type NewReceipt, type Receipts } from "./receipts.ts";
 import type { Runtime } from "./runtime.ts";
 import { scopeGrantOps } from "./scopes.ts";
+import type { CallAppOptionsP1, CallerP1 } from "./spec-p1.temp.ts";
 import { resolveCallerProduct } from "./trust.ts";
 
 export const OP_TIMEOUT_MS = 30_000;
@@ -147,6 +148,27 @@ export function receiptHelpers(): { helpers: OpContext["receipt"]; summary: stri
   };
 }
 
+/** v0.1.42 (spec 0.1.82, C373 P1): the `wfl` of a grant token (unverified peek; the caller verified it), undefined for a base grant. */
+export function workflowOfGrant(token: string): string | undefined {
+  const w = peekClaims(token)?.wfl;
+  return typeof w === "string" ? w : undefined;
+}
+/** v0.1.42 (spec 0.1.82, C373 P1, SDK-API §22 item 7): `Caller.workflow` = the VERIFIED `wfl` of an app caller's grant; nothing otherwise. */
+export function callerWorkflowOf(type: Caller["type"], claims: object): { workflow?: string } {
+  const w = (claims as { wfl?: unknown }).wfl;
+  return type === "app" && typeof w === "string" ? { workflow: w } : {};
+}
+
+/** `ctx.callApp` options → runtime options (one mapping for every ctx). v0.1.42 (C373 P1): `workflow` passes through as given (link.ts checks it). */
+export function callAppOpts(opts: CallAppOptionsP1 | undefined, parentCall: string | null): { idempotencyKey?: string; context?: Record<string, Json>; workflow?: string; parentCall: string | null } {
+  return {
+    ...(opts?.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}),
+    ...(opts?.context !== undefined ? { context: opts.context } : {}),
+    ...(opts?.workflow !== undefined ? { workflow: opts.workflow } : {}),
+    parentCall,
+  };
+}
+
 /**
  * v0.1.77 (C367 P4, SDK-API §18.6 item 5): `meta.callerContext` of the receipts of an APP call = the final op `context` keys under
  * `<verified caller product>.` (the product comes from the verified grant / slice, never from the body); undefined for an agent or person
@@ -199,6 +221,24 @@ export function receiptMetaWithContext(rt: Pick<Runtime, "log">, meta: Json, cur
   return merged;
 }
 
+/**
+ * v0.1.42 (spec 0.1.82, C373 P1, SDK-API §22 item 7): receipt `meta.callerWorkflow` = the verified `wfl` of an app caller's workflow grant.
+ * Written by the SDK only: a `callerWorkflow` key from `ctx.receipt.meta()` is removed. An approved repeat keeps the HOLD's value (the
+ * owner approved that call); a hold without one takes this call's. Not part of the approval match or the idempotency key.
+ */
+export function withCallerWorkflow(meta: Json, workflow: string | undefined, held: Pick<Receipt, "meta"> | null = null): Json {
+  const heldWf = held && isObj(held.meta) && typeof held.meta.callerWorkflow === "string" ? held.meta.callerWorkflow : undefined;
+  const wf = heldWf ?? workflow;
+  if (meta === null || meta === undefined) return wf !== undefined ? { callerWorkflow: wf } : (meta ?? null);
+  if (!isObj(meta)) return meta;
+  const { callerWorkflow: _appSet, ...rest } = meta as Record<string, Json>;
+  return wf !== undefined ? { ...rest, callerWorkflow: wf } : "callerWorkflow" in meta ? rest : meta;
+}
+/** The receipt meta of a live call: caller context (P4) + caller workflow (P1). */
+export function receiptMetaFor(rt: Pick<Runtime, "log">, meta: Json, current: Record<string, Json> | undefined, workflow: string | undefined, held: Pick<Receipt, "meta"> | null = null): Json {
+  return withCallerWorkflow(receiptMetaWithContext(rt, meta, current, held), workflow, held);
+}
+
 export function buildContext(
   rt: Runtime,
   op: OperationView,
@@ -226,7 +266,9 @@ export function buildContext(
     receipt,
     getKey: (name) => rt.keys.getKey(name),
     modelRole: (role) => rt.keys.modelRole(role),
-    callApp: (product, opId, input, opts) => rt.callApp(product, opId, input, { idempotencyKey: opts?.idempotencyKey, ...(opts?.context !== undefined ? { context: opts.context } : {}), parentCall: callId }),
+    callApp: (product, opId, input, opts) => rt.callApp(product, opId, input, callAppOpts(opts, callId)),
+    // v0.1.42 (spec 0.1.82, C373 P1, SDK-API §22)
+    workflowGrants: rt.workflowGrants,
     callServiceHelper: (serviceId, path, body) => rt.callServiceHelper(serviceId, path, body),
     db: rt.appDb,
     log: rt.log,
@@ -604,7 +646,7 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
     if (op.audience !== "agent") throw new TbError("audience_not_agent", "operation is not agent-audience", 403);
     const callerId = g.caller.id as AgentId | InstanceId;
     const sliceAgent = g.caller.type === "agent" ? rt.trust.agent(callerId) : undefined;
-    const caller: Caller = {
+    const caller: CallerP1 = {
       type: g.caller.type,
       id: callerId,
       // v0.1.14 (C102): app callers are named from slice companionCallers (verified grant sub), fallback the instance id
@@ -613,6 +655,8 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       // v0.1.28 (GRANT-PRD): app callers only; grant `prd` first, then the slice companionCallers entry of the verified `ins`
       // (v0.1.27 SDK-CALLER-PRODUCT). Never derived from the name. One helper: resolveCallerProduct.
       ...cp.caller,
+      // v0.1.42 (spec 0.1.82, C373 P1): the verified `wfl` of a workflow grant (app callers only)
+      ...callerWorkflowOf(g.caller.type, g.claims),
     };
     const callId = proof.claims.call;
     // v0.1.22 (SDK-05, fail closed): an agent that is not in the verified slice is refused — no invented agent record,
@@ -749,14 +793,14 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       const meta0: Json = dyn ? { tool: dyn.tool } : null;
 
       if (decision.decision === "refuse") {
-        rt.receipts.insert({ ...base, kind: "rcp", holdFamily: null, status: "refused", summary: clampSummary(op.title), meta: receiptMetaWithContext(rt, { reason: decision.reason }, callerCtx) });
+        rt.receipts.insert({ ...base, kind: "rcp", holdFamily: null, status: "refused", summary: clampSummary(op.title), meta: receiptMetaFor(rt, { reason: decision.reason }, callerCtx, caller.workflow) });
         throw new TbError(decision.reason, `refused: ${decision.reason}`, grantFailStatus(decision.reason));
       }
       if (decision.decision === "hold") {
         // v0.1.23 (SDK-HV-1): a dynamic op with holdView → the app's view of the upstream content (time-boxed, never blocks)
         if (dyn && !heldText) heldText = await dynamicHoldText(rt, op, body.input, dyn, viewCtx);
         const holdMeta: Json = heldText && dyn ? { tool: dyn.tool, viewSha256: heldText.viewSha256 } : meta0;
-        const hold = createHold(rt, base, spec, op, body.input, decision, decision.reason === DECISION_REASON.heldByHook ? (proof.claims.hv?.r ?? null) : null, receiptMetaWithContext(rt, holdMeta, callerCtx), Date.now(), heldText);
+        const hold = createHold(rt, base, spec, op, body.input, decision, decision.reason === DECISION_REASON.heldByHook ? (proof.claims.hv?.r ?? null) : null, receiptMetaFor(rt, holdMeta, callerCtx, caller.workflow), Date.now(), heldText);
         idem?.held(hold.id);
         rt.statusChanged();
         return sendJson(res, 202, { status: "held", holdId: hold.id, expiresAt: iso(hold.expiresAt ?? now2 + HOLD_TTL_MS) } satisfies OpResult);
@@ -794,8 +838,8 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       } catch (e) {
         const err = toTbError(e, rt);
         const meta = rh.meta ?? meta0;
-        if (approved) rt.receipts.finish(approved.id, "failed", { meta: receiptMetaWithContext(rt, meta, callerCtx, approved), ...admit });
-        else if (writeReceipt) rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "failed", summary: rh.summary ?? clampSummary(op.title), meta: receiptMetaWithContext(rt, { ...(isObj(meta) ? meta : {}), error: err.code }, callerCtx) });
+        if (approved) rt.receipts.finish(approved.id, "failed", { meta: receiptMetaFor(rt, meta, callerCtx, caller.workflow, approved), ...admit });
+        else if (writeReceipt) rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "failed", summary: rh.summary ?? clampSummary(op.title), meta: receiptMetaFor(rt, { ...(isObj(meta) ? meta : {}), error: err.code }, callerCtx, caller.workflow) });
         throw err;
       } finally {
         sig.done();
@@ -803,10 +847,10 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       const summary = rh.summary ?? clampSummary(spec?.redact ? spec.redact(body.input, output) : op.title);
       let receiptId: string | undefined;
       if (approved) {
-        rt.receipts.finish(approved.id, "run", { summary, meta: receiptMetaWithContext(rt, rh.meta ?? meta0, callerCtx, approved), ...admit });
+        rt.receipts.finish(approved.id, "run", { summary, meta: receiptMetaFor(rt, rh.meta ?? meta0, callerCtx, caller.workflow, approved), ...admit });
         receiptId = approved.id;
       } else if (writeReceipt) {
-        receiptId = rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "run", summary, meta: receiptMetaWithContext(rt, rh.meta ?? meta0, callerCtx) }).id;
+        receiptId = rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "run", summary, meta: receiptMetaFor(rt, rh.meta ?? meta0, callerCtx, caller.workflow) }).id;
       }
       sendJson(res, 200, receiptId ? ({ status: "ok", output, receiptId } satisfies OpResult) : ({ status: "ok", output } satisfies OpResult));
     } catch (e) {
@@ -879,7 +923,7 @@ export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: Abor
   const spec = handlerSpec(rt, op.id);
   // product: the slice entry until the stored grant is verified below; then the grant's `prd` takes over (GRANT-PRD)
   const initial = resolveCallerProduct(rt, who, null);
-  let caller: Caller = { type: who.type, id: who.id as Caller["id"], name: who.name, mode: (job.callerMode as Caller["mode"]) ?? null, ...(initial.ok ? initial.caller : {}) };
+  let caller: CallerP1 = { type: who.type, id: who.id as Caller["id"], name: who.name, mode: (job.callerMode as Caller["mode"]) ?? null, ...(initial.ok ? initial.caller : {}) };
   const effect = op.effect;
 
   if (who.type === "person") {
@@ -907,14 +951,16 @@ export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: Abor
   const trust = rt.trust.context(now);
   if (!trust) return { kind: "defer", reason: "slice_stale" };
   const exp = Number(peekClaims(token)?.exp ?? 0);
-  const at = { ...trust, now: Math.min(trust.now, exp - 1) };
+  // v0.1.42 (spec 0.1.82, C373 P1): a WORKFLOW grant keeps its real expiry at fire time. Its withdrawal is checked by the bridge only (never
+  // in this slice), so its short life is the only bound here; a newer grant of the same workflow (each call of it) refreshes the stored one.
+  const at = workflowOfGrant(token) !== undefined ? trust : { ...trust, now: Math.min(trust.now, exp - 1) };
   const g = verifyGrant(token, at);
   if (!g.ok) return refuse(g.code);
   if (g.caller.id !== callerId) return refuse("grant_invalid");
   // v0.1.28 (GRANT-PRD): the stored grant's `prd` first; a grant/slice disagreement refuses the fire like a live call
   const cp = resolveCallerProduct(rt, who, g.claims);
   if (!cp.ok) return refuse("grant_invalid");
-  caller = { type: caller.type, id: caller.id, name: caller.name, mode: caller.mode, ...cp.caller };
+  caller = { type: caller.type, id: caller.id, name: caller.name, mode: caller.mode, ...cp.caller, ...callerWorkflowOf(caller.type, g.claims) };
   base.caller = receiptCallerOf(caller, callerId);
   // v0.1.35 (C261): a scheduled fire, and the resume of a held one, is a call like any other: no verified product, no run
   if (callerUnverified(rt, caller)) return refuse("caller_unverified");
@@ -952,7 +998,7 @@ export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: Abor
   const admit = decision.admittedBy ? { admittedBy: decision.admittedBy } : {};
   if (decision.decision === "hold") {
     if (job.holdId) return { kind: "refused", reason: "hold_consumed" };
-    const hold = createHold(rt, base, spec, op, input, decision, null, { scheduled: job.id }, now);
+    const hold = createHold(rt, base, spec, op, input, decision, null, withCallerWorkflow({ scheduled: job.id }, caller.workflow), now);
     rt.statusChanged();
     return { kind: "wait", holdId: hold.id };
   }
@@ -979,13 +1025,13 @@ export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: Abor
   } catch (e) {
     const err = toTbError(e, rt);
     const meta = rh.meta ?? null;
-    if (approved) rt.receipts.finish(approved.id, "failed", { meta, ...admit });
-    else if (writeReceipt) rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "failed", summary: rh.summary ?? clampSummary(op.title), meta: { ...(isObj(meta) ? meta : {}), error: err.code } });
+    if (approved) rt.receipts.finish(approved.id, "failed", { meta: withCallerWorkflow(meta, caller.workflow, approved), ...admit });
+    else if (writeReceipt) rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "failed", summary: rh.summary ?? clampSummary(op.title), meta: withCallerWorkflow({ ...(isObj(meta) ? meta : {}), error: err.code }, caller.workflow) });
     return { kind: "failed", error: err.code };
   }
   const summary = rh.summary ?? clampSummary(spec?.redact ? spec.redact(input, output) : op.title);
-  if (approved) rt.receipts.finish(approved.id, "run", { summary, meta: rh.meta ?? null, ...admit });
-  else if (writeReceipt) rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "run", summary, meta: rh.meta ?? null });
+  if (approved) rt.receipts.finish(approved.id, "run", { summary, meta: withCallerWorkflow(rh.meta ?? null, caller.workflow, approved), ...admit });
+  else if (writeReceipt) rt.receipts.insert({ ...base, ...admit, kind: "rcp", holdFamily: null, status: "run", summary, meta: withCallerWorkflow(rh.meta ?? null, caller.workflow) });
   return { kind: "done", result: output };
 }
 
