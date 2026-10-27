@@ -307,7 +307,7 @@ export function verifyAgentSession(token: string, ctx: { now: number; self: Brid
 }
 
 // ── issuer-side signers (lifetimes enforced: exp defaults to iat + max, longer → RangeError) ──
-/** K10. v0.1.33 (spec 0.1.82, C373 P1): a grant with `wfl` (a per-workflow companion grant) lives at most WORKFLOW_GRANT_TTL_SEC (the default `exp`). */
+/** K10. v0.1.34 (spec 0.1.82, C373 P1): a grant with `wfl` (a per-workflow companion grant) lives at most WORKFLOW_GRANT_TTL_SEC (the default `exp`). */
 export async function signGrant(claims: Issue<GrantClaims> | Issue<WorkflowGrantClaims>, key: Ed25519KeyPair): Promise<string> {
   const max = Object.hasOwn(claims, "wfl") ? WORKFLOW_GRANT_TTL_SEC : LIFETIME_S.grant;
   return signJws(TYP.grant, issueClaims<GrantClaims>(claims, max), key);

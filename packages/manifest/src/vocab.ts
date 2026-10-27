@@ -127,7 +127,7 @@ export const SDK_AUDIT_ACTIONS = [
 export type SdkAuditAction = (typeof SDK_AUDIT_ACTIONS)[number];
 
 /**
- * v0.1.33 (spec 0.1.82, C373 P1; BRIDGE §8.6): the error codes of per-workflow companion grants, as a list (the spec declares them as
+ * v0.1.34 (spec 0.1.82, C373 P1; BRIDGE §8.6): the error codes of per-workflow companion grants, as a list (the spec declares them as
  * `BridgeErrorCode` members only). `satisfies` keeps the list equal to the spec's names.
  */
 export const WORKFLOW_GRANT_ERROR_CODES = [

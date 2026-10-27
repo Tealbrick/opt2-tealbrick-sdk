@@ -806,7 +806,7 @@ function companionRules(m: Manifest, add: Add): void {
     if (c.product === "*" && (c.operations.length !== 1 || c.operations[0] !== HOLDS_PENDING_OP || c.crud.length !== 1 || c.crud[0] !== "read")) {
       add("M-CP-3", "companion_invalid", ptr("companions", i), `a wildcard companion ("*") needs exactly operations ["${HOLDS_PENDING_OP}"] and crud ["read"]`);
     }
-    // M-CP-4 (v0.1.33, spec 0.1.82, C373 P1): `perWorkflow` only on an entry for ONE product, never a standard op (the schema says
+    // M-CP-4 (v0.1.34, spec 0.1.82, C373 P1): `perWorkflow` only on an entry for ONE product, never a standard op (the schema says
     // both too; the rule keeps the code stable for a reader that runs the rules on a hand-built manifest). The target half of M-CP-4
     // is validateCompanionWorkflows (below validateCompanions).
     const pw = (c as Companion & { perWorkflow?: CompanionPerWorkflow }).perWorkflow;
@@ -998,12 +998,12 @@ export function validateCompanions(manifest: Manifest, targets: readonly Manifes
 }
 
 /**
- * M-CP-4, target half (v0.1.33, spec 0.1.82, C373 P1): each companion's `perWorkflow` is checked against its deployed target exactly as
+ * M-CP-4, target half (v0.1.34, spec 0.1.82, C373 P1): each companion's `perWorkflow` is checked against its deployed target exactly as
  * M-CP-2 checks `operations` / `crud`: every op exists with audience `agent`; each `op.crud ⊆ perWorkflow.crud`; `perWorkflow.crud ⊆` the
  * union of the listed ops' crud, where a listed DYNAMIC op adds its `dynamic.crudCeiling` (C370a) → `companion_op_invalid`, pointer
  * `/companions/<i>/perWorkflow/...`. Targets not in `targets` and the wildcard entry are skipped (as in M-CP-2).
- * Spec 0.1.82 names `validateCompanions(m, targets)` as the caller; until that function calls this one (one line, after sdk#59 merges:
- * the P5 change edits validateCompanions), Core and conformance call `validateCompanionWorkflows` next to it.
+ * Spec 0.1.82 names `validateCompanions(m, targets)` as the caller. This change leaves validateCompanions as it is (the packages lead
+ * owns it), so Core and conformance call `validateCompanionWorkflows` next to it until validateCompanions calls this one (one line).
  */
 export function validateCompanionWorkflows(manifest: Manifest, targets: readonly Manifest[]): ManifestValidation {
   const { errors, add } = collector();

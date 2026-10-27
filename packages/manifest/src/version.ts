@@ -41,7 +41,7 @@ export const BRIDGE_FEATURES = [
   // v0.1.30 (spec 0.1.57, MANIFEST §16.3): a manifest with `events` (also an empty list: an older validator refuses the key) needs
   // a bridge that pins manifest >= 0.1.30 and declares the `events` cap; bridge 0.2.7 is the first
   { feature: "events", minBridge: "0.2.7", why: "app events (C274)" },
-  // v0.1.33 (spec 0.1.82, C373 P1): a manifest with `companions[].perWorkflow` asks for per-workflow grants: the bridge must relay
+  // v0.1.34 (spec 0.1.82, C373 P1): a manifest with `companions[].perWorkflow` asks for per-workflow grants: the bridge must relay
   // workflow_grant_* and gate CallEnvelope.workflow (cap app_workflow_grants). TEMP until spec 0.1.82 pin: the bridge release that
   // contains BRIDGE §8.6 (bridge P1 follows 0.2.11 = P3/P4); re-check against the spec's number at the pin.
   { feature: "per_workflow_grants", minBridge: "0.2.12", why: "per-workflow companion grants (companions[].perWorkflow, C373)" },
