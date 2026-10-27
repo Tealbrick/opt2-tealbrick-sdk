@@ -323,7 +323,9 @@ describe("bridgeCaps is advisory: nothing in the SDK reads it for authorization"
   test("the name appears only in the slice accessor (trust.ts), the context builders and their types", T, () => {
     // v0.1.38: server/events.ts gates SENDING (never authorization) by the events cap (SDK-API §20, C292)
     // v0.1.41 (C367 P4): server/link.ts gates SENDING `callApp({ context })` by the `app_call_context` cap (SDK-API §18.6; `bridge_cap_missing`), never authorization
-    const allowed = new Set(["server/trust.ts", "server/ops.ts", "server/app.ts", "server/context.ts", "server/runtime.ts", "server/events.ts", "server/link.ts"]);
+    // v0.1.42 (spec 0.1.82, C373 P1): server/workflow-grants.ts gates SENDING workflow calls and the workflow-grant relays by `app_workflow_grants`
+    // (SDK-API §22; `bridge_cap_missing`), never authorization
+    const allowed = new Set(["server/trust.ts", "server/ops.ts", "server/app.ts", "server/context.ts", "server/runtime.ts", "server/events.ts", "server/link.ts", "server/workflow-grants.ts"]);
     const hits = files(src)
       .filter((f) => /bridgeCaps/.test(readFileSync(f, "utf8")))
       .map((f) => relative(src, f));

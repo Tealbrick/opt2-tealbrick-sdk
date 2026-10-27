@@ -5,6 +5,8 @@ import type {
   SDK_AUDIT_ACTIONS as SPEC_SDK_AUDIT_ACTIONS,
 } from "@opt2-tealbrick/spec/sdk";
 
+import type { WorkflowGrantErrorCode } from "./spec-p1.temp.ts";
+
 export { TOOL_NAME_RULE } from "@opt2-tealbrick/spec/bridge";
 export type { BridgeOp, Typ } from "@opt2-tealbrick/spec/credentials";
 export {
@@ -123,3 +125,17 @@ export const SDK_AUDIT_ACTIONS = [
   "scope.offer_accepted",
 ] as const satisfies typeof SPEC_SDK_AUDIT_ACTIONS;
 export type SdkAuditAction = (typeof SDK_AUDIT_ACTIONS)[number];
+
+/**
+ * v0.1.34 (spec 0.1.82, C373 P1; BRIDGE §8.6): the error codes of per-workflow companion grants, as a list (the spec declares them as
+ * `BridgeErrorCode` members only). `satisfies` keeps the list equal to the spec's names.
+ */
+export const WORKFLOW_GRANT_ERROR_CODES = [
+  "workflow_mismatch",
+  "workflow_grant_required",
+  "workflow_grant_withdrawn",
+  "workflow_grant_missing",
+  "workflow_grants_unsupported",
+  "workflow_grants_full",
+  "portal_unavailable",
+] as const satisfies readonly WorkflowGrantErrorCode[];

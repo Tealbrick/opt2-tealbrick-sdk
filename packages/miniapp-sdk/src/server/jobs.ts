@@ -475,12 +475,18 @@ export class JobStore {
   hasPendingOps(callerId: string, iat: number): boolean {
     return !!this.#db.prepare("SELECT 1 FROM tb_jobs WHERE caller_id = ? AND op IS NOT NULL AND status IN ('queued', 'waiting', 'paused') AND grant_iat < ? LIMIT 1").get(callerId, iat);
   }
-  refreshGrant(callerId: string, sealed: string, iat: number): number {
-    return Number(
-      this.#db
-        .prepare("UPDATE tb_jobs SET grant_sealed = ?, grant_iat = ? WHERE caller_id = ? AND op IS NOT NULL AND status IN ('queued', 'waiting', 'paused') AND grant_iat < ?")
-        .run(sealed, iat, callerId, iat).changes,
-    );
+
+  /** v0.1.42 (spec 0.1.82, C373 P1): the pending scheduled ops of a caller with a stored grant older than `iat` (id + sealed grant), so the
+   *  refresh can keep each op's workflow identity (a grant with `wfl` only replaces a grant with the same `wfl`; a base grant only a base grant) */
+  pendingOpGrants(callerId: string, iat: number): { id: string; sealed: string | null }[] {
+    const rows = this.#db.prepare("SELECT id, grant_sealed FROM tb_jobs WHERE caller_id = ? AND op IS NOT NULL AND status IN ('queued', 'waiting', 'paused') AND grant_iat < ?").all(callerId, iat) as Row[];
+    return rows.map((r) => ({ id: String(r.id), sealed: (r.grant_sealed as string | null) ?? null }));
+  }
+  refreshGrantRows(ids: readonly string[], sealed: string, iat: number): number {
+    let n = 0;
+    const st = this.#db.prepare("UPDATE tb_jobs SET grant_sealed = ?, grant_iat = ? WHERE id = ? AND grant_iat < ?");
+    for (const id of ids) n += Number(st.run(sealed, iat, id, iat).changes);
+    return n;
   }
 
   appPaused(): boolean {

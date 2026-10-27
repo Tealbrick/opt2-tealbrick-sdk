@@ -1,7 +1,7 @@
 // The SDK's only client of the bridge internal API (BRIDGE §3.2, §8.3, §9.4, §10): every request after the claim
 // carries an instance assertion in `TB-Assert` (htm, htu, bd).
-import { type Ed25519KeyPair, signInstanceAssertion } from "@opt2-tealbrick/manifest";
-import { BRIDGE_HEADERS, BRIDGE_INTERNAL_PATHS, type ClaimRequest, type ClaimResponse, type ProofClaimCap } from "@opt2-tealbrick/spec/bridge";
+import { APP_CAP_GRANT_WFL, APP_CAP_WORKFLOW_GRANTS, type Ed25519KeyPair, signInstanceAssertion } from "@opt2-tealbrick/manifest";
+import { type AppCap, BRIDGE_HEADERS, BRIDGE_INTERNAL_PATHS, type ClaimRequest, type ClaimResponse, type ProofClaimCap } from "@opt2-tealbrick/spec/bridge";
 import type { BridgeId, InstanceId } from "@opt2-tealbrick/spec/credentials";
 import { TbError } from "./errors.ts";
 
@@ -18,6 +18,16 @@ const REQUEST_TIMEOUT_MS = 35_000;
  * (exec) never sends it. The route (bridge-routes.ts handleHook) hashes the raw body whenever a proof carries `bd`.
  */
 export const SDK_PROOF_CLAIMS: readonly ProofClaimCap[] = ["bd"];
+
+/**
+ * v0.1.42 (spec 0.1.82, C373 P1; C354 "gate by capability, not version"): the app caps (APP_CAPS) every app on this SDK reports in its claim and
+ * in every status push: `app_workflow_grants` (it can request / fetch workflow grants and send `CallEnvelope.workflow`) and `grant_wfl` (its
+ * grant verifier knows the `wfl` claim). Core mints a workflow grant for a (caller, target) only when the bridge cap and both app caps are
+ * present. A routing hint, never an authority. TEMP until spec 0.1.82 pin: the spec's `AppCap` union does not list them yet (cast).
+ */
+export const SDK_APP_CAPS: readonly string[] = [APP_CAP_WORKFLOW_GRANTS, APP_CAP_GRANT_WFL];
+/** The app caps as the claim / status field type (`AppCap[]`; TEMP cast, see SDK_APP_CAPS). */
+export const sdkAppCaps = (): AppCap[] => [...SDK_APP_CAPS] as AppCap[];
 
 async function readBody(res: Response): Promise<unknown> {
   const text = await res.text();

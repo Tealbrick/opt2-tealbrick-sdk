@@ -229,6 +229,13 @@ export class FakeBridge {
   modelRoutes = true;
   /** v0.1.63: every model-role fetch: the role and whether the instance assertion verified (htm, htu) */
   modelRoleFetches: { role: string; assertOk: boolean }[] = [];
+  /** v0.1.42 (C373 P1, SDK-API §22): every POST /tb/v1/workflow-grants/<request|get|release>: the path tail, body, and whether the assertion verified */
+  workflowRelays: { kind: string; body: Record<string, unknown>; assertOk: boolean }[] = [];
+  /** answer of a workflow-grant relay (default: 404 workflow_grant_missing) */
+  onWorkflowGrant: (kind: string, body: Record<string, unknown>) => { status: number; body: unknown } = () => ({
+    status: 404,
+    body: { error: { code: "workflow_grant_missing", message: "no applied workflow grant", requestId: "req_test" } },
+  });
   #slice: string | null = null;
   #rev = 0;
   #waiting: ServerResponse[] = [];
@@ -308,6 +315,16 @@ export class FakeBridge {
       const a = this.modelRoles.get(role);
       if (!a) return send(404, { error: { code: "role_not_set", message: "role_not_set", requestId: "req_test" } });
       return send(a.status, a.status === 200 ? { ...a.body, keysRev: this.keysRev } : a.body);
+    }
+    if (url.pathname.startsWith("/tb/v1/workflow-grants/") && req.method === "POST") {
+      const kind = url.pathname.slice("/tb/v1/workflow-grants/".length);
+      const token = String(req.headers["tb-assert"] ?? "");
+      const keys = this.instanceKey ? keySetFrom({ keys: [this.instanceKey] }, `tb:ins:${this.w.ins}`) : null;
+      const v = keys ? verifyAssertion(token, keys, { typ: TYP.instanceAssertion, aud: `tb:brg:${this.w.brg}`, now: nowS(), method: "POST", pathAndQuery: url.pathname + url.search, body: new Uint8Array(raw) }) : { ok: false };
+      this.workflowRelays.push({ kind, body: body ?? {}, assertOk: v.ok });
+      const a = v.ok ? this.onWorkflowGrant(kind, body ?? {}) : { status: 401, body: { error: { code: "unauthenticated", message: "assertion", requestId: "req_test" } } };
+      res.writeHead(a.status, { "content-type": "application/json" });
+      return void res.end(JSON.stringify(a.body));
     }
     if (url.pathname === "/tb/v1/claim") {
       const code = String(body?.code ?? "");

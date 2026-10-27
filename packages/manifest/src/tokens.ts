@@ -36,6 +36,7 @@ import type {
 } from "@opt2-tealbrick/spec/sdk";
 import { digest } from "./jcs.ts";
 import { INVALID_TOKEN, type Issue, issueClaims, type ReplayGuard, signJws, type V0Failure, verifyV0 } from "./jws.ts";
+import { WORKFLOW_GRANT_TTL_SEC, type WorkflowGrantClaims } from "./spec-p1.temp.ts";
 
 export type { TrustContext, VerifiedCallProof, VerifiedGrant, VerifiedTicket };
 
@@ -306,8 +307,10 @@ export function verifyAgentSession(token: string, ctx: { now: number; self: Brid
 }
 
 // ── issuer-side signers (lifetimes enforced: exp defaults to iat + max, longer → RangeError) ──
-export async function signGrant(claims: Issue<GrantClaims>, key: Ed25519KeyPair): Promise<string> {
-  return signJws(TYP.grant, issueClaims<GrantClaims>(claims, LIFETIME_S.grant), key);
+/** K10. v0.1.34 (spec 0.1.82, C373 P1): a grant with `wfl` (a per-workflow companion grant) lives at most WORKFLOW_GRANT_TTL_SEC (the default `exp`). */
+export async function signGrant(claims: Issue<GrantClaims> | Issue<WorkflowGrantClaims>, key: Ed25519KeyPair): Promise<string> {
+  const max = Object.hasOwn(claims, "wfl") ? WORKFLOW_GRANT_TTL_SEC : LIFETIME_S.grant;
+  return signJws(TYP.grant, issueClaims<GrantClaims>(claims, max), key);
 }
 export async function signCallProof(claims: Issue<CallProofOpClaims>, key: Ed25519KeyPair): Promise<string> {
   return signJws(TYP.callProof, issueClaims<CallProofOpClaims>(claims, LIFETIME_S.proof), key);

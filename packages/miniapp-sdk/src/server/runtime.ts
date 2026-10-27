@@ -18,6 +18,7 @@ import type { PersonAuth } from "./person.ts";
 import type { Receipts } from "./receipts.ts";
 import type { ScopeStoreInternals } from "./scopes.ts";
 import type { Sealer } from "./secrets.ts";
+import type { WorkflowGrantsApi } from "./spec-p1.temp.ts";
 import type { RawDb, SchemaVersion } from "./store.ts";
 import type { TrustState } from "./trust.ts";
 import type { PreUpdateSnapshot } from "./upgrade.ts";
@@ -105,6 +106,9 @@ export interface Runtime {
   /** first sight of an agent edge (§7.2): agentAdded event, then manifest defaultGrants */
   ensureAgent(agent: SliceAgent): Promise<void>;
   /** `parentCall: null` = app-initiated (C85: StartContext / EventContext / timers) */
-  callApp<O = Json>(product: string, op: string, input: Json, opts: { idempotencyKey?: string; context?: Record<string, Json>; parentCall: string | null }): Promise<CompanionResult<O>>;
+  /** v0.1.42 (spec 0.1.82, C373 P1): `workflow` = run under that workflow's grant only (SDK-API §22) */
+  callApp<O = Json>(product: string, op: string, input: Json, opts: { idempotencyKey?: string; context?: Record<string, Json>; workflow?: string; parentCall: string | null }): Promise<CompanionResult<O>>;
+  /** v0.1.42 (spec 0.1.82, C373 P1): `ctx.workflowGrants` (SDK-API §22) */
+  readonly workflowGrants: WorkflowGrantsApi;
   callServiceHelper<O = Json>(serviceId: string, path: string, body: Json): Promise<O>;
 }

@@ -2,9 +2,10 @@
 // `publicUrl` (slice `bridge.publicUrl`), `viewUrl` (slice `bridge.viewUrl`, 0.1.26), `workspace`, `scopes.instances` and `secrets` (the ONE app-secret store).
 import type { ScopeRequest } from "@opt2-tealbrick/spec/bridge";
 import type { WorkspaceId } from "@opt2-tealbrick/spec/credentials";
-import type { AppDefinition, Caller, EventContext, HookContext, OpContext, PublicHandler, ScopeStore, SliceAgent, StartContext as SpecStartContext } from "@opt2-tealbrick/spec/sdk";
+import type { AppDefinition, CompanionResult, EventContext, HookContext, Json, OpContext, PublicHandler, ScopeStore, SliceAgent, StartContext as SpecStartContext } from "@opt2-tealbrick/spec/sdk";
 import type { AppSecrets } from "./app-secrets.ts";
 import type { JobHandler, JobSpec, JobsView } from "./jobs.ts";
+import type { CallAppOptionsP1, CallerP1, WorkflowGrantsApi } from "./spec-p1.temp.ts";
 
 export interface ContextExtras {
   /** bridge public origin (`https://<bridge>`) for third-party callbacks `…/p/<product><path>`; null until the slice names it */
@@ -26,8 +27,16 @@ export interface ContextExtras {
  * is not listed (or listed under another product). ABSENT (no key) on person and agent callers.
  * Typed in spec 0.1.49 (`Caller.listed`); `SdkCaller` stays exported as an alias for code written against the 0.1.48 types.
  */
-export type SdkCaller = Caller;
-export type SdkOpContext = OpContext & { caller: SdkCaller } & ContextExtras & CompanionTargetsView & JobsView;
+export type SdkCaller = CallerP1;
+/**
+ * v0.1.42 (spec 0.1.82, C373 P1, SDK-API §22): `callApp(..., { workflow })` and `ctx.workflowGrants` on every ctx (TEMP until spec 0.1.82 pin:
+ * the spec's `CallAppOptions.workflow`, `Caller.workflow` and `workflowGrants`; spec-p1.temp.ts).
+ */
+export interface WorkflowGrantsView {
+  callApp<O = Json>(product: string, op: string, input: Json, opts?: CallAppOptionsP1): Promise<CompanionResult<O>>;
+  workflowGrants: WorkflowGrantsApi;
+}
+export type SdkOpContext = Omit<OpContext, "callApp" | "caller"> & { caller: SdkCaller } & WorkflowGrantsView & ContextExtras & CompanionTargetsView & JobsView;
 export type SdkHookContext = HookContext & { secrets: AppSecrets };
 export type SdkPublicContext = Parameters<PublicHandler>[1] & ContextExtras;
 export type { AppSecrets };
@@ -57,9 +66,9 @@ export interface CompanionTargetsView {
 }
 
 /** v0.1.13 (C33, C85, C86): `onStart` runs once after boot and (bridge mode) after the claim succeeded; errors are logged. */
-export type StartContext = SpecStartContext & CompanionTargetsView & JobsView;
+export type StartContext = Omit<SpecStartContext, "callApp"> & WorkflowGrantsView & CompanionTargetsView & JobsView;
 /** v0.1.13: the ctx every event handler gets (C85 callApp without parentCall, C86 statusChanged / ownerLink). */
-export type SdkEventContext = EventContext & CompanionTargetsView & JobsView;
+export type SdkEventContext = Omit<EventContext, "callApp"> & WorkflowGrantsView & CompanionTargetsView & JobsView;
 /** AppEvents (types/sdk.ts) with the SDK event ctx; a handler typed against the spec EventContext still fits. */
 export interface SdkAppEvents {
   agentAdded?(agent: SliceAgent, ctx: SdkEventContext): Promise<void>;

@@ -1,7 +1,7 @@
 // The instance ↔ bridge link (SDK-API §9, BRIDGE §8.3, §10): ONE claim path, the status push + slice/keys long-poll,
 // and companion calls. One credential: the instance key K8 (instance assertions in TB-Assert).
 
-import { APP_CALL_CONTEXT_CAP, callerContextProblem } from "@opt2-tealbrick/manifest";
+import { APP_CALL_CONTEXT_CAP, type CallEnvelopeP1, callerContextProblem } from "@opt2-tealbrick/manifest";
 import {
   type AppStatus,
   type AppStatusResponse,
@@ -12,9 +12,10 @@ import {
   type OpResult,
 } from "@opt2-tealbrick/spec/bridge";
 import type { BridgeId, Ed25519PublicJwk, InstanceId } from "@opt2-tealbrick/spec/credentials";
+import { COMPANION_HOLD_STATUS_OP } from "@opt2-tealbrick/spec/manifest";
 import type { CompanionResult, HealthStatus, Json, Logger } from "@opt2-tealbrick/spec/sdk";
 import type { BridgeClient } from "./bridge-client.ts";
-import { errorFrom, SDK_PROOF_CLAIMS } from "./bridge-client.ts";
+import { errorFrom, SDK_PROOF_CLAIMS, sdkAppCaps } from "./bridge-client.ts";
 import { enrolCodeDigest, identityRefused, reclaimCode, waitForMountedDataDir } from "./claim-guard.ts";
 import { TbError } from "./errors.ts";
 import type { JobsSummary } from "./jobs.ts";
@@ -22,6 +23,7 @@ import { peekClaims } from "./ops.ts";
 import type { Runtime } from "./runtime.ts";
 import { upgradeHealth } from "./server.ts";
 import { metaGet, metaSet } from "./store.ts";
+import { isWorkflowId, perWorkflowEntry, requireWorkflowCap, WorkflowGrants } from "./workflow-grants.ts";
 
 export interface ClaimRecord {
   ins: InstanceId;
@@ -74,10 +76,14 @@ export class BridgeLink {
   /** digests of enrolment codes already tried for a reclaim in this process (one attempt per code) */
   readonly #tried = new Set<string>();
 
+  /** v0.1.42 (spec 0.1.82, C373 P1): the workflow grant cache and the `ctx.workflowGrants` relays (memory only) */
+  readonly workflowGrants: WorkflowGrants;
+
   constructor(rt: Runtime, client: BridgeClient) {
     this.#rt = rt;
     this.#client = client;
     this.#log = rt.log;
+    this.workflowGrants = new WorkflowGrants(rt, client);
   }
 
   static record(rt: Runtime): ClaimRecord | null {
@@ -117,6 +123,8 @@ export class BridgeLink {
       version: rt.manifest.version,
       sdkVersion: rt.sdkVersion,
       proofClaims: [...SDK_PROOF_CLAIMS],
+      // v0.1.42 (C373 P1, C354): app caps app_workflow_grants + grant_wfl on every push
+      caps: sdkAppCaps(),
       scopesRev: rt.scopes.rev(),
       sliceRevision: rt.trust.slice?.rev ?? 0,
       keysRev: rt.keys.keysRev(),
@@ -136,6 +144,8 @@ export class BridgeLink {
   /** Returns false when the answered slice was refused (the bridge would answer the same slice again at once). */
   async #apply(r: AppStatusResponse): Promise<boolean> {
     const installed = typeof r?.slice === "string" ? await installSlice(this.#rt, r.slice) : true;
+    // v0.1.42 (C373 P1, SDK-API §22 item 6): a target no longer in companionTargets drops its cached workflow grants
+    if (typeof r?.slice === "string") this.workflowGrants.onSlice();
     if (typeof r?.keysRev === "number") await this.#rt.keys.onKeysRev(r.keysRev);
     return installed;
   }
@@ -165,7 +175,7 @@ export class BridgeLink {
     }
     if (!(await this.#mounted())) return false;
     const r = await this.#client.claim(
-      { code, instancePublicKey: rt.instanceKey.publicJwk, manifestDigest: rt.digest, version: rt.manifest.version, sdkVersion: rt.sdkVersion, proofClaims: [...SDK_PROOF_CLAIMS] },
+      { code, instancePublicKey: rt.instanceKey.publicJwk, manifestDigest: rt.digest, version: rt.manifest.version, sdkVersion: rt.sdkVersion, proofClaims: [...SDK_PROOF_CLAIMS], caps: sdkAppCaps() },
       this.#stop.signal,
     );
     if (r.status !== 200) throw errorFrom(r, "claim_failed");
@@ -265,14 +275,33 @@ export class BridgeLink {
   /**
    * Companion call `POST /tb/v1/call` with TB-Assert + TB-Grant (SDK-API §9, BRIDGE §8.3). `parentCall: null` = an
    * app-initiated call (v0.1.13 C85: StartContext / EventContext / timers): the envelope carries no parentCall.
+   * v0.1.42 (spec 0.1.82, C373 P1, SDK-API §22): with `workflow` the call runs under that workflow's grant ONLY (never the base grant).
    */
-  async call<O = Json>(product: string, op: string, input: Json, opts: { idempotencyKey?: string; context?: Record<string, Json>; parentCall: string | null }): Promise<CompanionResult<O>> {
+  async call<O = Json>(
+    product: string,
+    op: string,
+    input: Json,
+    opts: { idempotencyKey?: string; context?: Record<string, Json>; workflow?: string; parentCall: string | null },
+  ): Promise<CompanionResult<O>> {
     const rt = this.#rt;
-    // a product declaration first; else the wildcard companion (M-CP-3: only tb.holds_pending) for any product
-    const declared =
-      rt.manifest.companions?.find((c) => c.product === product && c.operations.includes(op)) ??
-      (product !== "*" ? rt.manifest.companions?.find((c) => c.product === "*" && c.operations.includes(op)) : undefined);
-    if (!declared) throw new TbError("companion_undeclared", `companion operation not declared: ${product}.${op}`, 500);
+    const workflow = opts.workflow;
+    let declared: { product: string; operations: string[] } | undefined;
+    if (workflow !== undefined) {
+      // SDK-API §22 item 3, in this order, before anything is sent: (a) pattern, (b) cap, (c) the op is in the entry's perWorkflow
+      // ceiling (or is tb.hold_status of the base entry)
+      if (!isWorkflowId(workflow)) throw new TbError("input_invalid", "workflow is not a workflow id", 400, { pointer: "/workflow" });
+      requireWorkflowCap(rt);
+      const entry = perWorkflowEntry(rt, product);
+      const ok = !!entry && (entry.perWorkflow?.operations.includes(op) === true || (op === COMPANION_HOLD_STATUS_OP && entry.operations.includes(op)));
+      if (!ok) throw new TbError("companion_undeclared", `workflow companion operation not declared: ${product}.${op} (companions[].perWorkflow)`, 500);
+    } else {
+      // a product declaration first (its own ops, or a perWorkflow op the presented base grant still carries: gate off, §22 item 5);
+      // else the wildcard companion (M-CP-3: only tb.holds_pending) for any product
+      const own = perWorkflowEntry(rt, product);
+      const wildcard = rt.manifest.companions?.find((c) => c.product === "*" && c.operations.includes(op));
+      declared = own && (own.operations.includes(op) || own.perWorkflow?.operations.includes(op) === true) ? own : wildcard;
+      if (!declared) throw new TbError("companion_undeclared", `companion operation not declared: ${product}.${op}`, 500);
+    }
     // v0.1.77 (C367 P4, SDK-API §18.6): `context` undefined or `{}` = no context (nothing sent, no cap needed). A non-empty one needs the
     // bridge cap `app_call_context` (409 `bridge_cap_missing`, like Core's D-CAP-1) and must pass the shared rules (`input_invalid`, pointer).
     // Both checks run before any network call, after `companion_undeclared`.
@@ -287,17 +316,24 @@ export class BridgeLink {
     }
     const p = rt.trust.paused(null);
     if (p.workspace || p.instance) throw new TbError("paused", "this instance is paused", 403);
-    const envelope: CallEnvelope = {
+    const envelope: CallEnvelopeP1 = {
       target: product,
       op,
       input,
       ...(opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}),
       ...(opts.parentCall ? { parentCall: opts.parentCall as CallEnvelope["parentCall"] } : {}),
       ...(hasContext ? { context: context as CallEnvelope["context"] } : {}),
+      ...(workflow !== undefined ? { workflow } : {}),
     };
+    if (workflow !== undefined) return this.#workflowCall<O>(workflow, product, op, envelope);
     for (let attempt = 0; ; attempt++) {
-      const grant = companionGrant(rt, product, declared.product === "*" ? null : declared.operations, op);
+      const d = declared as { product: string; operations: string[] };
+      const grant = companionGrant(rt, product, d.product === "*" ? null : baseGrantAccepts(d), op);
       if (!grant) throw new TbError("no_grant", `no companion grant for ${product} in the slice`, 403);
+      // a perWorkflow-only op reaches the base path only when the presented base grant carries it (gate off for that target)
+      if (d.product !== "*" && !d.operations.includes(op) && !(peekClaims(grant)?.wf as string[] | undefined)?.includes(op)) {
+        throw new TbError("companion_undeclared", `companion operation ${product}.${op} needs a workflow (callApp { workflow })`, 500);
+      }
       const r = await this.#client.request("POST", BRIDGE_INTERNAL_PATHS.call, envelope, { [BRIDGE_HEADERS.companionGrant]: grant });
       if (r.status === 200 || r.status === 202) return r.body as OpResult<O>;
       const err = errorFrom(r, "app_error");
@@ -308,6 +344,34 @@ export class BridgeLink {
       throw err;
     }
   }
+
+  /**
+   * SDK-API §22 items 3 (d)(e) and 4: the cached workflow grant for (workflow, target) or a fetched one; the op must be in its `wf`
+   * (`not_in_workflow`, 403, thrown locally; a widened set reaches the cache at half-life). On
+   * `workflow_grant_withdrawn` / `grant_expired` from the bridge: drop, fetch once more, retry once. Never the base grant.
+   */
+  async #workflowCall<O>(workflow: string, product: string, op: string, envelope: CallEnvelopeP1): Promise<CompanionResult<O>> {
+    const wg = this.workflowGrants;
+    for (let attempt = 0; ; attempt++) {
+      const g = await wg.grantFor(workflow, product, attempt > 0);
+      if (!g.wf.includes(op)) throw new TbError("not_in_workflow", `${product}.${op} is not in the approved set of workflow ${workflow}`, 403);
+      const r = await this.#client.request("POST", BRIDGE_INTERNAL_PATHS.call, envelope, { [BRIDGE_HEADERS.companionGrant]: g.token });
+      if (r.status === 200 || r.status === 202) return r.body as OpResult<O>;
+      const err = errorFrom(r, "app_error");
+      if (err.code === "workflow_grant_withdrawn" || err.code === "grant_expired") {
+        wg.drop(workflow, g.aud);
+        if (attempt === 0) continue;
+      }
+      throw err;
+    }
+  }
+}
+
+/** The base grants Core mints for a one-product entry (SDK-API §22 item 5): any `wf` with `operations ⊆ wf ⊆ operations ∪ perWorkflow.operations`
+ *  (`wf` = `operations`; or, with the workflow gate off for that target, `operations ∪` the ops currently applied for it). */
+function baseGrantAccepts(entry: { operations: string[]; perWorkflow?: { operations: string[] } }): (wf: readonly string[]) => boolean {
+  const ceiling = new Set([...entry.operations, ...(entry.perWorkflow?.operations ?? [])]);
+  return (wf) => entry.operations.every((o) => wf.includes(o)) && wf.every((o) => ceiling.has(o));
 }
 
 /**
@@ -315,16 +379,16 @@ export class BridgeLink {
  * companion operations for that product (I8: companion grants carry `wf` = those operations); the bridge verifies it.
  * v0.1.14 addition: when the slice's `companionTargets` names the product's instance, the grant's `aud` must be that
  * instance. A wildcard companion (`ops` null) needs that mapping: its per-app grants differ only by `aud`.
+ * v0.1.42 (spec 0.1.82, C373 P1): `accepts` = the base `wf` sets the entry allows (baseGrantAccepts); a grant with `wfl` is never a base grant.
  */
-function companionGrant(rt: Runtime, product: string, ops: readonly string[] | null, op: string): string | null {
-  const want = ops ? [...ops].sort().join(",") : null;
+function companionGrant(rt: Runtime, product: string, accepts: ((wf: readonly string[]) => boolean) | null, op: string): string | null {
   const auds = new Set(rt.trust.companionTargets().filter((t) => t.product === product).map((t) => `tb:ins:${t.ins}`));
-  if (!want && auds.size === 0) return null;
+  if (!accepts && auds.size === 0) return null;
   for (const g of rt.trust.slice?.grants ?? []) {
     const c = peekClaims(g);
-    if (!Array.isArray(c?.wf) || c.sub !== rt.trust.self) continue;
+    if (!Array.isArray(c?.wf) || c.sub !== rt.trust.self || Object.hasOwn(c, "wfl")) continue;
     const wf = c.wf as string[];
-    if (want ? [...wf].sort().join(",") !== want : !wf.includes(op)) continue;
+    if (accepts ? !accepts(wf) : !wf.includes(op)) continue;
     if (auds.size > 0 && !auds.has(String(c.aud))) continue;
     return g;
   }
