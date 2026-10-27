@@ -177,6 +177,8 @@ test("C373 QA-RCP-3 recipientPointerProblem: quiet on places the schema can hold
   }
   assert.equal(recipientPointerProblem({ type: "object" }, "/whatever"), null, "an open object without properties");
   assert.equal(recipientPointerProblem({ oneOf: [{ type: "object" }] }, "/x"), null, "a combinator");
+  // RCPD-1: declared members plus an explicit `additionalProperties: true` admit any member
+  assert.equal(recipientPointerProblem({ type: "object", properties: { a: { type: "string" } }, additionalProperties: true }, "/other"), null, "open by additionalProperties: true");
 });
 
 test("C373 QA-RCP-3 recipientPointerProblem: fires on a typo, a step through a scalar, a bad index, a leaf that holds no string", () => {
@@ -185,6 +187,11 @@ test("C373 QA-RCP-3 recipientPointerProblem: fires on a typo, a step through a s
   }
   assert.notEqual(recipientPointerProblem({ type: "object", properties: { a: { type: "string" } }, additionalProperties: false }, "/b"), null, "closed object");
   assert.notEqual(recipientPointerProblem({ type: "object", properties: {}, additionalProperties: false }, "/a"), null, "closed, no members");
+  // RCPD-2: a `false` schema at the leaf, and an array leaf with `items: false`
+  assert.notEqual(recipientPointerProblem({ type: "object", properties: { x: false } }, "/x"), null, "properties: {x: false}");
+  assert.notEqual(recipientPointerProblem({ type: "object", properties: { x: { type: "array", items: false } } }, "/x"), null, "items: false");
+  assert.notEqual(recipientPointerProblem({ type: "object", properties: { x: { items: false } } }, "/x"), null, "items: false, no type");
+  assert.equal(recipientPointerProblem({ type: "object", properties: { x: { type: "array", items: { type: "string" } } } }, "/x"), null, "control: items of strings");
 });
 
 test("C373 QA-RCP-3 M-OP-14 in validateManifest: a static pointer the input cannot hold is refused at its path", () => {

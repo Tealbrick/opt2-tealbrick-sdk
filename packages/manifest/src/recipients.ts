@@ -75,7 +75,7 @@ function typesOf(node: SchemaNode): string[] | null {
  * `properties` (or a schema-valued `additionalProperties`) for object steps and `prefixItems` / `items` for array index steps.
  * A token the schema cannot hold → a problem (a typo would read as "known: nobody" at run time). Stops quietly (null) where the
  * schema cannot be walked (`$ref`, combinators, `patternProperties`, an object or array schema without `properties` / `items`,
- * a boolean schema `true`). The leaf, when it states `type`, must allow `string`, `null` or `array` (kind `telegram`: also
+ * an explicit `additionalProperties: true`, a boolean schema `true`); a `false` schema (or `items: false`) at the leaf is refused. The leaf, when it states `type`, must allow `string`, `null` or `array` (kind `telegram`: also
  * `integer` / `number`); an array leaf whose `items.type` is stated must allow one of those. Dynamic places have no schema at build time: never checked here.
  */
 export function recipientPointerProblem(inputSchema: unknown, pointer: string, kind?: RecipientKind): string | null {
@@ -105,7 +105,8 @@ export function recipientPointerProblem(inputSchema: unknown, pointer: string, k
       continue;
     }
     if (objectish && n.additionalProperties !== undefined && n.additionalProperties !== false) {
-      if (!("properties" in n) && n.additionalProperties === true) return null;
+      // RCPD-1: an explicit `additionalProperties: true` admits any member, declared or not: accepted without a check
+      if (n.additionalProperties === true) return null;
       if (typeof n.additionalProperties === "object") {
         node = n.additionalProperties;
         continue;
@@ -118,11 +119,15 @@ export function recipientPointerProblem(inputSchema: unknown, pointer: string, k
     if (arrayish && !objectish && !("items" in n) && !("prefixItems" in n)) return null;
     return `pointer ${pointer} names no place in the input schema`;
   }
+  // RCPD-2: a `false` schema at the leaf admits no value at all
+  if (node === false) return `pointer ${pointer} names a place the input schema forbids`;
   if (node === true || node === undefined || node === null || typeof node !== "object") return null;
   const leaf = node as SchemaNode;
   if (OPAQUE.some((k) => k in leaf)) return null;
   const types = typesOf(leaf);
   if (types !== null && !types.some((t) => leafOk(t) || t === "array")) return `pointer ${pointer} names a place that holds no string`;
+  // RCPD-2: an array leaf whose `items` is `false` holds nothing (only `[]`)
+  if (leaf.items === false && !(types ?? []).some(leafOk) && !Array.isArray(leaf.prefixItems)) return `pointer ${pointer} names an array that holds no string`;
   if (types?.includes("array") && !types.some(leafOk) && leaf.items !== null && typeof leaf.items === "object") {
     const it = typesOf(leaf.items as SchemaNode);
     if (it !== null && !it.some(leafOk)) return `pointer ${pointer} names an array that holds no string`;
