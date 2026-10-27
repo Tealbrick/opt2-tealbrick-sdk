@@ -17,6 +17,7 @@ import { type BridgeId, type Ed25519PublicJwk, type InstanceId, type InstanceRef
 import type { ProductId } from "@opt2-tealbrick/spec/manifest";
 import type { KeySet, Logger, Refusal, SliceAgent, TrustContext } from "@opt2-tealbrick/spec/sdk";
 import { metaDelete, metaGet, metaSet, type RawDb } from "./store.ts";
+import { readTopology, type SliceTopology } from "./topology.ts";
 
 interface StoredSlice {
   token: string;
@@ -224,6 +225,17 @@ export class TrustState {
     const raw: unknown = (s.bridge as { caps?: unknown } | undefined)?.caps;
     if (!Array.isArray(raw)) return Object.freeze([]);
     return Object.freeze(raw.filter((c): c is string => typeof c === "string"));
+  }
+
+  /**
+   * spec 0.1.80 (C373, G-2): the workspace grant picture from the CURRENT verified slice (`slice.topology`) as a frozen deep copy
+   * (spec members only); null when the slice is missing, older than 12 h (checked at `nowMs`), has none, or it is malformed.
+   * DISPLAY ONLY: nothing in the SDK reads this for authorization; it is exposed only as `ctx.topology()`.
+   */
+  topology(nowMs: number): SliceTopology | null {
+    const s = this.slice;
+    if (!s || this.stale(nowMs)) return null;
+    return readTopology((s as { topology?: unknown }).topology);
   }
 
   /** v0.1.18 (C106a): the slice's scopeRequest of `agt`, only when it targets `product` */

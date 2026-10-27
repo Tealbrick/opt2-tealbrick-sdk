@@ -5,6 +5,7 @@ import type { WorkspaceId } from "@opt2-tealbrick/spec/credentials";
 import type { AppDefinition, Caller, EventContext, HookContext, OpContext, PublicHandler, ScopeStore, SliceAgent, StartContext as SpecStartContext } from "@opt2-tealbrick/spec/sdk";
 import type { AppSecrets } from "./app-secrets.ts";
 import type { JobHandler, JobSpec, JobsView } from "./jobs.ts";
+import type { SliceTopology } from "./topology.ts";
 
 export interface ContextExtras {
   /** bridge public origin (`https://<bridge>`) for third-party callbacks `…/p/<product><path>`; null until the slice names it */
@@ -50,6 +51,13 @@ export interface CompanionTargetsView {
    * (the SDK authorizes every call; nothing in the SDK reads it for authorization). Also on start, event and job-handler contexts.
    */
   bridgeCaps(): readonly string[];
+  /**
+   * spec 0.1.80 (C373, G-2): the workspace grant picture (`slice.topology`) from the CURRENT verified slice on every call: a frozen
+   * deep copy; null when the slice is absent, expired (older than 12 h), has none (the manifest lacks `needsTopology` or the owner
+   * did not accept it) or it is malformed. Never throws. DISPLAY ONLY: never authorize with it (the SDK authorizes every call from
+   * the grant); stale until the next slice revision. Also on start, event and job-handler contexts.
+   */
+  topology(): SliceTopology | null;
   /** v0.1.18 (C106a, Connect F21): the slice's `agents[].scopeRequest` for `agt` when it targets THIS product, else null */
   agentScopeRequest(agt: string): ScopeRequest | null;
   /** v0.1.20: `<portalUrl>/w/<ws>/open?product=<product>&path=<path>` for ANOTHER app (shared launch-path rule; null until portalUrl) */
