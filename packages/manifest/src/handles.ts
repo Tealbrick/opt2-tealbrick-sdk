@@ -1,8 +1,8 @@
 // Channel handles (G-4, RUL-06, INB-03): ONE canonical form "<channel>:<value>", equal to the `tb.onBehalfOf`
 // channel_sender id (SDK-API §18). Governance (fleet), Rules and Inbox import these instead of keeping own copies (L1).
 // Canonical value per channel, as Connect reports a sender: Buzz = npub (bech32 of the 32-byte Nostr public key; a
-// 64-hex key becomes its npub), Slack = upper-case user id, Telegram = numeric user or chat id.
-// Spec 0.1.81 (unreleased label; C373, G-6): + Email = a bare addr-spec, lower-cased (recipients of outward calls,
+// 64-hex key becomes its npub), Slack = upper-case user id (C373: or conversation id C/G/D), Telegram = numeric user or chat id.
+// Spec next (unreleased; C373, G-6): + Email = a bare addr-spec, lower-cased (recipients of outward calls,
 // `extractRecipients`). No display name, comment, quoted local part or list is parsed: the resolving app extracts addresses.
 // No Buffer and no Node APIs: browser bundles (Portal GUI, app UIs) may import it.
 import { parseChannelSender } from "./hooks.ts";
@@ -69,8 +69,14 @@ export function isNpub(s: string): boolean {
   return convertBits(data.slice(0, -6), 5, 8, false)?.length === 32;
 }
 
+/** QA-RCP-4 (C373): printable ASCII only, checked BEFORE any case folding: `toLowerCase` / `toUpperCase` map some non-ASCII
+ *  code points onto ASCII (U+212A Kelvin sign → `k`, `ß` → `SS`, `ı` → `I`, `ſ` → `S`), so a folded value would differ from the
+ *  bytes the app sends. */
+const PRINTABLE_ASCII = /^[ -~]*$/;
+
 function canonicalValue(channel: HandleChannel, raw: string): string | null {
   const v = raw.trim();
+  if (!PRINTABLE_ASCII.test(v)) return null;
   switch (channel) {
     case "buzz": {
       const s = v.toLowerCase();
@@ -78,14 +84,16 @@ function canonicalValue(channel: HandleChannel, raw: string): string | null {
       return isNpub(s) ? s : null;
     }
     case "slack": {
+      // U/W = a person (user id); C/G/D = a conversation (channel, private group, DM; C373) — a recipient handle, never a person
       const s = v.toUpperCase();
-      return /^[UW][A-Z0-9]{2,30}$/.test(s) ? s : null;
+      return /^[UWCGD][A-Z0-9]{2,30}$/.test(s) ? s : null;
     }
     case "telegram":
       return /^-?[1-9][0-9]{0,19}$/.test(v) ? v : null;
     case "email": {
       const s = v.toLowerCase();
-      return s.length <= 254 && s.indexOf("@") <= 64 && EMAIL_SHAPE.test(s) ? s : null;
+      // QA-RCP-5: the last domain label holds a letter (no `a@1.2.3.4`, no all-numeric top-level label)
+      return s.length <= 254 && s.indexOf("@") <= 64 && EMAIL_SHAPE.test(s) && /[a-z]/.test(s.slice(s.lastIndexOf(".") + 1)) ? s : null;
     }
   }
 }

@@ -1,4 +1,4 @@
-// spec 0.1.81 (unreleased label; C373, M-OP-14): the manifest schema of the pinned spec (0.1.78) has no `operations[].recipients`
+// spec next (unreleased; C373, M-OP-14): the manifest schema of the pinned spec (0.1.78) has no `operations[].recipients`
 // and refuses unknown op members. Until the spec pin carries it, the validator compiles the pinned schema with the SAME
 // addition the spec PR makes (specs `manifest.schema.json`: `$defs.recipientSpec`, `operation.properties.recipients`,
 // `operation.dependentSchemas.recipients`). TODO(C373 re-pin): delete this file and compile the pinned schema as it is; when the
@@ -23,7 +23,13 @@ export function withRecipientsSchema<S extends object>(schema: S): S {
       },
       operation: {
         ...op,
-        dependentSchemas: { ...(op.dependentSchemas ?? {}), recipients: { properties: { effect: { const: "outward" } } } },
+        dependentSchemas: {
+          ...(op.dependentSchemas ?? {}),
+          recipients: {
+            properties: { audience: { const: "agent" } },
+            anyOf: [{ properties: { effect: { const: "outward" } } }, { required: ["holdFamily"], properties: { holdFamily: { const: "outward" } } }],
+          },
+        },
         properties: { ...op.properties, recipients: { type: "array", minItems: 1, maxItems: RECIPIENT_SPECS_MAX, items: { $ref: "#/$defs/recipientSpec" } } },
       },
     },

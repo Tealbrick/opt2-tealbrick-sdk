@@ -20,7 +20,7 @@ import { HOLDS_PENDING_OP } from "./decision.ts";
 import { canonicalize, digest } from "./jcs.ts";
 import { DATA_POLICIES, declaredModelRoles, MODEL_ROLES, modelRoleEnvDenied } from "./model-roles.ts";
 import { DYNAMIC_CALL_INPUT_SCHEMA, derivedToolNames, standardOpInputSchema, toolNameFits } from "./ops.ts";
-import { recipientSpecsProblem } from "./recipients.ts";
+import { isRecipientsOutward, type RecipientKind, recipientPointerProblem, recipientSpecsProblem } from "./recipients.ts";
 import { withRecipientsSchema } from "./recipients-schema.ts";
 import { parseSkillFile, parseVariable, skillTextViolation, VARIABLE_RE } from "./skill-text.ts";
 
@@ -565,8 +565,8 @@ function eventRules(m: Manifest, add: Add): void {
 function eventSchemaIssue(issue: ManifestIssue): ManifestIssue {
   const mr = /^\/settings\/modelRoles\/\d+\/(role|minPolicy|usedBy)(\/|$)/.exec(issue.path);
   if (mr) return { ...issue, rule: mr[1] === "role" ? "M-MR-1" : mr[1] === "minPolicy" ? "M-MR-2" : "M-MR-3", code: "model_role_invalid" };
-  // spec 0.1.81 (C373): schema failures of `operations[].recipients` (shape, and the outward-only dependentSchemas) are M-OP-14
-  if (/^\/operations\/\d+\/recipients(\/|$)/.test(issue.path) || (/^\/operations\/\d+\/effect$/.test(issue.path) && issue.message.includes("dependentSchemas/recipients"))) {
+  // spec next (C373): schema failures of `operations[].recipients` (shape, and the outward-only dependentSchemas) are M-OP-14
+  if (/^\/operations\/\d+\/recipients(\/|$)/.test(issue.path) || (/^\/operations\/\d+(\/|$)/.test(issue.path) && issue.message.includes("dependentSchemas/recipients"))) {
     return { ...issue, rule: "M-OP-14", code: "recipients_invalid" };
   }
   const m = /^\/events\/\d+\/(name|payloadSchema|visibleWith)(\/|$)/.exec(issue.path);
@@ -900,12 +900,21 @@ function backupArtifactRouteRules(m: Manifest, add: Add): void {
   // v0.1.21 (spec 0.1.43, LR-1 C234): `listing` only on agent ops
   m.operations.forEach((op, i) => {
     if (op.listing !== undefined && op.audience !== "agent") add("M-OP-11", "listing_invalid", ptr("operations", i, "listing"), "listing applies to agent ops only");
-    // spec 0.1.81 (C373, G-6): recipient places only on outward ops, 1..8 unique {pointer, kind} (the schema checks the shape;
-    // this also covers hand-built objects and duplicates). Read structurally until the spec pin types `Operation.recipients`.
+    // spec next (C373, G-6; QA-RCP-3/7): recipient places only on agent ops that are outward (effect or holdFamily), 1..8
+    // unique {pointer, kind}, and each pointer must be a place the op's input schema can hold (the schema checks the shape;
+    // this also covers hand-built objects). Read structurally until the spec pin types `Operation.recipients`.
     const recipients = (op as { recipients?: unknown }).recipients;
     if (recipients !== undefined) {
-      const problem = op.effect !== "outward" ? "recipients are allowed only on outward operations" : recipientSpecsProblem(recipients);
-      if (problem) add("M-OP-14", "recipients_invalid", ptr("operations", i, "recipients"), problem);
+      const at = ptr("operations", i, "recipients");
+      const problem =
+        op.audience !== "agent" ? "recipients are allowed only on agent operations" : !isRecipientsOutward(op) ? "recipients are allowed only on outward operations" : recipientSpecsProblem(recipients);
+      if (problem) add("M-OP-14", "recipients_invalid", at, problem);
+      else if (op.input) {
+        (recipients as { pointer: string; kind: RecipientKind }[]).forEach((r, k) => {
+          const p2 = recipientPointerProblem(op.input, r.pointer, r.kind);
+          if (p2) add("M-OP-14", "recipients_invalid", `${at}/${k}/pointer`, p2);
+        });
+      }
     }
   });
 }

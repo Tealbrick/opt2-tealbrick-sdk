@@ -1,4 +1,4 @@
-// spec 0.1.81 (unreleased label; C373, G-6): the resolve bridge op passes `DynamicResolution.recipients` (recipient PLACES of
+// spec next (unreleased; C373, G-6): the resolve bridge op passes `DynamicResolution.recipients` (recipient PLACES of
 // a tool) through, only on an outward resolution and only in the M-OP-14 shape. Real HTTP over a fake bridge. Fires on bad:
 // without the pass-through the bridge never sees places (every dynamic outward call reads "unknown"); without the shape and
 // effect check an app could hand the bridge a malformed list.
@@ -19,6 +19,7 @@ const SLACK = [{ pointer: "/channel", kind: "slack" }];
 const RESOLUTIONS: Record<string, DynamicResolution & { recipients?: unknown }> = {
   chat_send: { tool: "chat_send", crud: ["create"], effect: "outward", holdFamily: "outward", recipients: SLACK },
   mail_send: { tool: "mail_send", crud: ["create"], effect: "outward", holdFamily: "outward", recipients: [{ pointer: "/to", kind: "email" }, { pointer: "/cc", kind: "email" }] },
+  family_send: { tool: "family_send", crud: ["create"], effect: "write", holdFamily: "outward", recipients: SLACK },
   plain_send: { tool: "plain_send", crud: ["create"], effect: "outward", holdFamily: "outward" },
   write_item: { tool: "write_item", crud: ["create"], effect: "write", recipients: SLACK },
   bad_kind: { tool: "bad_kind", crud: ["create"], effect: "outward", holdFamily: "outward", recipients: [{ pointer: "/to", kind: "fax" }] },
@@ -97,6 +98,9 @@ describe("C373: resolve passes recipient places through (HTTP)", () => {
     const chat = await resolve("chat_send");
     assert.equal(chat.status, 200);
     assert.deepEqual(chat.body, { tool: "chat_send", crud: ["create"], effect: "outward", holdFamily: "outward", recipients: SLACK });
+    // QA-RCP-7: holdFamily outward is outward too
+    const family = await resolve("family_send");
+    assert.deepEqual(family.body.recipients, SLACK);
     const mail = await resolve("mail_send");
     assert.deepEqual(mail.body.recipients, RESOLUTIONS.mail_send?.recipients as Json);
   });

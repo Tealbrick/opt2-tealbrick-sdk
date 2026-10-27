@@ -1,9 +1,9 @@
-// spec 0.1.81 (unreleased label; C373, G-6): recipients of an outward call — extractRecipients, recipientSpecsProblem and
+// spec next (unreleased; C373, G-6): recipients of an outward call — extractRecipients, recipientSpecsProblem and
 // M-OP-14 in validateManifest. Each rule has a quiet case and a firing case (L34).
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import example from "@opt2-tealbrick/spec/examples/notes.manifest.json" with { type: "json" };
-import { extractRecipients, RECIPIENT_KINDS, RECIPIENT_POINTER_MAX, RECIPIENT_SPECS_MAX, RECIPIENTS_MAX, recipientSpecsProblem } from "../src/index.ts";
+import { extractRecipients, isRecipientsOutward, RECIPIENT_KINDS, RECIPIENT_POINTER_MAX, RECIPIENT_SPECS_MAX, RECIPIENTS_MAX, recipientPointerProblem, recipientSpecsProblem } from "../src/index.ts";
 import { validateManifest } from "../src/validate.ts";
 
 const NPUB = "npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6";
@@ -64,8 +64,29 @@ test("C373 extractRecipients: fires on bad values — the bad one is dropped, th
   }
   // a mixed array: good members kept, nulls dropped quietly, a bad member marks incomplete
   assert.deepEqual(extractRecipients({ to: ["a@example.com", null, 7] }, [email("/to")]), { recipients: ["email:a@example.com"], incomplete: true });
-  // slack channel ids are not user handles
-  assert.deepEqual(extractRecipients({ c: "C012ABCDEF" }, [{ pointer: "/c", kind: "slack" }]), { recipients: [], incomplete: true });
+  // C373: slack conversation ids (C/G/D) are recipient handles (conversations, not people); another prefix is not
+  assert.deepEqual(extractRecipients({ c: ["C012ABCDEF", "g012abcdef", "D012ABCDEF"] }, [{ pointer: "/c", kind: "slack" }]), { recipients: ["slack:C012ABCDEF", "slack:D012ABCDEF", "slack:G012ABCDEF"], incomplete: false });
+  assert.deepEqual(extractRecipients({ c: "X012ABCDEF" }, [{ pointer: "/c", kind: "slack" }]), { recipients: [], incomplete: true });
+});
+
+test("C373 extractRecipients: kind telegram takes JSON safe integers (negative group / channel ids) and digit strings; other numbers fail", () => {
+  const tg = (v: unknown) => extractRecipients({ chat: v }, [{ pointer: "/chat", kind: "telegram" }]);
+  assert.deepEqual(tg(123456789), { recipients: ["telegram:123456789"], incomplete: false });
+  assert.deepEqual(tg(-1001234567890), { recipients: ["telegram:-1001234567890"], incomplete: false }, "negative group id");
+  assert.deepEqual(tg("-1001234567890"), { recipients: ["telegram:-1001234567890"], incomplete: false }, "digit string");
+  assert.deepEqual(tg([42, "42", "telegram:42"]), { recipients: ["telegram:42"], incomplete: false }, "one handle three ways");
+  for (const bad of [1.5, 1e21, Number.MAX_SAFE_INTEGER + 2, 0, -0, Number.NaN, "1e5", "+123", "0123", "@someone"]) {
+    assert.equal(tg(bad).incomplete, true, String(bad));
+    assert.deepEqual(tg(bad).recipients, [], String(bad));
+  }
+  // a number is a value only for telegram
+  assert.deepEqual(extractRecipients({ c: 123 }, [{ pointer: "/c", kind: "slack" }]), { recipients: [], incomplete: true });
+  // the build-time walk lets an integer leaf through for telegram only
+  const schema = { type: "object", properties: { chat: { type: "integer" }, chats: { type: "array", items: { type: "integer" } } } };
+  assert.equal(recipientPointerProblem(schema, "/chat", "telegram"), null);
+  assert.equal(recipientPointerProblem(schema, "/chats", "telegram"), null);
+  assert.notEqual(recipientPointerProblem(schema, "/chat", "email"), null);
+  assert.notEqual(recipientPointerProblem(schema, "/chats", "slack"), null);
 });
 
 test("C373 extractRecipients: more than 64 distinct → the first 64 in code-unit order and incomplete; exactly 64 is complete", () => {
@@ -106,6 +127,10 @@ test("C373 recipientSpecsProblem: quiet on good, fires on bad", () => {
   ];
   for (const [name, specs] of bad) assert.notEqual(recipientSpecsProblem(specs), null, name);
   assert.equal(recipientSpecsProblem([email(`/${"x".repeat(255)}`)]), null, "256 chars is the limit");
+  // QA-RCP-6: code points, like the schema's maxLength (255 astral chars = 510 UTF-16 units, still within the limit)
+  const astral = String.fromCodePoint(0x1f600);
+  assert.equal(recipientSpecsProblem([email(`/${astral.repeat(255)}`)]), null, "256 code points");
+  assert.notEqual(recipientSpecsProblem([email(`/${astral.repeat(256)}`)]), null, "257 code points");
 });
 
 const base = (): any => structuredClone(example);
@@ -117,8 +142,59 @@ function issues(fn: (m: any) => void) {
   return r.ok ? [] : r.errors;
 }
 
-test("C373 M-OP-14: recipients on an outward op validate", () => {
-  assert.deepEqual(issues((m) => (outwardOp(m).recipients = [email("/to"), { pointer: "/channel", kind: "slack" }])), []);
+test("C373 M-OP-14: recipients on an outward agent op validate", () => {
+  assert.deepEqual(issues((m) => (outwardOp(m).recipients = [email("/to"), { pointer: "/to", kind: "slack" }])), []);
+});
+
+test("C373 QA-RCP-7: isRecipientsOutward = effect or holdFamily outward", () => {
+  assert.equal(isRecipientsOutward({ effect: "outward" }), true);
+  assert.equal(isRecipientsOutward({ effect: "write", holdFamily: "outward" }), true);
+  assert.equal(isRecipientsOutward({ effect: "outward", holdFamily: "first_contact" }), true);
+  for (const r of [{ effect: "write" }, { effect: "money", holdFamily: "money" }, { effect: "write", holdFamily: "first_contact" }, {}]) assert.equal(isRecipientsOutward(r), false, JSON.stringify(r));
+});
+
+// QA-RCP-3: a static pointer must name a place the input schema can hold
+const SCHEMA = {
+  type: "object",
+  properties: {
+    to: { type: "string" },
+    cc: { type: ["array", "null"], items: { type: "string" } },
+    nums: { type: "array", items: { type: "integer" } },
+    count: { type: "integer" },
+    body: { type: "object", properties: { recipients: { type: "array", items: { type: "string" } } }, additionalProperties: false },
+    pair: { type: "array", prefixItems: [{ type: "string" }, { type: "object", properties: { id: { type: "string" } } }] },
+    meta: { type: "object" },
+    byName: { type: "object", additionalProperties: { type: "string" } },
+    ref: { $ref: "#/$defs/x" },
+    any: {},
+    open: true,
+  },
+};
+
+test("C373 QA-RCP-3 recipientPointerProblem: quiet on places the schema can hold, and where it cannot be walked", () => {
+  for (const p of ["/to", "/cc", "/cc/0", "/body/recipients", "/body/recipients/3", "/pair/0", "/pair/1/id", "/meta/anything", "/byName/x", "/ref/deep/er", "/any/x", "/open/x"]) {
+    assert.equal(recipientPointerProblem(SCHEMA, p), null, p);
+  }
+  assert.equal(recipientPointerProblem({ type: "object" }, "/whatever"), null, "an open object without properties");
+  assert.equal(recipientPointerProblem({ oneOf: [{ type: "object" }] }, "/x"), null, "a combinator");
+});
+
+test("C373 QA-RCP-3 recipientPointerProblem: fires on a typo, a step through a scalar, a bad index, a leaf that holds no string", () => {
+  for (const p of ["/does_not_exist", "/To", "/to/x", "/body/recipient", "/body/recipients/x", "/cc/-", "/cc/01", "/count", "/nums", "/pair/1/name"]) {
+    assert.notEqual(recipientPointerProblem(SCHEMA, p), null, p);
+  }
+  assert.notEqual(recipientPointerProblem({ type: "object", properties: { a: { type: "string" } }, additionalProperties: false }, "/b"), null, "closed object");
+  assert.notEqual(recipientPointerProblem({ type: "object", properties: {}, additionalProperties: false }, "/a"), null, "closed, no members");
+});
+
+test("C373 QA-RCP-3 M-OP-14 in validateManifest: a static pointer the input cannot hold is refused at its path", () => {
+  const errs = issues((m) => (outwardOp(m).recipients = [email("/to"), email("/does_not_exist")]));
+  assert.equal(errs.length, 1, JSON.stringify(errs));
+  assert.equal(errs[0]?.rule, "M-OP-14");
+  assert.equal(errs[0]?.code, "recipients_invalid");
+  assert.match(errs[0]?.path ?? "", /\/recipients\/1\/pointer$/);
+  // the id field is a string: a valid place; quiet
+  assert.deepEqual(issues((m) => (outwardOp(m).recipients = [email("/id")])), []);
 });
 
 test("C373 M-OP-14: fires on a non-outward op, bad pointer, > 8, unknown kind, duplicates — rule M-OP-14, code recipients_invalid", () => {
@@ -126,6 +202,8 @@ test("C373 M-OP-14: fires on a non-outward op, bad pointer, > 8, unknown kind, d
   const cases: [string, (m: any) => void][] = [
     ["write op", (m) => (writeOp(m).recipients = [email("/to")])],
     ["read op", (m) => (m.operations.find((o: any) => o.effect === "read").recipients = [email("/to")])],
+    // QA-RCP-7: an outward op for people (never hooked)
+    ["person op", (m) => Object.assign(outwardOp(m), { audience: "person", recipients: [email("/to")] })],
     ["bad pointer", (m) => (outwardOp(m).recipients = [email("to")])],
     ["9 places", (m) => (outwardOp(m).recipients = Array.from({ length: 9 }, (_, i) => email(`/r${i}`)))],
     ["unknown kind", (m) => (outwardOp(m).recipients = [{ pointer: "/to", kind: "fax" }])],

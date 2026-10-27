@@ -1,7 +1,7 @@
 // Grantless bridge→app routes (SDK-API §3.2): hook calls (`verifyHookProof`) and the bridge ops catalog, resolve,
 // mark, scope-summary (`verifyBridgeOpProof`, C16 B5). No receipts, no hooks, no agent action.
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { bridgeOpBinding, digest, hookCallerRef, hookResponseProblem, mcpToolName, recipientSpecsProblem, sha256Bytes, toolNameFits, verifyBridgeOpProof, verifyHookProof } from "@opt2-tealbrick/manifest";
+import { bridgeOpBinding, digest, hookCallerRef, hookResponseProblem, isRecipientsOutward, mcpToolName, recipientSpecsProblem, sha256Bytes, toolNameFits, verifyBridgeOpProof, verifyHookProof } from "@opt2-tealbrick/manifest";
 import { BRIDGE_HEADERS, type HookRequest, type ScopeSummaryResult } from "@opt2-tealbrick/spec/bridge";
 import type { BridgeOp } from "@opt2-tealbrick/spec/credentials";
 import { type DynamicCatalogEntry, EFFECTS, HOOK_PHASES, type Operation } from "@opt2-tealbrick/spec/manifest";
@@ -188,12 +188,12 @@ export async function handleBridgeOp(rt: Runtime, req: IncomingMessage, res: Ser
         const r = await d.resolve(body.tool, hookContext(rt, 2000));
         if (!r) throw new TbError("dynamic_resolve_failed", "unknown dynamic tool", 404);
         if (!withinCeiling(op, r)) throw new TbError("dynamic_ceiling_exceeded", "resolved tool exceeds the operation's ceiling", 403);
-        // spec 0.1.81 (unreleased label; C373, G-6): recipient PLACES of this tool (pointers into the call's arguments) pass through
-        // only on an outward resolution and only in the M-OP-14 shape; anything else is dropped with a warning (absent = unknown, so
+        // spec next (unreleased; C373, G-6): recipient PLACES of this tool (pointers into the call's arguments) pass through
+        // only on an outward resolution (effect or holdFamily `outward`) and only in the M-OP-14 shape; anything else is dropped with a warning (absent = unknown, so
         // a policy fails closed). Never a value: a resolution is per tool and the bridge caches it. Read structurally until the
         // spec pin types `DynamicResolution.recipients`.
         const places = (r as { recipients?: unknown }).recipients;
-        const keep = places !== undefined && r.effect === "outward" && recipientSpecsProblem(places) === null;
+        const keep = places !== undefined && isRecipientsOutward(r) && recipientSpecsProblem(places) === null;
         if (places !== undefined && !keep) rt.log.warn("dynamic resolution recipients dropped", { op: op.id, tool: body.tool });
         return sendJson(res, 200, { tool: body.tool, crud: r.crud, effect: r.effect, ...(r.holdFamily ? { holdFamily: r.holdFamily } : {}), ...(keep ? { recipients: places as Json } : {}) });
       }
