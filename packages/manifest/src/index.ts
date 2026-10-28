@@ -16,6 +16,7 @@ export * from "./model-roles.ts";
 export * from "./ops.ts";
 export * from "./privilege.ts";
 export * from "./random.ts";
+export * from "./recipients.ts";
 export * from "./seal.ts";
 export * from "./skills.ts";
 export * from "./tokens.ts";

@@ -34,7 +34,11 @@ test("G-4 normalizeHandle: shared vectors; never throws", () => {
 
 test("G-4 normalizeHandle is idempotent and handleChannel only accepts canonical handles", () => {
   for (const v of V.normalizeHandle) if (v.out) assert.equal(normalizeHandle(v.out), v.out);
-  assert.deepEqual([...HANDLE_CHANNELS], ["buzz", "slack", "telegram"]);
+  assert.deepEqual([...HANDLE_CHANNELS], ["buzz", "slack", "telegram", "email"]); // + email (C373)
+  assert.equal(handleChannel("email:a@example.com"), "email");
+  assert.equal(handleChannel("email:A@example.com"), null); // not canonical
+  assert.equal(normalizeHandle(`email:${"a".repeat(65)}@example.com`), null); // local part > 64
+  assert.equal(normalizeHandle(`email:a@${"b".repeat(60)}.${"c".repeat(60)}.${"d".repeat(60)}.${"e".repeat(60)}.${"f".repeat(9)}.example`), null); // > 254
   assert.equal(handleChannel("slack:U012ABCDEF"), "slack");
   assert.equal(handleChannel("slack:u012abcdef"), null); // not canonical
   assert.equal(handleChannel("telegram:-1001234567890"), "telegram");
