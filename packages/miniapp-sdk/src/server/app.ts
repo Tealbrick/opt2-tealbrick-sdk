@@ -456,7 +456,7 @@ export async function startApp(
   const appsPolicy = (): readonly string[] | null => trust.appsPolicy();
   // v0.1.37 (C292): read from the CURRENT slice at every call (never a snapshot); advisory, no authorization reads it
   const bridgeCaps = (): readonly string[] => trust.bridgeCaps(Date.now());
-  // spec 0.1.80 (C373, G-2): the same rule for the grant picture; display only, no authorization reads it
+  // spec 0.1.87 (C373, G-2): the same rule for the grant picture; display only, no authorization reads it
   const topology = (): SliceTopologyView | null => trust.topology(Date.now());
   const agentScopeRequest = (agt: string): ScopeRequest | null => trust.agentScopeRequest(agt, manifest.id);
   // v0.1.21: the job runner exists from right after `rt` below; event contexts are only built after that

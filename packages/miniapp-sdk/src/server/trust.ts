@@ -228,7 +228,7 @@ export class TrustState {
   }
 
   /**
-   * spec 0.1.80 (C373, G-2): the workspace grant picture from the CURRENT verified slice (`slice.topology`) as a frozen deep copy
+   * spec 0.1.87 (C373, G-2): the workspace grant picture from the CURRENT verified slice (`slice.topology`) as a frozen deep copy
    * (tuple form; `agentIdx` checked against this slice's `agents.length`, out-of-range rows dropped with `truncated: true`); null
    * when the slice is missing, older than 12 h (checked at `nowMs`), has none, or it is malformed. Carries `agentIds` of the SAME
    * slice (one read of `this.slice`), so `agentIdx` resolves against exactly the agents list it was written for.

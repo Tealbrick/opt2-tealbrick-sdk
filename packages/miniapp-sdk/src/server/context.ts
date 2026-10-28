@@ -52,7 +52,7 @@ export interface CompanionTargetsView {
    */
   bridgeCaps(): readonly string[];
   /**
-   * spec 0.1.80 (C373, G-2): the workspace grant picture (`slice.topology`, compact tuple form) from the CURRENT verified slice on
+   * spec 0.1.87 (C373, G-2): the workspace grant picture (`slice.topology`, compact tuple form) from the CURRENT verified slice on
    * every call: a frozen deep copy; null when the slice is absent, expired (older than 12 h), has none (the manifest lacks
    * `needsTopology` or the owner did not grant the `topology` consent) or it is malformed. A row with an index out of range is
    * dropped and the copy says `truncated: true`. `agentIds` = the agent ids of the SAME slice in slice order: resolve `agentIdx` as

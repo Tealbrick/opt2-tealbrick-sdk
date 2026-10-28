@@ -74,7 +74,7 @@ function checkSchema(json: unknown): ManifestIssue[] {
   return out;
 }
 
-// spec 0.1.80 (C373, G-2; number set at merge): top-level `needsTopology` is a boolean (default false). SPEC-GAP until the spec
+// spec 0.1.87 (C373, G-2): top-level `needsTopology` is a boolean (default false). SPEC-GAP until the spec
 // pin carries it: while the pinned manifest schema does not know the field, a boolean is accepted (left out of a shallow copy
 // for the schema check only; the manifest and its digest keep it) and any other value is refused as the schema would refuse it.
 // Once the pinned schema declares `needsTopology`, this gate passes everything through and the schema decides.
@@ -86,7 +86,7 @@ function needsTopologyGate(json: unknown): { json: unknown; issues: ManifestIssu
   return { json: rest, issues: [{ path: "/needsTopology", rule: "schema", code: "schema_invalid", message: "must be boolean (#/properties/needsTopology/type)" }] };
 }
 
-/** M-TP-1 (spec 0.1.80, C373): topology rows name agents by their index in the slice `agents[]`, so `needsTopology: true` needs the
+/** M-TP-1 (spec 0.1.87, C373): topology rows name agents by their index in the slice `agents[]`, so `needsTopology: true` needs the
  *  full directory (`needsAgentDirectory: true`) → `topology_needs_directory`. */
 function topologyRules(m: Manifest, add: Add): void {
   const t = m as Manifest & { needsTopology?: boolean };

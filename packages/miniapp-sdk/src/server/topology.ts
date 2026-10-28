@@ -1,8 +1,8 @@
-// spec 0.1.80 (C373, G-2; number set at merge): `ctx.topology()` — the workspace grant picture from the verified slice
+// spec 0.1.87 (C373, G-2): `ctx.topology()` — the workspace grant picture from the verified slice
 // (`slice.topology`, compact tuple form), DISPLAY ONLY. Nothing in the SDK reads it for authorization; apps MUST NOT
 // authorize with it.
 //
-// SPEC-GAP until the spec pin carries 0.1.80: `SliceTopology`, the tuple aliases and `TOPOLOGY_MAX` mirror
+// SPEC-GAP until the spec pin carries 0.1.87: `SliceTopology`, the tuple aliases and `TOPOLOGY_MAX` mirror
 // `@opt2-tealbrick/spec/bridge` (same names, same shape). When the pin moves, replace this mirror with the spec import (L1:
 // one copy); the decode helpers (`topologyCrudActions`, `topologyHeldFamilies`) come from the spec then.
 
@@ -12,7 +12,7 @@ const OPS_COUNT_MAX = 128;
 const HELD_MASK_MAX = 0x7fff_ffff;
 const CRUD_RE = /^c?r?u?d?$/;
 
-/** Mirrors of the spec tuple aliases (CORE "v0.1.80"). */
+/** Mirrors of the spec tuple aliases (CORE "v0.1.87"). */
 export type TopologyInstance = [ins: string, product: string, name: string, version: string];
 export type TopologyEdge = [agentIdx: number, instIdx: number, crud: string, mode: "f" | "b", held: number, wfCount: number, paused: 0 | 1];
 export type TopologyCompanion = [fromIdx: number, toIdx: number, crud: string, opsCount: number];
@@ -45,7 +45,7 @@ const inRange = (i: number, length: number): boolean => i >= 0 && i < length;
 /**
  * Validates `raw` (the slice's `topology` member) and returns a deeply frozen copy. `agentsLength` = the length of the SAME
  * slice's `agents[]` (what `agentIdx` indexes). A row whose index is out of range (0 ≤ idx < length fails) is DROPPED and the
- * copy carries `truncated: true` (CORE "v0.1.80" rule 2). null when `raw` is absent or malformed: `v` is not 1, a list is
+ * copy carries `truncated: true` (CORE "v0.1.87" rule 2). null when `raw` is absent or malformed: `v` is not 1, a list is
  * missing, not an array or over its bound, a row has the wrong arity or a value outside its type. Never throws.
  */
 export function readTopology(raw: unknown, agentsLength: number): SliceTopology | null {
