@@ -240,6 +240,8 @@ export function buildContext(
     appsPolicy: () => rt.appsPolicy(),
     // v0.1.37 (C292, spec 0.1.54): every op context (person, agent, app, scheduled and resumed calls) reads the CURRENT slice; advisory
     bridgeCaps: () => rt.bridgeCaps(),
+    // spec 0.1.87 (C373, G-2): display only; every op context reads the CURRENT slice
+    topology: () => rt.topology(),
     // v0.1.38 (C274c/C274d, SDK-API §20): synchronous outbox writes; `causedBy` = the VERIFIED agent caller of this call (never app code)
     emit: rt.events.emitFn(caller.type === "agent" ? { causedBy: caller.id as AgentId } : {}),
     purgeEvents: rt.events.purgeFn(),

@@ -50,6 +50,7 @@ import {
   scanMigrations,
   storedSchema,
 } from "./store.ts";
+import type { SliceTopologyView } from "./topology.ts";
 import { TrustState } from "./trust.ts";
 import { type BootFailure, type BootPhase, bootFailure, type Clock, META, MigrationLock, type PreUpdateSnapshot, readUpgradeMeta, realClock, recordBoot } from "./upgrade.ts";
 
@@ -455,6 +456,8 @@ export async function startApp(
   const appsPolicy = (): readonly string[] | null => trust.appsPolicy();
   // v0.1.37 (C292): read from the CURRENT slice at every call (never a snapshot); advisory, no authorization reads it
   const bridgeCaps = (): readonly string[] => trust.bridgeCaps(Date.now());
+  // spec 0.1.87 (C373, G-2): the same rule for the grant picture; display only, no authorization reads it
+  const topology = (): SliceTopologyView | null => trust.topology(Date.now());
   const agentScopeRequest = (agt: string): ScopeRequest | null => trust.agentScopeRequest(agt, manifest.id);
   // v0.1.21: the job runner exists from right after `rt` below; event contexts are only built after that
   let runner: JobRunner | null = null;
@@ -472,6 +475,7 @@ export async function startApp(
     companionTargets,
     appsPolicy,
     bridgeCaps,
+    topology,
     // v0.1.38 (C274c): event, start and job-handler contexts emit too; no call, so no `causedBy`
     emit: events.emitFn(),
     purgeEvents: events.purgeFn(),
@@ -615,6 +619,7 @@ export async function startApp(
     companionTargets,
     appsPolicy,
     bridgeCaps,
+    topology,
     agentScopeRequest,
     eventContext,
     async notifyAgents() {

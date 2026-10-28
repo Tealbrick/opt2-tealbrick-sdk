@@ -74,6 +74,25 @@ function checkSchema(json: unknown): ManifestIssue[] {
   return out;
 }
 
+// spec 0.1.87 (C373, G-2): top-level `needsTopology` is a boolean (default false). SPEC-GAP until the spec
+// pin carries it: while the pinned manifest schema does not know the field, a boolean is accepted (left out of a shallow copy
+// for the schema check only; the manifest and its digest keep it) and any other value is refused as the schema would refuse it.
+// Once the pinned schema declares `needsTopology`, this gate passes everything through and the schema decides.
+const SCHEMA_HAS_NEEDS_TOPOLOGY = Object.hasOwn((manifestSchema as { properties?: object }).properties ?? {}, "needsTopology");
+function needsTopologyGate(json: unknown): { json: unknown; issues: ManifestIssue[] } {
+  if (SCHEMA_HAS_NEEDS_TOPOLOGY || json === null || typeof json !== "object" || Array.isArray(json) || !Object.hasOwn(json, "needsTopology")) return { json, issues: [] };
+  const { needsTopology, ...rest } = json as Record<string, unknown>;
+  if (typeof needsTopology === "boolean") return { json: rest, issues: [] };
+  return { json: rest, issues: [{ path: "/needsTopology", rule: "schema", code: "schema_invalid", message: "must be boolean (#/properties/needsTopology/type)" }] };
+}
+
+/** M-TP-1 (spec 0.1.87, C373): topology rows name agents by their index in the slice `agents[]`, so `needsTopology: true` needs the
+ *  full directory (`needsAgentDirectory: true`) → `topology_needs_directory`. */
+function topologyRules(m: Manifest, add: Add): void {
+  const t = m as Manifest & { needsTopology?: boolean };
+  if (t.needsTopology === true && m.needsAgentDirectory !== true) add("M-TP-1", "topology_needs_directory", "/needsTopology", "needsTopology requires needsAgentDirectory: true");
+}
+
 // ───────────────────────────── JSON Schema compile cache (operation input/output) ─────────────────────────────
 
 const ioAjv = new Ajv2020({ allErrors: true, strict: false, validateFormats: false, logger: false });
@@ -928,7 +947,8 @@ export function manifestDigest(manifest: Manifest): `sha256:${string}` {
 
 /** Schema + every M-* rule. Returns the manifest (same object) and its digest, or every issue found. */
 export function validateManifest(json: unknown): ManifestValidation {
-  const schemaErrors = checkSchema(json);
+  const topology = needsTopologyGate(json);
+  const schemaErrors = [...topology.issues, ...checkSchema(topology.json)];
   if (schemaErrors.length) return { ok: false, errors: schemaErrors.map(eventSchemaIssue) };
   const m = json as Manifest;
   let bytes: number;
@@ -959,6 +979,7 @@ export function validateManifest(json: unknown): ManifestValidation {
   modelRoleRules(m, idx, add);
   hookRules(m, add);
   companionRules(m, add);
+  topologyRules(m, add);
   skillHintRules(m, idx, add);
   backupArtifactRouteRules(m, add);
   eventRules(m, add);

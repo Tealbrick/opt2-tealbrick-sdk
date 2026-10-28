@@ -92,6 +92,8 @@ export async function slice(
     viewUrl?: string | null;
     /** spec 0.1.54 (C292): bridge.caps as the bridge reported them (`unknown` so a test can push a malformed value; absent = member omitted) */
     bridgeCaps?: unknown;
+    /** spec 0.1.80 (C373): slice `topology` (`unknown` so a test can push a malformed value; absent = member omitted) */
+    topology?: unknown;
   } = {},
 ): Promise<string> {
   w.rev += 1;
@@ -123,6 +125,7 @@ export async function slice(
       ...(over.companionCallers ? { companionCallers: over.companionCallers } : {}),
       ...(over.appsPolicy ? { appsPolicy: over.appsPolicy } : {}),
       ...(over.appCallers !== undefined ? { appCallers: over.appCallers } : {}),
+      ...(over.topology !== undefined ? { topology: over.topology } : {}),
     } as Parameters<typeof signSlice>[0],
     w.portal,
   );

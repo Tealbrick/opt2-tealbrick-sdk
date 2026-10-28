@@ -19,6 +19,7 @@ import type { Receipts } from "./receipts.ts";
 import type { ScopeStoreInternals } from "./scopes.ts";
 import type { Sealer } from "./secrets.ts";
 import type { RawDb, SchemaVersion } from "./store.ts";
+import type { SliceTopologyView } from "./topology.ts";
 import type { TrustState } from "./trust.ts";
 import type { PreUpdateSnapshot } from "./upgrade.ts";
 
@@ -92,6 +93,8 @@ export interface Runtime {
   appsPolicy(): readonly string[] | null;
   /** v0.1.37 (C292): `ctx.bridgeCaps()` — a frozen copy of the CURRENT verified slice's `bridge.caps`; [] when absent, expired or none. Advisory only. */
   bridgeCaps(): readonly string[];
+  /** spec 0.1.87 (C373): `ctx.topology()` — a frozen deep copy of the CURRENT verified slice's `topology`; null when absent, expired or malformed. Display only. */
+  topology(): SliceTopologyView | null;
   /** v0.1.18 (C106a) */
   agentScopeRequest(agt: string): ScopeRequest | null;
   /** v0.1.13: the ctx every event handler gets */

@@ -724,3 +724,74 @@ describe("v0.1.21 (spec 0.1.43): viewer routes (M-PR-2) and listing (M-OP-11)", 
     expectIssue(mutate((m) => (m.contracts = { produces: ["messages/9"] })), "schema", "schema_invalid");
   });
 });
+
+describe("spec 0.1.80 (C373, G-2): needsTopology is boolean only", () => {
+  test("a manifest without needsTopology still validates", () => {
+    const m = base();
+    delete m.needsTopology;
+    const r = validateManifest(m);
+    assert.equal(r.ok, true, JSON.stringify(!r.ok && r.errors));
+  });
+  test("true and false validate; the manifest and its digest keep the flag", () => {
+    for (const v of [true, false]) {
+      const r = mutate((m) => {
+        m.needsTopology = v;
+        m.needsAgentDirectory = true;
+      });
+      assert.equal(r.ok, true, JSON.stringify(!r.ok && r.errors));
+      if (r.ok) {
+        assert.equal((r.manifest as { needsTopology?: boolean }).needsTopology, v);
+        assert.equal(r.digest, manifestDigest(r.manifest));
+      }
+    }
+    const on = mutate((m) => {
+      m.needsTopology = true;
+      m.needsAgentDirectory = true;
+    });
+    const off = mutate((m) => (m.needsAgentDirectory = true));
+    assert.ok(on.ok && off.ok && on.digest !== off.digest, "the flag is part of the signed manifest digest");
+  });
+  for (const bad of ["yes", "true", 1, 0, null, {}, []] as unknown[]) {
+    test(`needsTopology ${JSON.stringify(bad)} is refused (schema_invalid at /needsTopology)`, () => {
+      expectIssue(mutate((m) => (m.needsTopology = bad)), "schema", "schema_invalid", "/needsTopology");
+    });
+  }
+  test("a bad needsTopology is reported together with other schema problems", () => {
+    const r = mutate((m) => {
+      m.needsTopology = "yes";
+      m.unknownTopLevel = 1;
+    });
+    expectIssue(r, "schema", "schema_invalid", "/needsTopology");
+    expectIssue(r, "schema", "schema_invalid", "/unknownTopLevel");
+  });
+});
+
+describe("spec 0.1.80 (C373): M-TP-1 — needsTopology requires needsAgentDirectory", () => {
+  test("needsTopology: true + needsAgentDirectory: true validates", () => {
+    const r = mutate((m) => {
+      m.needsTopology = true;
+      m.needsAgentDirectory = true;
+    });
+    assert.equal(r.ok, true, JSON.stringify(!r.ok && r.errors));
+  });
+  for (const dirValue of [false, undefined]) {
+    test(`needsTopology: true with needsAgentDirectory ${String(dirValue)} → topology_needs_directory at /needsTopology`, () => {
+      const r = mutate((m) => {
+        m.needsTopology = true;
+        if (dirValue === undefined) delete m.needsAgentDirectory;
+        else m.needsAgentDirectory = dirValue;
+      });
+      expectIssue(r, "M-TP-1", "topology_needs_directory", "/needsTopology");
+    });
+  }
+  test("needsTopology: false (or absent) needs no directory", () => {
+    for (const v of [false, undefined]) {
+      const r = mutate((m) => {
+        if (v === undefined) delete m.needsTopology;
+        else m.needsTopology = v;
+        m.needsAgentDirectory = false;
+      });
+      assert.equal(r.ok, true, JSON.stringify(!r.ok && r.errors));
+    }
+  });
+});
