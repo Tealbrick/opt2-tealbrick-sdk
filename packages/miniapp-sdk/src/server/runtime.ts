@@ -8,11 +8,12 @@ import type { AppSecrets } from "./app-secrets.ts";
 import type { BackupHealth, RestoreOutcome } from "./backup.ts";
 import type { BridgeClient } from "./bridge-client.ts";
 import type { AttentionCode } from "./claim-guard.ts";
-import type { ContextExtras, SdkAppDefinition, SdkEventContext } from "./context.ts";
+import type { ActingEnvelope, ContextExtras, SdkAppDefinition, SdkEventContext } from "./context.ts";
 import type { SdkConfig } from "./env.ts";
 import type { EventOutbox } from "./events.ts";
 import type { JobRunner } from "./jobs.ts";
 import type { KeysInternals } from "./keys.ts";
+import type { PolicyRecheckAnswer } from "./link.ts";
 import type { SecretRegistry } from "./log.ts";
 import type { PersonAuth } from "./person.ts";
 import type { Receipts } from "./receipts.ts";
@@ -108,6 +109,9 @@ export interface Runtime {
   /** first sight of an agent edge (§7.2): agentAdded event, then manifest defaultGrants */
   ensureAgent(agent: SliceAgent): Promise<void>;
   /** `parentCall: null` = app-initiated (C85: StartContext / EventContext / timers) */
-  callApp<O = Json>(product: string, op: string, input: Json, opts: { idempotencyKey?: string; context?: Record<string, Json>; parentCall: string | null }): Promise<CompanionResult<O>>;
+  callApp<O = Json>(product: string, op: string, input: Json, opts: { idempotencyKey?: string; context?: Record<string, Json>; parentCall: string | null; acting?: ActingEnvelope }): Promise<CompanionResult<O>>;
+  /** spec 0.1.88 (C378, BRIDGE §8.7) */
+  actingTickets(call: string, job: string): Promise<string[]>;
+  policyRecheck(body: { op: string; input: Json; caller: { type: "agent" | "app"; id: string } }): Promise<PolicyRecheckAnswer>;
   callServiceHelper<O = Json>(serviceId: string, path: string, body: Json): Promise<O>;
 }

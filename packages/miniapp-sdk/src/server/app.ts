@@ -23,7 +23,7 @@ import { JOB_KIND_RE, JobRunner, type JobsApi, jobsView, RUNNER_DEFAULTS, sealGr
 import { createKeys } from "./keys.ts";
 import { BridgeLink } from "./link.ts";
 import { createLogger, SecretRegistry } from "./log.ts";
-import { decide, fireScheduledOp } from "./ops.ts";
+import { decide, fireScheduledOp, sendTimeCheck } from "./ops.ts";
 import { createPersonAuth } from "./person.ts";
 import { dropPrivileges, type PrivilegeProc } from "./privilege.ts";
 import { Receipts } from "./receipts.ts";
@@ -439,8 +439,10 @@ export async function startApp(
   // v0.1.13 (C85/C86): callApp without parentCall (app-initiated), statusChanged and ownerLink outside op handlers
   const appCallApp: StartContext["callApp"] = (product, op, input, opts) => {
     if (!link) return Promise.reject(new TbError("no_bridge", "companion calls need the bridge", 503));
-    return link.call(product, op, input, { ...(opts?.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}), ...(opts?.context !== undefined ? { context: opts.context } : {}), parentCall: null });
+    return link.call(product, op, input, { ...(opts?.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}), ...(opts?.context !== undefined ? { context: opts.context } : {}), ...(opts?.acting ? { acting: opts.acting } : {}), parentCall: null });
   };
+  // spec 0.1.88 (C378): the send-time check on start, event and job contexts
+  const appSendTimeCheck: StartContext["sendTimeCheck"] = (input) => sendTimeCheck(rt, input);
   /** v0.1.13 (C86) ownerLink / v0.1.20 ownerLinkFor: ONE builder; the path passes the shared launch-path rule (L1). */
   const ownerLinkFor = (product: string, path: string): string | null => {
     if (typeof product !== "string" || !/^[a-z][a-z0-9-]{1,31}$/.test(product)) throw new TbError("product_invalid", "not a product id", 400);
@@ -470,6 +472,7 @@ export async function startApp(
     log,
     scopes,
     callApp: appCallApp,
+    sendTimeCheck: appSendTimeCheck,
     statusChanged,
     ownerLink,
     companionTargets,
@@ -664,6 +667,14 @@ export async function startApp(
       return link.call(product, op, input, opts);
     },
     callServiceHelper: helper,
+    async actingTickets(call, job) {
+      if (!link) throw new TbError("no_bridge", "acting tickets need the bridge", 503);
+      return link.actingTickets(call, job);
+    },
+    async policyRecheck(body) {
+      if (!link) throw new TbError("no_bridge", "the send-time check needs the bridge", 503);
+      return link.policyRecheck(body);
+    },
   };
 
   runner = new JobRunner(rt, def.jobs, fireScheduledOp, harness?.jobs ?? {});
