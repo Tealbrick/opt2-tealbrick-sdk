@@ -9,6 +9,7 @@ import { signGrant, ulid } from "@opt2-tealbrick/manifest";
 import type { InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { EventContext, Json, OpContext, RunningApp, StartContext } from "@opt2-tealbrick/spec/sdk";
+import type { ApprovedHold, SdkOpContext } from "../src/server/context.ts";
 import { TbError } from "../src/server/errors.ts";
 import { defineApp, startApp } from "../src/server/index.ts";
 import { callerContextOf, receiptMetaWithContext } from "../src/server/ops.ts";
@@ -30,6 +31,8 @@ interface Booted {
   startCtx: StartContext | null;
   eventCtx: EventContext | null;
   ran: { note_delete: number };
+  /** `ctx.approvedHold` of each note_delete run */
+  approvals: (ApprovedHold | null)[];
   /** what the op `note_get` calls through ctx.callApp (set by a test) */
   next: { product: string; op: string; input: Json; opts?: { idempotencyKey?: string; context?: Record<string, Json> } } | null;
   insA: InstanceId;
@@ -50,7 +53,7 @@ async function boot(): Promise<Booted> {
   );
   const bridge = new FakeBridge(w);
   const bridgeUrl = await bridge.start(await slice(w, PRODUCT, { grants: [companionGrant], companionTargets: [{ product: PEER, ins: peerIns }] }));
-  const b = { w, bridge, dataDir: t.dir, startCtx: null, eventCtx: null, ran: { note_delete: 0 }, next: null, insA: `ins_${ulid()}` as InstanceId, insB: `ins_${ulid()}` as InstanceId } as unknown as Booted;
+  const b = { w, bridge, dataDir: t.dir, startCtx: null, eventCtx: null, ran: { note_delete: 0 }, approvals: [], next: null, insA: `ins_${ulid()}` as InstanceId, insB: `ins_${ulid()}` as InstanceId } as unknown as Booted;
   b.base = `http://127.0.0.1:${port}`;
   const app = defineApp({
     manifest: m,
@@ -62,8 +65,9 @@ async function boot(): Promise<Booted> {
         if (!n) return { none: true };
         return (await ctx.callApp(n.product, n.op, n.input, n.opts)) as unknown as Json;
       },
-      note_delete: async () => {
+      note_delete: async (_input, ctx) => {
         b.ran.note_delete += 1;
+        b.approvals.push((ctx as SdkOpContext).approvedHold);
         return { deleted: true };
       },
       notebook_rename: async () => ({}),
@@ -544,5 +548,66 @@ describe("target side: receipts, holds, summary, hold status, repeat (SDK-API §
       assert.equal(post2.body.error.code, "hold_denied");
       assert.equal(b.ran.note_delete, ran, "the handler never ran for a denied or expired hold");
     });
+  });
+
+  // C378: the key binding and the approval signal
+  const approve = async (id: unknown) => assert.equal((await personOp(b, s, "tb.holds_decide", { holdId: String(id), decision: "approve" })).status, 200);
+
+  test("C378: another run (another key) with identical input does not use the approval; the waiting run still runs on it", async () => {
+    const id = "n-bound-1";
+    const before = b.ran.note_delete;
+    const a = await holdOf(b.insA, evoContext({ "jotter.run": "run_a" }), id, "jotter", "wfrun:bound:run_a:step");
+    assert.equal(a.r.status, 202);
+    await approve(a.r.body.holdId);
+    const other = await holdOf(b.insA, evoContext({ "jotter.run": "run_b" }), id, "jotter", "wfrun:bound:run_b:step");
+    assert.equal(other.r.status, 202, "its own hold");
+    assert.notEqual(other.r.body.holdId, a.r.body.holdId);
+    assert.equal(b.ran.note_delete, before, "nothing ran on the other run's approval");
+    const repeat = await holdOf(b.insA, evoContext({ "jotter.run": "run_a" }), id, "jotter", "wfrun:bound:run_a:step");
+    assert.equal(repeat.r.status, 200, "the waiting run is not held again");
+    assert.equal(b.ran.note_delete, before + 1);
+    assert.deepEqual(b.approvals.at(-1), { id: a.r.body.holdId, family: "destructive" }, "the signal names the hold this call consumed");
+  });
+
+  test("C378: both runs approved: each repeat uses its own approval, in any order (no held_again)", async () => {
+    const id = "n-bound-2";
+    const before = b.ran.note_delete;
+    const a = await holdOf(b.insA, {}, id, "jotter", "wfrun:both:run_a:step");
+    const c = await holdOf(b.insA, {}, id, "jotter", "wfrun:both:run_c:step");
+    assert.deepEqual([a.r.status, c.r.status], [202, 202]);
+    await approve(a.r.body.holdId);
+    await approve(c.r.body.holdId);
+    // run_a repeats first although run_c's approval is the newer one
+    assert.equal((await holdOf(b.insA, {}, id, "jotter", "wfrun:both:run_a:step")).r.status, 200);
+    assert.equal(b.approvals.at(-1)?.id, a.r.body.holdId);
+    assert.equal((await holdOf(b.insA, {}, id, "jotter", "wfrun:both:run_c:step")).r.status, 200);
+    assert.equal(b.approvals.at(-1)?.id, c.r.body.holdId);
+    assert.equal(b.ran.note_delete, before + 2);
+  });
+
+  test("C378: a call with no approval sees approvedHold null; a repeat with the stored result does not run again", async () => {
+    const before = b.ran.note_delete;
+    const g = await grant(b.w, b.w.agents.a, { held: [] });
+    assert.equal((await post(b, g, "note_delete", { id: "n-free" }, {}, `k_${ulid()}`)).status, 200);
+    assert.equal(b.approvals.at(-1), null, "ran with no hold: no signal");
+    const key = "wfrun:once:run_a:step";
+    const a = await holdOf(b.insA, {}, "n-once", "jotter", key);
+    await approve(a.r.body.holdId);
+    assert.equal((await holdOf(b.insA, {}, "n-once", "jotter", key)).r.status, 200);
+    const runs = b.ran.note_delete;
+    assert.equal((await holdOf(b.insA, {}, "n-once", "jotter", key)).r.status, 200, "the stored answer");
+    assert.equal(b.ran.note_delete, runs, "not run again");
+    assert.equal(runs, before + 2);
+  });
+
+  test("C378: an agent keeps today's match: an approval made under one key serves a repeat under another", async () => {
+    const before = b.ran.note_delete;
+    const first = await agentCall(b, "note_delete", { id: "n-agent-keys" }, { key: `k_${ulid()}` });
+    assert.equal(first.status, 202);
+    await approve(first.body.holdId);
+    const repeat = await agentCall(b, "note_delete", { id: "n-agent-keys" }, { key: `k_${ulid()}` });
+    assert.equal(repeat.status, 200);
+    assert.equal(b.ran.note_delete, before + 1);
+    assert.equal(b.approvals.at(-1)?.id, first.body.holdId);
   });
 });

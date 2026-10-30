@@ -76,6 +76,8 @@ export type {
   SdkCaller,
   SdkEventContext,
   SdkHookContext,
+  ApprovedHold,
+  ApprovalView,
   SdkOpContext,
   SdkPublicContext,
   StartContext,

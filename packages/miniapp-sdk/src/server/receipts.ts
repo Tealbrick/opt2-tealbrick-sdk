@@ -359,13 +359,17 @@ export class Receipts implements ReceiptStore {
     });
   }
 
-  /** The approved, unconsumed hold for this exact call (§4.3), if still inside its retry window. */
-  findApproved(callerId: string, op: string, inputDigest: string, now: number): Receipt | null {
+  /**
+   * The approved, unconsumed hold for this exact call (§4.3), if still inside its retry window. C378: `boundKey` binds it to the idempotency
+   * key of the call, for an APP caller: a hold made with a key serves only that key, so another run with identical input cannot use it and
+   * the waiting run is not held again. A hold made with no key serves the same as before. `undefined` = no binding (agent callers, who may
+   * repeat with a new key; a scheduled fire, whose job names its own hold).
+   */
+  findApproved(callerId: string, op: string, inputDigest: string, now: number, boundKey?: string | null): Receipt | null {
+    const bind = boundKey === undefined ? "" : " AND (idempotency_key IS NULL OR idempotency_key = ?)";
     const r = this.#db
-      .prepare(
-        "SELECT * FROM tb_receipts WHERE caller_id = ? AND op = ? AND input_digest = ? AND status = 'approved' AND consumed = 0 AND expires_at > ? ORDER BY decided_at DESC LIMIT 1",
-      )
-      .get(callerId, op, inputDigest, now) as Row | undefined;
+      .prepare(`SELECT * FROM tb_receipts WHERE caller_id = ? AND op = ? AND input_digest = ? AND status = 'approved' AND consumed = 0 AND expires_at > ?${bind} ORDER BY decided_at DESC LIMIT 1`)
+      .get(callerId, op, inputDigest, now, ...(boundKey === undefined ? [] : [boundKey])) as Row | undefined;
     return r ? toReceipt(r, false) : null;
   }
 

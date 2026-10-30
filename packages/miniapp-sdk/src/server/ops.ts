@@ -26,7 +26,7 @@ import type {
   StandardOpId,
   VerifiedGrant,
 } from "@opt2-tealbrick/spec/sdk";
-import type { ContextExtras, SdkHookContext, SdkOpContext } from "./context.ts";
+import type { ApprovedHold, ContextExtras, SdkHookContext, SdkOpContext } from "./context.ts";
 import { TbError } from "./errors.ts";
 import { header, readJson, requestId, sendError, sendJson } from "./http.ts";
 import { type ClaimedJob, jobsView, type OpFireOutcome, unsealGrant } from "./jobs.ts";
@@ -99,6 +99,11 @@ export function handlerSpec(rt: Runtime, opId: string): HandlerSpec | null {
   const h = rt.def.handlers[opId];
   if (!h) return null;
   return typeof h === "function" ? { run: h } : h;
+}
+
+/** v0.1.44 (C378): `ctx.approvedHold` from the hold this call consumed; only ever called after `consume()` succeeded or with null. */
+function approvedHoldOf(hold: Pick<Receipt, "id" | "holdFamily"> | null): ApprovedHold | null {
+  return hold ? Object.freeze({ id: hold.id, family: hold.holdFamily ?? null }) : null;
 }
 
 export function clampSummary(s: string): string {
@@ -224,6 +229,8 @@ export function buildContext(
     idempotencyKey,
     context,
     receipt,
+    // v0.1.44 (C378): null unless the call path sets it with approvedHoldOf(), after it consumed the approved hold of this exact call
+    approvedHold: null,
     getKey: (name) => rt.keys.getKey(name),
     modelRole: (role) => rt.keys.modelRole(role),
     callApp: (product, opId, input, opts) => rt.callApp(product, opId, input, { idempotencyKey: opts?.idempotencyKey, ...(opts?.context !== undefined ? { context: opts.context } : {}), parentCall: callId }),
@@ -713,7 +720,8 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
 
       // v0.1.23 (SDK-HV-1): one OpContext factory for the hold view = the context the call itself would get
       const viewCtx = (signal: AbortSignal) => buildContext(rt, op, caller, g, rt.scopes.view(callerId, viewAccess), callId, idemKey, body.context, receiptHelpers().helpers, signal);
-      let approved = rt.receipts.findApproved(callerId, op.id, inputDigest, Date.now());
+      // C378: for an app caller the approval is bound to the idempotency key of the call (one workflow run, one step)
+      let approved = rt.receipts.findApproved(callerId, op.id, inputDigest, Date.now(), g.caller.type === "app" ? idemKey : undefined);
       // v0.1.23 (SDK-HV-1): the approval is bound to the view the owner saw. Same input digest is not enough for a dynamic
       // call whose content lives upstream (approve draft A, the agent edits it to B, sends B): compute the view again and
       // use the approval only if it is the same text; else the call is decided as if no approval existed (a NEW hold).
@@ -769,6 +777,7 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       const rh = receiptHelpers();
       const sig = opSignal(req, res);
       const ctx = buildContext(rt, op, caller, g, rt.scopes.view(callerId, viewAccess), callId, idemKey, body.context, rh.helpers, sig.signal);
+      ctx.approvedHold = approvedHoldOf(approved);
       // v0.1.31 (SDK-INSTANCE-GRANT): only a live AGENT call (caller type from the verified grant) may narrow its own access
       const life = opLife(sig.signal);
       if (caller.type === "agent") ctx.scopeSelfRevoke = agentSelfRevoke(rt, op.id, callerId, callId, life);
@@ -964,6 +973,7 @@ export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: Abor
   }
   const rh = receiptHelpers();
   const ctx = buildContext(rt, op, caller, g, rt.scopes.view(callerId, viewAccess), null, job.key, {}, rh.helpers, signal);
+  ctx.approvedHold = approvedHoldOf(approved);
   const writeReceipt = approved !== null || op.receipt;
   const h = startHandler(rt, op, input, ctx, null);
   // the slot ends with the handler itself (a run past its timeout still counts when it completes)
