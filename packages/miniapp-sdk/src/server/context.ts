@@ -28,10 +28,24 @@ export interface ContextExtras {
  * Typed in spec 0.1.49 (`Caller.listed`); `SdkCaller` stays exported as an alias for code written against the 0.1.48 types.
  */
 export type SdkCaller = Caller;
-export type SdkOpContext = OpContext & { caller: SdkCaller } & ContextExtras & CompanionTargetsView & JobsView;
+export type SdkOpContext = OpContext & { caller: SdkCaller } & ContextExtras & CompanionTargetsView & JobsView & ApprovalView;
 export type SdkHookContext = HookContext & { secrets: AppSecrets };
 export type SdkPublicContext = Parameters<PublicHandler>[1] & ContextExtras;
 export type { AppSecrets };
+
+/**
+ * v0.1.44 (C378, SPEC-GAP SDK-API §4.3): the owner approval THIS call runs on. Set only by the SDK, and only after it found the approved
+ * hold of this exact call and consumed it, so one approval proves one call. Null on every other call and on the hold-view context. It
+ * lets a handler keep an action to approved calls whatever held them (a hold family of the grant, or a bridge-attested Rules hold).
+ */
+export interface ApprovedHold {
+  readonly id: string;
+  /** the family the hold was made under; null when the hold record has none */
+  readonly family: string | null;
+}
+export interface ApprovalView {
+  approvedHold: ApprovedHold | null;
+}
 
 /**
  * v0.1.14 addition (Lead, item 10): the target products of this app's companion grants, from the verified slice's
