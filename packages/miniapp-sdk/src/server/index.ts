@@ -68,6 +68,8 @@ export { decideHold, defineApp, getKey, modelRole, onKeysChanged, SDK_MAJOR, SDK
 // v0.1.34 (C259): the ONE bounded parse5 parse (ported from live-artifacts), exported so Live Artifacts imports it instead of a copy.
 export { boundedParse, boundedTreeAdapter, maxOutputLength, PARSE_ATTRIBUTE_BUDGET, PARSE_MAX_ATTRIBUTES, PARSE_MAX_CHILD_WORK, type ParseBounds, ParseLimitExceeded } from "./bounded-parse.ts";
 export type {
+  ApprovalView,
+  ApprovedHold,
   AppSecrets,
   CompanionTargetsView,
   ContextExtras,
@@ -76,8 +78,6 @@ export type {
   SdkCaller,
   SdkEventContext,
   SdkHookContext,
-  ApprovedHold,
-  ApprovalView,
   SdkOpContext,
   SdkPublicContext,
   StartContext,
