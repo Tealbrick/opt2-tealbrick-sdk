@@ -24,6 +24,7 @@ import { createKeys } from "./keys.ts";
 import { BridgeLink } from "./link.ts";
 import { createLogger, SecretRegistry } from "./log.ts";
 import { decide, fireScheduledOp, sendTimeCheck } from "./ops.ts";
+import { createOwnerDrafts } from "./owner-drafts.ts";
 import { createPersonAuth } from "./person.ts";
 import { dropPrivileges, type PrivilegeProc } from "./privilege.ts";
 import { Receipts } from "./receipts.ts";
@@ -460,6 +461,8 @@ export async function startApp(
   const bridgeCaps = (): readonly string[] => trust.bridgeCaps(Date.now());
   // spec 0.1.87 (C373, G-2): the same rule for the grant picture; display only, no authorization reads it
   const topology = (): SliceTopologyView | null => trust.topology(Date.now());
+  // spec 0.1.89 (C380): one object for op, start, event and job contexts; the cap is read from the CURRENT slice at every call
+  const ownerDrafts = createOwnerDrafts({ bridgeCaps, sliceStale: () => trust.stale(Date.now()), bridge: () => (link && state.claimed ? bridge : null) });
   const agentScopeRequest = (agt: string): ScopeRequest | null => trust.agentScopeRequest(agt, manifest.id);
   // v0.1.21: the job runner exists from right after `rt` below; event contexts are only built after that
   let runner: JobRunner | null = null;
@@ -473,6 +476,7 @@ export async function startApp(
     scopes,
     callApp: appCallApp,
     sendTimeCheck: appSendTimeCheck,
+    ownerDrafts,
     statusChanged,
     ownerLink,
     companionTargets,
@@ -675,6 +679,7 @@ export async function startApp(
       if (!link) throw new TbError("no_bridge", "the send-time check needs the bridge", 503);
       return link.policyRecheck(body);
     },
+    ownerDrafts,
   };
 
   runner = new JobRunner(rt, def.jobs, fireScheduledOp, harness?.jobs ?? {});

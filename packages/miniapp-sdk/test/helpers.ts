@@ -219,6 +219,9 @@ export class FakeBridge {
   onRecheck: (body: Record<string, unknown>) => { status: number; body: unknown } = () => ({ status: 200, body: { decision: "allow" } });
   /** spec 0.1.88: bodies of POST /tb/v1/acting-tickets; the answer is one fake ticket per call */
   ticketAsks: Record<string, unknown>[] = [];
+  /** spec 0.1.89: bodies of POST /tb/v1/owner-drafts{,/get,/withdraw} and whether the instance assertion verified (htm, htu, bd); and the answer */
+  ownerDraftAsks: { path: string; body: Record<string, unknown>; assertOk: boolean }[] = [];
+  onOwnerDraft: (path: string, body: Record<string, unknown>) => { status: number; body: unknown; headers?: Record<string, string> } = () => ({ status: 200, body: { draftId: "drf_test", state: "submitted", reviewUrl: "https://portal.test/review" } });
   /** companion calls seen at POST /tb/v1/call */
   calls: { body: Record<string, unknown>; grant: string; assert: string }[] = [];
   /** answer of POST /tb/v1/call (default: ok) */
@@ -330,6 +333,15 @@ export class FakeBridge {
       this.instanceKey = body?.instancePublicKey ?? null;
       res.writeHead(200, { "content-type": "application/json" });
       return void res.end(JSON.stringify({ ins: this.w.ins, bridge: { id: this.w.brg, publicKey: this.w.bridgeKey.publicJwk, internalUrl: `http://127.0.0.1:${this.port}` }, slice: this.#slice, _code: body?.code ? "seen" : "none" }));
+    }
+    if (url.pathname.startsWith("/tb/v1/owner-drafts") && req.method === "POST") {
+      const token = String(req.headers["tb-assert"] ?? "");
+      const keys = this.instanceKey ? keySetFrom({ keys: [this.instanceKey] }, `tb:ins:${this.w.ins}`) : null;
+      const v = keys ? verifyAssertion(token, keys, { typ: TYP.instanceAssertion, aud: `tb:brg:${this.w.brg}`, now: nowS(), method: "POST", pathAndQuery: url.pathname + url.search, body: new Uint8Array(raw) }) : { ok: false };
+      this.ownerDraftAsks.push({ path: url.pathname, body, assertOk: v.ok });
+      const a = this.onOwnerDraft(url.pathname, body);
+      res.writeHead(a.status, { "content-type": "application/json", ...(a.headers ?? {}) });
+      return void res.end(typeof a.body === "string" ? a.body : JSON.stringify(a.body));
     }
     if (url.pathname === "/tb/v1/policy-recheck") {
       this.rechecks.push(body);

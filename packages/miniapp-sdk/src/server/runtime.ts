@@ -15,6 +15,7 @@ import type { JobRunner } from "./jobs.ts";
 import type { KeysInternals } from "./keys.ts";
 import type { PolicyRecheckAnswer } from "./link.ts";
 import type { SecretRegistry } from "./log.ts";
+import type { OwnerDraftsApi } from "./owner-drafts.ts";
 import type { PersonAuth } from "./person.ts";
 import type { Receipts } from "./receipts.ts";
 import type { ScopeStoreInternals } from "./scopes.ts";
@@ -113,5 +114,7 @@ export interface Runtime {
   /** spec 0.1.88 (C378, BRIDGE §8.7) */
   actingTickets(call: string, job: string): Promise<string[]>;
   policyRecheck(body: { op: string; input: Json; caller: { type: "agent" | "app"; id: string } }): Promise<PolicyRecheckAnswer>;
+  /** spec 0.1.89 (C380, BRIDGE §8.8) */
+  ownerDrafts: OwnerDraftsApi;
   callServiceHelper<O = Json>(serviceId: string, path: string, body: Json): Promise<O>;
 }

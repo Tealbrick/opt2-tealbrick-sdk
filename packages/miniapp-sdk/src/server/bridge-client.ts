@@ -8,6 +8,8 @@ import { TbError } from "./errors.ts";
 export interface BridgeResponse {
   status: number;
   body: unknown;
+  /** the raw `Retry-After` header, when the bridge sent one */
+  retryAfter?: string;
 }
 
 const REQUEST_TIMEOUT_MS = 35_000;
@@ -89,7 +91,8 @@ export class BridgeClient {
       if (signal?.aborted) throw e;
       throw new TbError("bridge_unavailable", "bridge not reachable", 503);
     }
-    return { status: res.status, body: await readBody(res) };
+    const retryAfter = res.headers.get("retry-after");
+    return { status: res.status, body: await readBody(res), ...(retryAfter === null ? {} : { retryAfter }) };
   }
 }
 
