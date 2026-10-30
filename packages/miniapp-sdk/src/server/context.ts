@@ -2,7 +2,7 @@
 // `publicUrl` (slice `bridge.publicUrl`), `viewUrl` (slice `bridge.viewUrl`, 0.1.26), `workspace`, `scopes.instances` and `secrets` (the ONE app-secret store).
 import type { ScopeRequest } from "@opt2-tealbrick/spec/bridge";
 import type { WorkspaceId } from "@opt2-tealbrick/spec/credentials";
-import type { AppDefinition, Caller, EventContext, HookContext, OpContext, PublicHandler, ScopeStore, SliceAgent, StartContext as SpecStartContext } from "@opt2-tealbrick/spec/sdk";
+import type { AppDefinition, CallAppOptions, Caller, CompanionResult, EventContext, HookContext, Json, OpContext, PublicHandler, ScopeStore, SliceAgent, StartContext as SpecStartContext } from "@opt2-tealbrick/spec/sdk";
 import type { AppSecrets } from "./app-secrets.ts";
 import type { JobHandler, JobSpec, JobsView } from "./jobs.ts";
 import type { SliceTopologyView } from "./topology.ts";
@@ -28,7 +28,7 @@ export interface ContextExtras {
  * Typed in spec 0.1.49 (`Caller.listed`); `SdkCaller` stays exported as an alias for code written against the 0.1.48 types.
  */
 export type SdkCaller = Caller;
-export type SdkOpContext = OpContext & { caller: SdkCaller } & ContextExtras & CompanionTargetsView & JobsView & ApprovalView;
+export type SdkOpContext = Omit<OpContext, "callApp"> & { caller: SdkCaller; callApp: ActingCallApp } & ContextExtras & CompanionTargetsView & JobsView & ApprovalView & ActingView & SendTimeView;
 export type SdkHookContext = HookContext & { secrets: AppSecrets };
 export type SdkPublicContext = Parameters<PublicHandler>[1] & ContextExtras;
 export type { AppSecrets };
@@ -45,6 +45,47 @@ export interface ApprovedHold {
 }
 export interface ApprovalView {
   approvedHold: ApprovedHold | null;
+}
+
+/**
+ * spec 0.1.88 (C378, SDK-API "v0.1.88", BRIDGE §8.7, bridge cap `acting_agents`). LOCAL TYPES: the SDK pins an older spec; drop them when the pin moves.
+ * `tb.acting` is verified by the bridge and covered by the proof. NARROW ONLY: an app may refuse or hold on it, never allow more because of it.
+ */
+export interface ActingAgent {
+  id: string;
+  via: "parent_call" | "ticket";
+  job?: string;
+}
+export interface ActingContext {
+  v: 1;
+  agents: ActingAgent[];
+}
+/** The durable job a set of tickets belongs to. Keep it in the app's own database, never in a log or a workflow payload. */
+export interface ActingEnvelope {
+  job: string;
+  tickets: string[];
+}
+export type ActingCallApp = <O = Json>(product: string, op: string, input: Json, opts?: CallAppOptions & { acting?: ActingEnvelope }) => Promise<CompanionResult<O>>;
+export interface ActingView {
+  /** the agents this call acts for, from `tb.acting`; null = none (an agent caller, or the app's own work) */
+  acting(): ActingContext | null;
+  /** tickets of the current call for one durable job (op handlers only; `bridge_cap_missing` without the cap; `acting_call_invalid` when the call acts for no agent) */
+  actingTickets(job: string): Promise<string[]>;
+}
+/** The caller a send-time check asks about: the one who asked for the work. A claimed caller is enough, because nothing runs and the app only checks itself. */
+export type SendTimeCaller = { type: "agent"; id: string } | { type: "app"; id: string };
+export type SendTimeOutcome =
+  /** go on; `approvedHold` = the owner's approval this run consumed */
+  | { decision: "run"; approvedHold: ApprovedHold | null }
+  /** wait for the owner: keep `holdId` with the job and ask again later */
+  | { decision: "wait"; holdId: string }
+  /** do not run. `hold_denied` = the owner said no or the hold expired */
+  | { decision: "refused"; code: string; reason: string }
+  /** no answer now (bridge or hook unavailable): nothing ran; ask again later */
+  | { decision: "defer"; code: string };
+/** spec 0.1.88: the send-time check for work an app accepted earlier and runs later, on any context. Writes a hold only when the answer is a hold. */
+export interface SendTimeView {
+  sendTimeCheck(input: { op: string; input: Json; caller: SendTimeCaller; holdId?: string | null; summary?: string }): Promise<SendTimeOutcome>;
 }
 
 /**
@@ -81,9 +122,9 @@ export interface CompanionTargetsView {
 }
 
 /** v0.1.13 (C33, C85, C86): `onStart` runs once after boot and (bridge mode) after the claim succeeded; errors are logged. */
-export type StartContext = SpecStartContext & CompanionTargetsView & JobsView;
+export type StartContext = Omit<SpecStartContext, "callApp"> & { callApp: ActingCallApp } & CompanionTargetsView & JobsView & SendTimeView;
 /** v0.1.13: the ctx every event handler gets (C85 callApp without parentCall, C86 statusChanged / ownerLink). */
-export type SdkEventContext = EventContext & CompanionTargetsView & JobsView;
+export type SdkEventContext = Omit<EventContext, "callApp"> & { callApp: ActingCallApp } & CompanionTargetsView & JobsView & SendTimeView;
 /** AppEvents (types/sdk.ts) with the SDK event ctx; a handler typed against the spec EventContext still fits. */
 export interface SdkAppEvents {
   agentAdded?(agent: SliceAgent, ctx: SdkEventContext): Promise<void>;

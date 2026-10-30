@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { after, afterEach, before, describe, test } from "node:test";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json, PersonPrincipal } from "@opt2-tealbrick/spec/sdk";
-import type { SdkOpContext, StopContext } from "../src/server/context.ts";
+import type { SdkOpContext, StartContext, StopContext } from "../src/server/context.ts";
 import { decideHold, defineApp, startApp } from "../src/server/index.ts";
 import { backoffMs, type JobContext, JobStore, type JobsApi, type NewJob, nextOccurrence } from "../src/server/jobs.ts";
 import { openStore } from "../src/server/store.ts";
@@ -138,6 +138,9 @@ interface Booted {
   base: string;
   dir: string;
   jobs: JobsApi;
+  /** the onStart context (spec 0.1.88 ctx.sendTimeCheck) */
+  startCtx: StartContext | null;
+  decide(p: PersonPrincipal, input: { holdId: string; decision: "approve" | "deny" }): Promise<unknown>;
   ticks: Record<string, number>;
   ran: { note_delete: string[] };
   stopCalls: number;
@@ -179,7 +182,13 @@ async function boot(opts: { handlers?: Handlers; jobsDrainMs?: number; dir?: str
         // the scheduling op: an agent asks for a delete in N ms (SDK-2)
         note_get: async (input, c) => {
           const ctx = c as SdkOpContext;
-          const i = input as { id: string; inMs?: number; key?: string; nb?: string };
+          const i = input as { id: string; inMs?: number; key?: string; nb?: string; actingJob?: string; viaApp?: boolean };
+          // spec 0.1.88: tickets of this call, and a companion call with them
+          if (i.actingJob) {
+            const tickets = await ctx.actingTickets(i.actingJob);
+            const r = i.viaApp ? await ctx.callApp("peer-app", "peer_write", {}, { acting: { job: i.actingJob, tickets } }) : null;
+            return { tickets, called: r as never, acting: ctx.acting() as never } as never;
+          }
           const job = ctx.schedule({ op: "note_delete", input: { id: i.id, ...(i.nb ? { nb: i.nb } : {}) } }, { at: Date.now() + (i.inMs ?? 300) }, i.key ? { key: i.key } : {});
           return { job: job.id, paused: ctx.paused() as unknown as Json };
         },
@@ -194,6 +203,9 @@ async function boot(opts: { handlers?: Handlers; jobsDrainMs?: number; dir?: str
         notebook_rename: async () => ({}),
       },
       jobs,
+      onStart: async (ctx: StartContext) => {
+        b.startCtx = ctx;
+      },
       onStop: async (ctx: StopContext) => {
         // the DB is still open here (RUL-11)
         ctx.db.prepare("SELECT COUNT(*) AS n FROM notes").get();
@@ -215,6 +227,7 @@ async function boot(opts: { handlers?: Handlers; jobsDrainMs?: number; dir?: str
     );
     started = running;
     b.jobs = running.jobs;
+    b.decide = (p, input) => decideHold(p, input as never);
     await until(async () => running.status() === "ok");
   };
   // a boot that fails must not leave the bridge or the app listening: an open handle would keep the test process alive for ever
@@ -242,6 +255,16 @@ async function boot(opts: { handlers?: Handlers; jobsDrainMs?: number; dir?: str
     t.cleanup();
   };
   return b;
+}
+
+async function holdRows(b: Booted) {
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(`${b.dir}/app.db`, { readOnly: true });
+  try {
+    return db.prepare("SELECT id FROM tb_receipts WHERE id LIKE 'hld_%'").all();
+  } finally {
+    db.close();
+  }
 }
 
 async function callOp(b: Booted, op: string, input: Json, opts: { grantToken?: string } = {}) {
@@ -746,5 +769,136 @@ describe("scheduled ops: scope row authority at fire time", { timeout: 60_000 },
     const j2 = await settled(await schedule("g3-inside-1", agentA, wide));
     assert.equal(j2.status, "done", j2.lastError ?? "");
     assert.deepEqual(b.ran.note_delete.filter((x) => x === "g3-inside-1"), ["g3-inside-1"]);
+  });
+});
+
+describe("spec 0.1.88 (C378): the hooks run again at fire time and at send time", () => {
+  let b: Booted;
+  const principal = (w: World): PersonPrincipal => ({ type: "person", id: w.per, ws: w.ws, instance: w.ins }) as PersonPrincipal;
+  before(async () => {
+    b = await boot({ sliceOver: { bridgeCaps: ["acting_agents"] } });
+  });
+  after(async () => b.cleanup());
+  const schedule = async (id: string) => {
+    const r = await callOp(b, "note_get", { id, inMs: 150 });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    return String(r.body.output.job);
+  };
+  const settled = (id: string) => until(async () => {
+    const j = b.jobs.get(id);
+    return j && ["done", "refused", "failed", "waiting"].includes(j.status) ? j : null;
+  });
+  const reset = (answer: () => { status: number; body: unknown }) => {
+    b.bridge.rechecks.length = 0;
+    b.bridge.onRecheck = answer;
+  };
+  const allow = () => ({ status: 200, body: { decision: "allow" } });
+  const hold = () => ({ status: 200, body: { decision: "hold", family: "policy", reason: "Needs owner review", by: "rules/rules_gate" } });
+  const deny = () => ({ status: 403, body: { error: { code: "hook_denied", message: "Rules: no" } } });
+  const down = () => ({ status: 503, body: { error: { code: "hook_failed", message: "hook failed" } } });
+
+  test("allow: the bridge is asked with the stored caller, the op runs once", async () => {
+    reset(allow);
+    const j = await settled(await schedule("st-allow"));
+    assert.equal(j.status, "done", j.lastError ?? "");
+    assert.deepEqual(b.bridge.rechecks[0], { op: "note_delete", input: { id: "st-allow" }, caller: { type: "agent", id: b.w.agents.a } });
+    assert.ok(b.ran.note_delete.includes("st-allow"));
+  });
+
+  test("deny: the fire is refused and the op does not run", async () => {
+    reset(deny);
+    const j = await settled(await schedule("st-deny"));
+    assert.equal(j.status, "refused");
+    assert.equal(j.lastError, "hook_denied");
+    assert.ok(!b.ran.note_delete.includes("st-deny"));
+  });
+
+  test("hold: the fire waits on a hold; approve runs it once; a deny after approval still refuses", async () => {
+    reset(hold);
+    const id = await schedule("st-hold");
+    const j = await settled(id);
+    assert.equal(j.status, "waiting", j.lastError ?? "");
+    assert.ok(!b.ran.note_delete.includes("st-hold"));
+    await b.decide(principal(b.w), { holdId: String(j.holdId), decision: "approve" });
+    reset(allow);
+    await until(async () => (b.jobs.get(id)?.status === "done" ? true : null));
+    assert.equal(b.ran.note_delete.filter((x) => x === "st-hold").length, 1);
+  });
+
+  test("the bridge or a hook cannot answer: nothing runs, the job stays due (fail closed)", async () => {
+    reset(down);
+    const id = await schedule("st-down");
+    await until(async () => (b.bridge.rechecks.length > 0 ? true : null));
+    assert.ok(!b.ran.note_delete.includes("st-down"));
+    await until(async () => (!["running"].includes(String(b.jobs.get(id)?.status)) ? true : null));
+    assert.ok(!["done", "refused", "failed"].includes(String(b.jobs.get(id)?.status)), "released for a later try (60 s), not ended");
+    reset(allow);
+  });
+
+  test("ctx.sendTimeCheck: run on allow, one hold on a hold, wait until decided, refused on deny and after a denied hold; a pass writes nothing", async () => {
+    const q = { op: "note_delete", input: { id: "row-1" } as Json, caller: { type: "agent", id: b.w.agents.a } as const };
+    const ctx = b.startCtx as StartContext;
+    const holdsNow = async () => (await holdRows(b)).length;
+    const before0 = await holdsNow();
+    reset(allow);
+    assert.deepEqual(await ctx.sendTimeCheck(q), { decision: "run", approvedHold: null });
+    assert.equal(await holdsNow(), before0, "a pass writes no hold");
+    reset(deny);
+    const refused = await ctx.sendTimeCheck(q);
+    assert.deepEqual([refused.decision, (refused as { code: string }).code], ["refused", "hook_denied"]);
+    assert.equal(await holdsNow(), before0, "a refusal writes no hold");
+    reset(down);
+    assert.equal((await ctx.sendTimeCheck(q)).decision, "defer");
+    reset(hold);
+    const w = await ctx.sendTimeCheck(q);
+    assert.equal(w.decision, "wait");
+    const holdId = (w as { holdId: string }).holdId;
+    assert.equal(await holdsNow(), before0 + 1);
+    assert.deepEqual(await ctx.sendTimeCheck({ ...q, holdId }), { decision: "wait", holdId }, "still held: no second hold, no second ask");
+    assert.equal(await holdsNow(), before0 + 1);
+    await b.decide(principal(b.w), { holdId, decision: "approve" });
+    // the owner approved, and a rule refuses now: the refusal wins
+    reset(deny);
+    assert.equal((await ctx.sendTimeCheck({ ...q, holdId })).decision, "refused");
+    reset(hold);
+    const run = await ctx.sendTimeCheck({ ...q, holdId });
+    assert.equal(run.decision, "run");
+    assert.equal((run as { approvedHold: { id: string } }).approvedHold.id, holdId);
+    assert.equal((await ctx.sendTimeCheck({ ...q, holdId })).decision, "refused", "one approval, one run");
+    const w2 = await ctx.sendTimeCheck(q);
+    await b.decide(principal(b.w), { holdId: (w2 as { holdId: string }).holdId, decision: "deny" });
+    const denied = await ctx.sendTimeCheck({ ...q, holdId: (w2 as { holdId: string }).holdId });
+    assert.deepEqual([denied.decision, (denied as { code: string }).code], ["refused", "hold_denied"]);
+    await assert.rejects(ctx.sendTimeCheck({ ...q, op: "nope" }), (e: unknown) => (e as { code?: string }).code === "unknown_tool");
+  });
+
+  test("ctx.actingTickets asks for the current call; ctx.acting reads tb.acting; none on an agent caller", async () => {
+    const r = await callOp(b, "note_get", { id: "x", actingJob: "run_1" });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual(r.body.output.tickets, ["a.b.c"]);
+    assert.equal(r.body.output.acting, null);
+    const ask = b.bridge.ticketAsks.at(-1) as { call: string; job: string };
+    assert.equal(ask.job, "run_1");
+    assert.match(ask.call, /^call_/);
+  });
+});
+
+describe("spec 0.1.88: without the bridge cap nothing changes", () => {
+  let b: Booted;
+  before(async () => {
+    b = await boot();
+  });
+  after(async () => b.cleanup());
+  test("no recheck at fire; tickets and acting calls refuse locally with bridge_cap_missing", async () => {
+    const r = await callOp(b, "note_get", { id: "nc-1", inMs: 100 });
+    const id = String(r.body.output.job);
+    await until(async () => (b.jobs.get(id)?.status === "done" ? true : null));
+    assert.equal(b.bridge.rechecks.length, 0);
+    const t = await callOp(b, "note_get", { id: "x", actingJob: "run_1" });
+    assert.equal(t.body.error?.code, "bridge_cap_missing");
+    assert.equal(b.bridge.ticketAsks.length, 0);
+    const ctx = b.startCtx as StartContext;
+    assert.deepEqual(await ctx.sendTimeCheck({ op: "note_delete", input: { id: "y" }, caller: { type: "agent", id: b.w.agents.a } }), { decision: "run", approvedHold: null });
+    await assert.rejects(ctx.callApp("peer-app", "peer_write", {}, { acting: { job: "j", tickets: ["a.b.c"] } }), (e: unknown) => ["companion_undeclared", "bridge_cap_missing"].includes(String((e as { code?: string }).code)));
   });
 });

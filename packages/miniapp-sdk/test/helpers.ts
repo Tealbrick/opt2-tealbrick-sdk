@@ -214,6 +214,11 @@ export class FakeBridge {
   refuseIdentity = false;
   instanceKey: import("@opt2-tealbrick/spec/credentials").Ed25519PublicJwk | null = null;
   statuses: Record<string, unknown>[] = [];
+  /** spec 0.1.88: bodies of POST /tb/v1/policy-recheck, and its answer (default: allow) */
+  rechecks: Record<string, unknown>[] = [];
+  onRecheck: (body: Record<string, unknown>) => { status: number; body: unknown } = () => ({ status: 200, body: { decision: "allow" } });
+  /** spec 0.1.88: bodies of POST /tb/v1/acting-tickets; the answer is one fake ticket per call */
+  ticketAsks: Record<string, unknown>[] = [];
   /** companion calls seen at POST /tb/v1/call */
   calls: { body: Record<string, unknown>; grant: string; assert: string }[] = [];
   /** answer of POST /tb/v1/call (default: ok) */
@@ -325,6 +330,17 @@ export class FakeBridge {
       this.instanceKey = body?.instancePublicKey ?? null;
       res.writeHead(200, { "content-type": "application/json" });
       return void res.end(JSON.stringify({ ins: this.w.ins, bridge: { id: this.w.brg, publicKey: this.w.bridgeKey.publicJwk, internalUrl: `http://127.0.0.1:${this.port}` }, slice: this.#slice, _code: body?.code ? "seen" : "none" }));
+    }
+    if (url.pathname === "/tb/v1/policy-recheck") {
+      this.rechecks.push(body);
+      const a = this.onRecheck(body);
+      res.writeHead(a.status, { "content-type": "application/json" });
+      return void res.end(JSON.stringify(a.body));
+    }
+    if (url.pathname === "/tb/v1/acting-tickets") {
+      this.ticketAsks.push(body);
+      res.writeHead(200, { "content-type": "application/json" });
+      return void res.end(JSON.stringify({ tickets: ["a.b.c"] }));
     }
     if (url.pathname === "/tb/v1/call") {
       const assertion = String(req.headers["tb-assert"] ?? "");

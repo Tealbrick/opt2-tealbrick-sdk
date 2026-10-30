@@ -1,6 +1,7 @@
 // Operation pipeline (SDK-API §3.2, §4, §6): bridge-forwarded agent/app calls on /tb/v1/ops/:op and person calls on
 // /a/<product>/tb/v1/ops/:op. Order on /tb/v1/ops: call proof → verifyGrant → op/audience → input schema → idempotency
 // → authorize() (step 0 = slice pause) → handler. Holds and receipts are rows of the one receipts table.
+
 import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { authorize, CALLER_CONTEXT_MAX_BYTES, canonicalize, DECISION_REASON, digest, EFFECTS, HOLDS_PENDING_OP, opInGrantWorkflow, validateAgainstSchema, validateInput, verifyCallProof, verifyGrant } from "@opt2-tealbrick/manifest";
@@ -26,10 +27,11 @@ import type {
   StandardOpId,
   VerifiedGrant,
 } from "@opt2-tealbrick/spec/sdk";
-import type { ApprovedHold, ContextExtras, SdkHookContext, SdkOpContext } from "./context.ts";
+import type { ActingContext, ActingEnvelope, ApprovedHold, ContextExtras, SdkHookContext, SdkOpContext, SendTimeCaller, SendTimeOutcome } from "./context.ts";
 import { TbError } from "./errors.ts";
 import { header, readJson, requestId, sendError, sendJson } from "./http.ts";
 import { type ClaimedJob, jobsView, type OpFireOutcome, unsealGrant } from "./jobs.ts";
+import { ACTING_AGENTS_CAP, type PolicyRecheckAnswer } from "./link.ts";
 import { HOLD_TTL_MS, type NewReceipt, type Receipts } from "./receipts.ts";
 import type { Runtime } from "./runtime.ts";
 import { scopeGrantOps } from "./scopes.ts";
@@ -233,7 +235,14 @@ export function buildContext(
     approvedHold: null,
     getKey: (name) => rt.keys.getKey(name),
     modelRole: (role) => rt.keys.modelRole(role),
-    callApp: (product, opId, input, opts) => rt.callApp(product, opId, input, { idempotencyKey: opts?.idempotencyKey, ...(opts?.context !== undefined ? { context: opts.context } : {}), parentCall: callId }),
+    callApp: (product, opId, input, opts) => rt.callApp(product, opId, input, { idempotencyKey: opts?.idempotencyKey, ...(opts?.context !== undefined ? { context: opts.context } : {}), ...((opts as { acting?: ActingEnvelope } | undefined)?.acting ? { acting: (opts as { acting: ActingEnvelope }).acting } : {}), parentCall: callId }),
+    // spec 0.1.88 (C378): the verified `tb.acting` of this call, and tickets for durable work. Narrow only.
+    acting: () => actingOf(context),
+    actingTickets: (job: string) => {
+      if (!callId) return Promise.reject(new TbError("acting_call_invalid", "tickets come from an open agent call", 403));
+      return rt.actingTickets(callId, job);
+    },
+    sendTimeCheck: (input: Parameters<typeof sendTimeCheck>[1]) => sendTimeCheck(rt, input),
     callServiceHelper: (serviceId, path, body) => rt.callServiceHelper(serviceId, path, body),
     db: rt.appDb,
     log: rt.log,
@@ -866,6 +875,54 @@ function createHold(rt: Runtime, base: ReceiptBase, spec: HandlerSpec | null, op
   );
 }
 
+// ── Send-time check (spec 0.1.88, C378, BRIDGE §8.7 rule 6) ──
+/** `tb.acting` as the bridge wrote it (the proof's `ctx` covers it); anything else is none: an app only narrows on it. */
+export function actingOf(context: unknown): ActingContext | null {
+  const o = (context as Record<string, unknown> | null | undefined)?.["tb.acting"] as ActingContext | undefined;
+  return o && o.v === 1 && Array.isArray(o.agents) && o.agents.length > 0 ? o : null;
+}
+
+/**
+ * Work an app accepted earlier and runs now (a scheduled post, a stored job): ask the bridge's before hooks again. A deny beats an approval.
+ * A hold answer creates ONE hold on this app; the caller keeps `holdId` and asks again. Without the cap: run, as before this release.
+ * Nothing else is written, and a pass writes nothing.
+ */
+export async function sendTimeCheck(rt: Runtime, q: { op: string; input: Json; caller: SendTimeCaller; holdId?: string | null; summary?: string }): Promise<SendTimeOutcome> {
+  const op = rt.ops.get(q.op);
+  if (!op || op.standard || op.dynamic || op.audience !== "agent") throw new TbError("unknown_tool", "the send-time check needs an agent-audience operation of this app", 404);
+  const now = Date.now();
+  const inputDigest = digest(q.input) as Sha256Digest;
+  if (q.holdId) {
+    const h = rt.receipts.getSync(q.holdId);
+    if (h?.status === "held" && (h.expiresAt === null || h.expiresAt > now)) return { decision: "wait", holdId: h.id };
+    if (h?.status !== "approved" || h.inputDigest !== inputDigest) return { decision: "refused", code: "hold_denied", reason: "The owner did not approve it." };
+  }
+  if (!rt.bridgeCaps().includes(ACTING_AGENTS_CAP)) return { decision: "run", approvedHold: null };
+  let answer: PolicyRecheckAnswer;
+  try {
+    answer = await rt.policyRecheck({ op: q.op, input: q.input, caller: q.caller });
+  } catch (e) {
+    const err = toTbError(e, rt);
+    // refused now, by a rule or a pause or a removed grant; anything else says nothing about the call, so it waits (fail closed)
+    if (["hook_denied", "paused", "no_grant", "not_in_workflow", "crud_exceeds_grant"].includes(err.code)) return { decision: "refused", code: err.code, reason: err.message };
+    return { decision: "defer", code: err.code };
+  }
+  const approved = q.holdId ? rt.receipts.getSync(q.holdId) : null;
+  if (approved?.status === "approved") {
+    if (!rt.receipts.consume(approved.id)) return { decision: "refused", code: "hold_consumed", reason: "This approval was already used." };
+    return { decision: "run", approvedHold: approvedHoldOf(approved) };
+  }
+  if (answer.decision === "allow") return { decision: "run", approvedHold: null };
+  const companion = q.caller.type === "app" ? rt.trust.companionCallers().find((c) => c.ins === q.caller.id) : undefined;
+  const name = q.caller.type === "agent" ? (rt.trust.agent(q.caller.id)?.name ?? q.caller.id) : (companion?.product ?? q.caller.id);
+  const receiptCaller = { type: q.caller.type, id: q.caller.id, name, ...(companion?.product ? { product: companion.product } : {}) } as Receipt["caller"];
+  const base: ReceiptBase = { callId: null, caller: receiptCaller, op: op.id, effect: op.effect, inputDigest, idempotencyKey: null };
+  const decision: Decision = { decision: "hold", reason: DECISION_REASON.heldByHook, holdFamily: answer.family as Decision["holdFamily"], heldBy: answer.by };
+  const hold = createHold(rt, base, handlerSpec(rt, op.id), op, q.input, decision, answer.reason, { sendTime: true }, now);
+  rt.statusChanged();
+  return { decision: "wait", holdId: hold.id };
+}
+
 // ── Scheduled ops (v0.1.21, SDK-2 / CON-01) ─────────────────────────────────
 /**
  * Fire time of `ctx.schedule({ op, input }, …)`: THE app decision function `authorize()` runs again with the stored
@@ -875,8 +932,8 @@ function createHold(rt: Runtime, base: ReceiptBase, spec: HandlerSpec | null, op
  * (`grant_revoked`), and the op must still be in the grant's workflow (`not_in_workflow`, gate() step 4).
  * The grant is the caller's newest verified grant (refreshed on each of its calls). Its 12 h expiry is the one check
  * replaced: authorize() reads it at a time inside its validity, and caller presence in the Portal-signed slice
- * (≤ 12 h fresh, else nothing fires) stands in for it. SPEC-GAP (SDK-API §19): bridge before-hooks (Rules) are not
- * re-run at fire time; they ran for the scheduling call.
+ * (≤ 12 h fresh, else nothing fires) stands in for it. Spec 0.1.88 (C378): with the bridge cap `acting_agents` the bridge's before
+ * hooks (Rules) run again at fire time; a refusal refuses the fire, a hold holds it, and a bridge that cannot answer defers it.
  */
 export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: AbortSignal): Promise<OpFireOutcome> {
   const now = Date.now();
@@ -946,6 +1003,18 @@ export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: Abor
     if (h?.status !== "approved") return { kind: "refused", reason: "hold_denied" };
   }
   const approved = rt.receipts.findApproved(callerId, op.id, inputDigest, now);
+  // spec 0.1.88 (C378, SDK-API §19): the hooks again, before authorize. A deny beats an approval; the fire with a hold verdict holds or waits as any hold.
+  let holdVerdict: AuthorizeInput["holdVerdict"] = null;
+  if (op.audience === "agent" && rt.bridgeCaps().includes(ACTING_AGENTS_CAP)) {
+    try {
+      const a = await rt.policyRecheck({ op: op.id, input, caller: { type: who.type as "agent" | "app", id: callerId } });
+      if (a.decision === "hold") holdVerdict = { family: a.family as NonNullable<AuthorizeInput["holdVerdict"]>["family"], reason: a.reason, by: a.by };
+    } catch (e) {
+      const err = toTbError(e, rt);
+      if (["hook_denied", "paused", "no_grant", "not_in_workflow", "crud_exceeds_grant"].includes(err.code)) return refuse(err.code);
+      return { kind: "defer", reason: err.code };
+    }
+  }
   // v0.1.22 (SDK-02): usage, decision and the cap slot in one transaction (receipt or not)
   const { decision, slot } = rt.receipts.decideAndReserve(callerId, g.claims.caps ?? {}, effect, op.id, now, (usage) =>
     authorize({
@@ -956,14 +1025,14 @@ export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: Abor
       access,
       usage,
       approval: approved ? "approved" : "none",
-      holdVerdict: null,
+      holdVerdict,
     }),
   );
   if (decision.decision === "refuse") return refuse(decision.reason);
   const admit = decision.admittedBy ? { admittedBy: decision.admittedBy } : {};
   if (decision.decision === "hold") {
     if (job.holdId) return { kind: "refused", reason: "hold_consumed" };
-    const hold = createHold(rt, base, spec, op, input, decision, null, { scheduled: job.id }, now);
+    const hold = createHold(rt, base, spec, op, input, decision, decision.reason === DECISION_REASON.heldByHook ? (holdVerdict?.reason ?? null) : null, { scheduled: job.id }, now);
     rt.statusChanged();
     return { kind: "wait", holdId: hold.id };
   }

@@ -16,6 +16,7 @@ import type { CompanionResult, HealthStatus, Json, Logger } from "@opt2-tealbric
 import type { BridgeClient } from "./bridge-client.ts";
 import { errorFrom, SDK_PROOF_CLAIMS } from "./bridge-client.ts";
 import { enrolCodeDigest, identityRefused, reclaimCode, waitForMountedDataDir } from "./claim-guard.ts";
+import type { ActingEnvelope } from "./context.ts";
 import { TbError } from "./errors.ts";
 import type { JobsSummary } from "./jobs.ts";
 import { peekClaims } from "./ops.ts";
@@ -266,7 +267,7 @@ export class BridgeLink {
    * Companion call `POST /tb/v1/call` with TB-Assert + TB-Grant (SDK-API §9, BRIDGE §8.3). `parentCall: null` = an
    * app-initiated call (v0.1.13 C85: StartContext / EventContext / timers): the envelope carries no parentCall.
    */
-  async call<O = Json>(product: string, op: string, input: Json, opts: { idempotencyKey?: string; context?: Record<string, Json>; parentCall: string | null }): Promise<CompanionResult<O>> {
+  async call<O = Json>(product: string, op: string, input: Json, opts: { idempotencyKey?: string; context?: Record<string, Json>; parentCall: string | null; acting?: ActingEnvelope }): Promise<CompanionResult<O>> {
     const rt = this.#rt;
     // a product declaration first; else the wildcard companion (M-CP-3: only tb.holds_pending) for any product
     const declared =
@@ -285,15 +286,18 @@ export class BridgeLink {
       const problem = callerContextProblem(rt.manifest.id, context);
       if (problem) throw new TbError("input_invalid", `context: ${problem.message}`, 400, { pointer: problem.pointer });
     }
+    // spec 0.1.88 (C378, BRIDGE §8.7): a job that holds tickets never goes out without them: no cap = refused here, not sent as the app's own call
+    if (opts.acting) this.#needActingCap();
     const p = rt.trust.paused(null);
     if (p.workspace || p.instance) throw new TbError("paused", "this instance is paused", 403);
-    const envelope: CallEnvelope = {
+    const envelope: CallEnvelope & { acting?: ActingEnvelope } = {
       target: product,
       op,
       input,
       ...(opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}),
       ...(opts.parentCall ? { parentCall: opts.parentCall as CallEnvelope["parentCall"] } : {}),
       ...(hasContext ? { context: context as CallEnvelope["context"] } : {}),
+      ...(opts.acting ? { acting: opts.acting } : {}),
     };
     for (let attempt = 0; ; attempt++) {
       const grant = companionGrant(rt, product, declared.product === "*" ? null : declared.operations, op);
@@ -308,7 +312,32 @@ export class BridgeLink {
       throw err;
     }
   }
+
+  #needActingCap(): void {
+    if (!this.#rt.trust.bridgeCaps(Date.now()).includes(ACTING_AGENTS_CAP)) throw new TbError("bridge_cap_missing", `the workspace bridge does not declare the capability ${ACTING_AGENTS_CAP}`, 409, { cap: ACTING_AGENTS_CAP });
+  }
+
+  /** spec 0.1.88 (BRIDGE §8.7 rule 4): tickets of an open call delivered to this instance. */
+  async actingTickets(call: string, job: string): Promise<string[]> {
+    this.#needActingCap();
+    const r = await this.#client.request("POST", ACTING_TICKETS_PATH, { call, job });
+    if (r.status !== 200) throw errorFrom(r, "app_error");
+    return (r.body as { tickets: string[] }).tickets;
+  }
+
+  /** spec 0.1.88 (BRIDGE §8.7 rule 6): would this call to my own op pass now? Nothing runs; a refusal is thrown as TbError. */
+  async policyRecheck(body: { op: string; input: Json; caller: { type: "agent" | "app"; id: string } }): Promise<PolicyRecheckAnswer> {
+    const r = await this.#client.request("POST", POLICY_RECHECK_PATH, body);
+    if (r.status !== 200) throw errorFrom(r, "app_error");
+    return r.body as PolicyRecheckAnswer;
+  }
 }
+
+/** spec 0.1.88, local copy (the SDK pins an older spec). */
+export const ACTING_AGENTS_CAP = "acting_agents";
+const ACTING_TICKETS_PATH = "/tb/v1/acting-tickets";
+const POLICY_RECHECK_PATH = "/tb/v1/policy-recheck";
+export type PolicyRecheckAnswer = { decision: "allow" } | { decision: "hold"; family: string; reason: string; by: string };
 
 /**
  * The slice's `grants` carry no product label. SPEC-GAP: the SDK picks the grant whose `wf` equals the manifest-declared
