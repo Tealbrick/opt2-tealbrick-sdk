@@ -5,6 +5,7 @@ import type { WorkspaceId } from "@opt2-tealbrick/spec/credentials";
 import type { AppDefinition, CallAppOptions, Caller, CompanionResult, EventContext, HookContext, Json, OpContext, PublicHandler, ScopeStore, SliceAgent, StartContext as SpecStartContext } from "@opt2-tealbrick/spec/sdk";
 import type { AppSecrets } from "./app-secrets.ts";
 import type { JobHandler, JobSpec, JobsView } from "./jobs.ts";
+import type { OwnerDraftsView } from "./owner-drafts.ts";
 import type { SliceTopologyView } from "./topology.ts";
 
 export interface ContextExtras {
@@ -28,7 +29,7 @@ export interface ContextExtras {
  * Typed in spec 0.1.49 (`Caller.listed`); `SdkCaller` stays exported as an alias for code written against the 0.1.48 types.
  */
 export type SdkCaller = Caller;
-export type SdkOpContext = Omit<OpContext, "callApp"> & { caller: SdkCaller; callApp: ActingCallApp } & ContextExtras & CompanionTargetsView & JobsView & ApprovalView & ActingView & SendTimeView;
+export type SdkOpContext = Omit<OpContext, "callApp"> & { caller: SdkCaller; callApp: ActingCallApp } & ContextExtras & CompanionTargetsView & JobsView & ApprovalView & ActingView & SendTimeView & OwnerDraftsView;
 export type SdkHookContext = HookContext & { secrets: AppSecrets };
 export type SdkPublicContext = Parameters<PublicHandler>[1] & ContextExtras;
 export type { AppSecrets };
@@ -122,9 +123,9 @@ export interface CompanionTargetsView {
 }
 
 /** v0.1.13 (C33, C85, C86): `onStart` runs once after boot and (bridge mode) after the claim succeeded; errors are logged. */
-export type StartContext = Omit<SpecStartContext, "callApp"> & { callApp: ActingCallApp } & CompanionTargetsView & JobsView & SendTimeView;
+export type StartContext = Omit<SpecStartContext, "callApp"> & { callApp: ActingCallApp } & CompanionTargetsView & JobsView & SendTimeView & OwnerDraftsView;
 /** v0.1.13: the ctx every event handler gets (C85 callApp without parentCall, C86 statusChanged / ownerLink). */
-export type SdkEventContext = Omit<EventContext, "callApp"> & { callApp: ActingCallApp } & CompanionTargetsView & JobsView & SendTimeView;
+export type SdkEventContext = Omit<EventContext, "callApp"> & { callApp: ActingCallApp } & CompanionTargetsView & JobsView & SendTimeView & OwnerDraftsView;
 /** AppEvents (types/sdk.ts) with the SDK event ctx; a handler typed against the spec EventContext still fits. */
 export interface SdkAppEvents {
   agentAdded?(agent: SliceAgent, ctx: SdkEventContext): Promise<void>;

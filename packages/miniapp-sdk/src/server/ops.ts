@@ -243,6 +243,8 @@ export function buildContext(
       return rt.actingTickets(callId, job);
     },
     sendTimeCheck: (input: Parameters<typeof sendTimeCheck>[1]) => sendTimeCheck(rt, input),
+    // spec 0.1.89 (C380): the app only asks; the owner approves in Portal
+    ownerDrafts: rt.ownerDrafts,
     callServiceHelper: (serviceId, path, body) => rt.callServiceHelper(serviceId, path, body),
     db: rt.appDb,
     log: rt.log,
