@@ -27,7 +27,24 @@ export function compareSemver(a: string, b: string): number {
   if (x.pre === y.pre) return 0;
   if (x.pre === null) return 1;
   if (y.pre === null) return -1;
-  return x.pre < y.pre ? -1 : 1;
+  // Semver §11: dot-separated identifiers. Numeric ones compare as numbers (dev.10 > dev.9) and rank below alphanumeric ones.
+  const xs = x.pre.split(".");
+  const ys = y.pre.split(".");
+  for (let i = 0; i < Math.max(xs.length, ys.length); i++) {
+    const p = xs[i];
+    const q = ys[i];
+    if (p === undefined) return -1;
+    if (q === undefined) return 1;
+    const pn = /^\d+$/.test(p);
+    const qn = /^\d+$/.test(q);
+    if (pn && qn) {
+      if (Number(p) !== Number(q)) return Number(p) < Number(q) ? -1 : 1;
+      continue;
+    }
+    if (pn !== qn) return pn ? -1 : 1;
+    if (p !== q) return p < q ? -1 : 1;
+  }
+  return 0;
 }
 
 /**
