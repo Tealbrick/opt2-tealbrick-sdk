@@ -166,7 +166,7 @@ describe("createMiniapp", () => {
     const tb = Object.entries<string>({ ...pkg.dependencies, ...pkg.devDependencies }).filter(([n]) => n.startsWith("@opt2-tealbrick/"));
     assert.deepEqual(tb.map(([n]) => n).sort(), ["@opt2-tealbrick/conformance", "@opt2-tealbrick/manifest", "@opt2-tealbrick/miniapp-sdk", "@opt2-tealbrick/ui"]);
     for (const [n, url] of tb) assert.match(url, RELEASE_URL_RE, n);
-    assert.match(pkg.devDependencies["@opt2-tealbrick/ui"], /[/-]ui-v0\.3\.0\//);
+    assert.match(pkg.devDependencies["@opt2-tealbrick/ui"], /[/-]ui-v0\.7\.1\//);
     assert.match(pkg.dependencies["@opt2-tealbrick/manifest"], /[/-]manifest-v0\.1\.28\//);
     assert.match(pkg.dependencies["@opt2-tealbrick/miniapp-sdk"], /[/-]miniapp-sdk-v0\.1\.36\//);
     assert.match(pkg.devDependencies["@opt2-tealbrick/conformance"], /[/-]conformance-v0\.1\.26\//);
