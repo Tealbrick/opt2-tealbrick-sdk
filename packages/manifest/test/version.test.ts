@@ -46,3 +46,15 @@ test("C232 (LA-2): an outward op may declare public_link; a typo stays refused; 
   assert.ok((m.KNOWN_HOLD_FAMILIES as readonly string[]).includes("public_link"));
   assert.ok((m.HOOK_HOLD_FAMILIES as readonly string[]).includes("public_link"));
 });
+
+test("compareSemver: pre-release identifiers per semver (C382): numeric ones as numbers, numeric below words, fewer below more", () => {
+  assert.equal(compareSemver("0.4.0-dev.10", "0.4.0-dev.9"), 1);
+  assert.equal(compareSemver("0.4.0-dev.9", "0.4.0-dev.10"), -1);
+  assert.equal(compareSemver("0.4.0-dev.99", "0.4.0-dev.10"), 1);
+  assert.equal(compareSemver("1.0.0-alpha", "1.0.0-alpha.1"), -1);
+  assert.equal(compareSemver("1.0.0-alpha.1", "1.0.0-alpha.beta"), -1);
+  assert.equal(compareSemver("1.0.0-rc.1", "1.0.0-beta.11"), 1);
+  assert.equal(compareSemver("1.0.0-1", "1.0.0-alpha"), -1);
+  assert.equal(compareSemver("1.0.0-dev.01", "1.0.0-dev.1"), 0);
+  assert.equal(compareSemver("0.4.0-dev.10", "0.4.0"), -1);
+});
