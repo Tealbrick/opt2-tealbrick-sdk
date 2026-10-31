@@ -59,6 +59,7 @@ describe("createMiniapp", () => {
       "package.json",
       "test/app.test.ts",
       "test/ui-holds.test.ts",
+      "test/ui-filter.test.ts",
       ".gitignore",
       ".dockerignore",
       "README.md",
@@ -220,7 +221,7 @@ describe("createMiniapp", () => {
     const b = join(temp(t), "b");
     createMiniapp({ dir: a, id: "alpha", name: "Alpha" });
     createMiniapp({ dir: b, id: "beta-two", name: "Beta Two" });
-    for (const f of ["src/ui/standard.tsx", "src/ui/pages.css", "test/ui-holds.test.ts"]) assert.equal(read(a, f), read(b, f), `${f} is one source for all apps`);
+    for (const f of ["src/ui/standard.tsx", "src/ui/pages.css", "test/ui-holds.test.ts", "test/ui-filter.test.ts"]) assert.equal(read(a, f), read(b, f), `${f} is one source for all apps`);
     const standard = read(a, "src/ui/standard.tsx");
     assert.doesNotMatch(standard, /alpha|Alpha/, "no app id or name inside standard.tsx");
     // RUL-01 / RUL-14 / C8 are in the shared module, not left to each app

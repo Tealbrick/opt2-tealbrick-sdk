@@ -2,6 +2,12 @@
 
 Earlier releases are in the git history of this package.
 
+## Unreleased (C382 batch 4)
+
+- The template pins `@opt2-tealbrick/ui` 0.7.1 (was 0.3.0).
+- `src/ui/standard.tsx`: Holds filter by agent and by text; Receipts filter by agent (the server's `caller` filter) and by text (the loaded rows, said in words, with Show older in reach). Held approvals that a filter hides are counted above the list. A filter always shows "Showing N of M" and Clear.
+- New test `test/ui-filter.test.ts`, one source for all apps.
+
 ## 0.1.19
 
 - The template pins `@opt2-tealbrick/manifest` 0.1.28, `@opt2-tealbrick/miniapp-sdk` 0.1.36 and `@opt2-tealbrick/conformance` 0.1.26 (dist tarballs, sha512 integrity in `pnpm-lock.yaml`; the lock now resolves `@opt2-tealbrick/spec` 0.1.52 and one copy of each package). The SDK goes from 0.1.34 to 0.1.36; 0.1.35 is skipped.

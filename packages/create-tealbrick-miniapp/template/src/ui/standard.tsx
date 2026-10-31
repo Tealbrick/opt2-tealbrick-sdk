@@ -10,7 +10,20 @@
 // pages therefore call the same standard ops (tb.holds_list, tb.holds_decide, tb.receipts_list, tb.agents_list,
 // tb.export) through callOp / tbFetch and keep the load error.
 import { callOp, tbFetch, type UseAgents, type UseHolds } from "@opt2-tealbrick/miniapp-sdk/client";
-import { Button, EmptyState, Notice, Swatch, Table, Tag } from "@opt2-tealbrick/ui";
+import {
+  accessFilter,
+  Button,
+  EmptyState,
+  Field,
+  ListFilter,
+  Notice,
+  Select,
+  type SelectOption,
+  Swatch,
+  Table,
+  Tag,
+  useAccessFilter,
+} from "@opt2-tealbrick/ui";
 import { type Dispatch, type ReactNode, type SetStateAction, useCallback, useEffect, useRef, useState } from "react";
 
 // ── messages ────────────────────────────────────────────────────────────────
@@ -217,10 +230,36 @@ function Head({ title, lede }: { title: string; lede?: ReactNode }) {
   );
 }
 
+// ── list filter (C382 batch 4) ──────────────────────────────────────────────
+
+/** A list shorter than this shows no filter bar, unless a remembered filter is on. */
+const FILTER_FROM = 8;
+const ALL_AGENTS = "__all";
+
+/** What this browser remembers is per app (the base path of the app) and per page. */
+const filterKey = (page: string) => {
+  try {
+    return `tb-filter:${new URL(document.baseURI).pathname}:${page}`;
+  } catch {
+    return `tb-filter:${page}`;
+  }
+};
+
+/** The agent select: every agent seen, by name; a remembered agent that is no longer listed stays selectable so the filter is never hidden. */
+function agentChoices(seen: readonly { id: string; name: string }[], selected: string): SelectOption[] {
+  const byId = new Map<string, string>();
+  for (const a of seen) if (!byId.has(a.id)) byId.set(a.id, a.name);
+  const options: SelectOption[] = [{ value: ALL_AGENTS, label: "All agents" }];
+  for (const [id, name] of [...byId].sort((a, b) => a[1].localeCompare(b[1]))) options.push({ value: id, label: name });
+  if (selected !== "" && !byId.has(selected)) options.push({ value: selected, label: "An agent that is no longer listed" });
+  return options;
+}
+
 // ── Holds ───────────────────────────────────────────────────────────────────
 
 const MAX_PAGES = 20;
-async function loadHolds(): Promise<Hold[]> {
+type LoadedHolds = { items: Hold[]; truncated: boolean };
+async function loadHolds(): Promise<LoadedHolds> {
   const out: Hold[] = [];
   let cursor: string | null = null;
   for (let i = 0; i < MAX_PAGES; i++) {
@@ -229,13 +268,15 @@ async function loadHolds(): Promise<Hold[]> {
     cursor = page.nextCursor;
     if (!cursor) break;
   }
-  return out;
+  return { items: out, truncated: cursor !== null };
 }
 
 export interface HoldList {
   /** held calls; null until the first load worked */
   holds: readonly Hold[] | null;
   loading: boolean;
+  /** more held calls exist than were loaded (the page limit was reached): a filter then reads only the loaded ones */
+  truncated?: boolean;
   /** plain message of the last failed load, else null */
   error: string | null;
   reload: () => Promise<void>;
@@ -252,12 +293,12 @@ export function useHoldList(): HoldList {
   const decide = useCallback(
     async (id: string, decision: "approve" | "deny") => {
       await callOp("tb.holds_decide", { holdId: id, decision });
-      set((cur) => (cur ?? []).filter((h) => h.id !== id));
+      set((cur) => (cur ? { ...cur, items: cur.items.filter((h) => h.id !== id) } : cur));
       await reload();
     },
     [reload, set],
   );
-  return { holds: data, loading, error, reload, decide };
+  return { holds: data?.items ?? null, truncated: data?.truncated ?? false, loading, error, reload, decide };
 }
 
 function HoldRow({ hold, busy, onDecide }: { hold: Hold; busy: boolean; onDecide: (decision: "approve" | "deny") => void }) {
@@ -318,7 +359,20 @@ function HoldsView({ list, empty, lede, only }: { list: HoldList; empty: string;
     setFailure(null);
     void list.reload();
   };
-  const holds = list.holds === null ? null : only ? list.holds.filter((h) => h.id === only) : list.holds;
+  // C382 batch 4: a filter by agent and by text. Nothing is hidden by default; what a filter hides is counted above the list.
+  const [query, setQuery] = useAccessFilter(filterKey("holds"));
+  const [agent, setAgent] = useAccessFilter(filterKey("holds:agent"));
+  const textFilter = accessFilter(query);
+  const all = list.holds === null ? null : only ? list.holds.filter((h) => h.id === only) : list.holds;
+  const agentSet = agent !== "" && agent !== ALL_AGENTS;
+  const holds =
+    all === null || only ? all : all.filter((h) => (!agentSet || h.caller.id === agent) && textFilter.test([h.caller.name, h.op, h.summary, h.holdFamily, h.heldBy].filter(Boolean).join(" ")));
+  const filterOn = !only && (query.trim() !== "" || agentSet);
+  const showBar = !only && all !== null && (all.length >= FILTER_FROM || filterOn);
+  const clearFilter = () => {
+    setQuery("");
+    setAgent("");
+  };
   return (
     <section className="app-page" aria-label="Holds">
       <Head title="Holds" lede={lede} />
@@ -328,10 +382,38 @@ function HoldsView({ list, empty, lede, only }: { list: HoldList; empty: string;
           {failure}
         </Notice>
       ) : null}
+      {showBar && all !== null && holds !== null ? (
+        <ListFilter
+          label="Filter the held approvals"
+          value={query}
+          onChange={setQuery}
+          filter={textFilter}
+          noun={{ one: "held approval", many: "held approvals" }}
+          shown={holds.length}
+          total={all.length}
+          facets={agentSet}
+          more={list.truncated === true}
+          loadedOnly
+          hidden={all.length - holds.length}
+          onClear={clearFilter}
+        >
+          <Field label="Agent">
+            <Select
+              aria-label="Agent"
+              options={agentChoices(
+                all.map((h) => h.caller),
+                agentSet ? agent : "",
+              )}
+              value={agentSet ? agent : ALL_AGENTS}
+              onValueChange={(v) => setAgent(v === ALL_AGENTS ? "" : v)}
+            />
+          </Field>
+        </ListFilter>
+      ) : null}
       {holds === null ? (
         list.error ? null : <Loading what="holds" />
       ) : holds.length === 0 ? (
-        <EmptyState title={only ? "This approval is no longer waiting." : empty} />
+        all !== null && all.length > 0 ? null : <EmptyState title={only ? "This approval is no longer waiting." : empty} />
       ) : (
         <div className="ruled">
           {holds.map((h) => (
@@ -367,7 +449,7 @@ export function HoldsPage({ list, ...rest }: HoldsPageProps) {
 
 interface ReceiptRow {
   id: string;
-  caller: { name: string };
+  caller: { id: string; name: string };
   op: string;
   status: string;
   summary: string;
@@ -384,40 +466,90 @@ function when(ms: number): string {
   return d.toDateString() === new Date().toDateString() ? time : `${d.toLocaleDateString([], { day: "numeric", month: "short" })} ${time}`;
 }
 
-const loadReceipts = () => callOp<ReceiptPage>("tb.receipts_list", {});
+type ReceiptLoad = { agent: string; page: ReceiptPage };
 
-/** Receipts: what agents changed, newest first (`tb.receipts_list`), as a ledger table. */
+/**
+ * Receipts: what agents changed, newest first (`tb.receipts_list`), as a ledger table.
+ * C382 batch 4: a filter by agent and by text. The agent filter is the server's (`caller`), so it covers every receipt.
+ * The text filter reads the loaded rows only; the page says so, with the count, and Show older stays in reach.
+ */
 export function ReceiptsPage({ empty = "No agent changes recorded yet.", lede }: { empty?: string; lede?: ReactNode }) {
+  const [query, setQuery] = useAccessFilter(filterKey("receipts"));
+  const [agentRaw, setAgent] = useAccessFilter(filterKey("receipts:agent"));
+  const agent = agentRaw === ALL_AGENTS ? "" : agentRaw;
+  const loadReceipts = useCallback(async (): Promise<ReceiptLoad> => ({ agent, page: await callOp<ReceiptPage>("tb.receipts_list", agent ? { caller: agent } : {}) }), [agent]);
   const { data, error, loading, reload } = useLoad(loadReceipts);
-  const [older, setOlder] = useState<ReceiptRow[]>([]);
-  const [cursor, setCursor] = useState<string | null>(null);
+  const agents = useLoad(loadAgents);
+  const [olderState, setOlderState] = useState<{ agent: string; page: ReceiptPage | null; items: ReceiptRow[]; cursor: string } | null>(null);
   const [olderError, setOlderError] = useState<string | null>(null);
   const [more, setMore] = useState(false);
-  const next = cursor ?? data?.nextCursor ?? null;
+  // rows of another agent's filter may still be in state for one render: they are not shown
+  const current = data && data.agent === agent ? data.page : null;
+  // older rows belong to the first page they were read after: a new first page (a reload, another agent) drops them, so no row is skipped
+  const older = olderState && olderState.agent === agent && olderState.page === current ? olderState : null;
+  const next = older ? older.cursor || null : (current?.nextCursor ?? null);
   const showOlder = async () => {
     setMore(true);
     setOlderError(null);
     try {
-      const page = await callOp<ReceiptPage>("tb.receipts_list", { cursor: next });
-      setOlder((o) => [...o, ...page.items]);
-      setCursor(page.nextCursor ?? "");
+      const page = await callOp<ReceiptPage>("tb.receipts_list", agent ? { caller: agent, cursor: next } : { cursor: next });
+      setOlderState((o) => ({ agent, page: current, items: [...(o && o.agent === agent && o.page === current ? o.items : []), ...page.items], cursor: page.nextCursor ?? "" }));
     } catch (e) {
       setOlderError(errorMessage(e));
     } finally {
       setMore(false);
     }
   };
-  const rows = data ? [...data.items, ...older] : [];
+  const loaded = current ? [...current.items, ...(older?.items ?? [])] : [];
+  const textFilter = accessFilter(query);
+  const rows = loaded.filter((r) => textFilter.test([when(r.createdAt), r.caller.name, r.op, r.summary, r.status].join(" ")));
+  const filterOn = query.trim() !== "" || agent !== "";
+  const barSeen = useRef(false);
+  const wants = current !== null && (loaded.length >= FILTER_FROM || next !== null || filterOn);
+  if (wants) barSeen.current = true;
+  // once shown the bar stays while another agent loads, so the focus is not lost
+  const showBar = data !== null && (wants || barSeen.current);
+  const clearFilter = () => {
+    setQuery("");
+    setAgent("");
+  };
   return (
     <section className="app-page" aria-label="Receipts">
       <Head title="Receipts" lede={lede} />
       {error ? <LoadError message={error} retrying={loading} onRetry={() => void reload()} /> : null}
-      {data === null ? (
+      {showBar ? (
+        <ListFilter
+          label="Filter the receipts"
+          value={query}
+          onChange={setQuery}
+          filter={textFilter}
+          noun={{ one: "receipt", many: "receipts" }}
+          shown={rows.length}
+          total={loaded.length}
+          facets={agent !== ""}
+          more={next !== null}
+          busy={current === null && !error}
+          onClear={clearFilter}
+          onLoadMore={() => void showOlder()}
+          loadingMore={more}
+        >
+          <Field label="Agent">
+            <Select
+              aria-label="Agent"
+              options={agentChoices([...(agents.data ?? []), ...loaded.map((r) => r.caller as { id: string; name: string })], agent)}
+              value={agent === "" ? ALL_AGENTS : agent}
+              onValueChange={(v) => setAgent(v === ALL_AGENTS ? "" : v)}
+            />
+          </Field>
+        </ListFilter>
+      ) : null}
+      {current === null ? (
         error ? null : <Loading what="receipts" />
-      ) : rows.length === 0 ? (
+      ) : loaded.length === 0 && !filterOn ? (
         <EmptyState title={empty} />
       ) : (
         <>
+          {rows.length > 0 ? (
           <Table>
             <thead>
               <tr>
@@ -440,6 +572,7 @@ export function ReceiptsPage({ empty = "No agent changes recorded yet.", lede }:
               ))}
             </tbody>
           </Table>
+          ) : null}
           {olderError ? (
             <Notice tone="needs-you" role="alert">
               {olderError}
