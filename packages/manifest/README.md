@@ -32,3 +32,7 @@ Runtime deps: `@opt2-tealbrick/spec`, `ajv`. Node 24+. Copying any of these prim
 
 `validateManifest` accepts top-level `needsTopology` as a boolean and refuses any other value (`schema` / `schema_invalid` at `/needsTopology`). M-TP-1 (`topologyRules`): `needsTopology: true` without `needsAgentDirectory: true` → `topology_needs_directory` at `/needsTopology`. SPEC-GAP until the spec pin carries 0.1.87: while the pinned schema does not know the field, `needsTopologyGate` (in `validate.ts`, outside `validateCompanions`) checks it and leaves it out of the schema check only; the manifest and its digest keep it. With the re-pin the schema decides and the gate passes everything through.
 
+
+## 0.1.37 (C383, D-C383-JM1; spec 0.1.68 rule, no spec change): a dynamic call names up to 63 characters
+
+`DYNAMIC_CALL_INPUT_SCHEMA.tool` is now `^[a-z][a-z0-9_]{1,62}$` (`DYNAMIC_CALL_TOOL_PATTERN`), the rule of spec `DYNAMIC_TOOL_NAME_RE`: a catalog name (at most 48) or a variant the agent requests, such as `<48-char tool>__first_contact` (63). Before, every requested name over 48 was refused `input_invalid`, so a first contact through a tool with a name over 33 characters could never be asked. The commit stood in the open sdk#51 since C354 and never reached main. The catalog entry rule (at most 48) does not change.
