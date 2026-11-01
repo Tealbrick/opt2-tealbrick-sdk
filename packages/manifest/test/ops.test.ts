@@ -132,6 +132,11 @@ describe("standard op ids and schemas", () => {
   test("dynamic call and search input schemas", () => {
     assert.equal(validateAgainstSchema(DYNAMIC_CALL_INPUT_SCHEMA, { tool: "send_mail", arguments: {} }).ok, true);
     assert.equal(validateAgainstSchema(DYNAMIC_CALL_INPUT_SCHEMA, { tool: "Bad Name", arguments: {} }).ok, false);
+    // spec 0.1.68 (C354): a variant the agent requests explicitly, e.g. a 48-char catalog name + `__first_contact` (63 chars)
+    const base48 = `g${"m".repeat(47)}`;
+    assert.equal(validateAgainstSchema(DYNAMIC_CALL_INPUT_SCHEMA, { tool: `${base48}x`, arguments: {} }).ok, true, "49 chars");
+    assert.equal(validateAgainstSchema(DYNAMIC_CALL_INPUT_SCHEMA, { tool: `${base48}__first_contact`, arguments: {} }).ok, true, "63 chars");
+    assert.equal(validateAgainstSchema(DYNAMIC_CALL_INPUT_SCHEMA, { tool: `${base48}__first_contact_`, arguments: {} }).ok, false, "64 chars");
     assert.equal(validateAgainstSchema(DYNAMIC_SEARCH_INPUT_SCHEMA, { query: "mail", limit: 5 }).ok, true);
     assert.equal(validateAgainstSchema(DYNAMIC_SEARCH_INPUT_SCHEMA, { limit: 5 }).ok, false);
   });
