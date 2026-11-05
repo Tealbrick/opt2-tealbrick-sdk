@@ -7,6 +7,7 @@ import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 import { errorFrom } from "./bridge-client.ts";
 import { TbError } from "./errors.ts";
+import { netCause } from "./net-cause.ts";
 
 /** tb-exec control port (SDK-API §11), private network only. */
 export const TB_EXEC_CONTROL_PORT = 7077 as const;
@@ -55,8 +56,10 @@ export function createServiceHelperCaller(ctx: ServiceHelperContext): <O = Json>
         redirect: "error",
         signal: AbortSignal.timeout(HELPER_TIMEOUT_MS),
       });
-    } catch {
-      throw new TbError("helper_unavailable", `service helper ${serviceId} not reachable`, 503);
+    } catch (e) {
+      // C390: the reason (refused, timeout, DNS, …) as a label, so a log tells the failures apart
+      const cause = netCause(e);
+      throw new TbError("helper_unavailable", `service helper ${serviceId} not reachable (${cause})`, 503, { cause });
     }
     const text = await res.text();
     let parsed: unknown = null;

@@ -20,6 +20,7 @@ import type { AuditLog, BackupApi, BackupHealth, BackupMeta, ExportMeta, Logger 
 import { createAuditLog } from "./audit.ts";
 import { nextRun, parseCron } from "./cron.ts";
 import { TbError } from "./errors.ts";
+import { netCause } from "./net-cause.ts";
 import { serviceHost, TB_EXEC_CONTROL_PORT } from "./service-helper.ts";
 import { metaGet, metaSet, openStore, type RawDb, type Row, type SchemaVersion, storedSchema } from "./store.ts";
 import { bufferSink, fileSink, readTarGz, type TarSource, writeTarGz } from "./tar.ts";
@@ -163,8 +164,9 @@ async function exec(ctx: BackupContext, target: ExecTarget, serviceId: string, p
       redirect: "error",
       signal: AbortSignal.timeout(EXEC_TIMEOUT_MS),
     });
-  } catch {
-    throw new TbError(code, `tb-exec of service ${serviceId} not reachable`, 503);
+  } catch (e) {
+    const cause = netCause(e); // C390
+    throw new TbError(code, `tb-exec of service ${serviceId} not reachable (${cause})`, 503, { cause });
   }
   if (!res.ok) {
     await res.body?.cancel();

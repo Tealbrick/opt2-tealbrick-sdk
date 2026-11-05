@@ -26,7 +26,14 @@ function forwardHeaders(h: IncomingHttpHeaders): Record<string, string | string[
   return out;
 }
 
-function listen(server: Server, port: number, host: string): Promise<Server> {
+/**
+ * C390 (knowledge#38): the private-network listeners bind `::` (IPv4 and IPv6). Railway's legacy environments reach a
+ * service over IPv6 only, and `0.0.0.0` answers IPv4 only. A host without IPv6 falls back to `0.0.0.0`.
+ */
+export const DEFAULT_LISTEN_HOST = "::";
+const NO_IPV6 = new Set(["EAFNOSUPPORT", "EADDRNOTAVAIL", "EINVAL"]);
+
+function listenOnce(server: Server, port: number, host: string): Promise<Server> {
   return new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(port, host, () => {
@@ -34,6 +41,20 @@ function listen(server: Server, port: number, host: string): Promise<Server> {
       resolve(server);
     });
   });
+}
+
+async function listen(server: Server, port: number, host: string, log: Logger, name: string): Promise<Server> {
+  try {
+    await listenOnce(server, port, host);
+  } catch (e) {
+    const code = (e as { code?: unknown }).code;
+    if (host !== "::" || typeof code !== "string" || !NO_IPV6.has(code)) throw e;
+    log.warn(`${name} has no IPv6; listening on IPv4 only`, { code });
+    await listenOnce(server, port, "0.0.0.0");
+  }
+  const a = server.address();
+  log.info(`${name} listening`, { port, host: a && typeof a === "object" ? a.address : host });
+  return server;
 }
 
 export interface HelperProxyOptions {
@@ -57,10 +78,12 @@ export function startHelperProxy(o: HelperProxyOptions): Promise<Server> {
       await forward(req, res, body, o.target);
     } catch (e) {
       if (!(e instanceof TbError)) o.log.warn("helper proxy error", { code: "internal_error" });
+      // C390: the proxy logs its own failures (code + cause label), so the service log shows the helper side too
+      else if (e.code === "helper_unavailable") o.log.warn("helper proxy error", { code: e.code, cause: String(e.details?.cause ?? "unknown") });
       sendError(res, rid, e);
     }
   });
-  return listen(server, o.port, o.host);
+  return listen(server, o.port, o.host, o.log, "helper proxy");
 }
 
 function forward(req: IncomingMessage, res: ServerResponse, body: Buffer, target: { host: string; port: number }): Promise<void> {
@@ -77,8 +100,12 @@ function forward(req: IncomingMessage, res: ServerResponse, body: Buffer, target
         });
       },
     );
-    up.once("timeout", () => up.destroy(new Error("timeout")));
-    up.once("error", () => reject(new TbError("helper_unavailable", "the service helper is not reachable", 502)));
+    up.once("timeout", () => up.destroy(Object.assign(new Error("timeout"), { code: "HELPER_TIMEOUT" })));
+    up.once("error", (e) => {
+      const code = (e as { code?: unknown }).code;
+      const cause = typeof code === "string" && /^[A-Z][A-Z0-9_]{1,47}$/u.test(code) ? code : "forward_failed";
+      reject(new TbError("helper_unavailable", `the service helper is not reachable (${cause})`, 502, { cause }));
+    });
     up.end(body);
   });
 }
@@ -120,7 +147,7 @@ export function startControlServer(o: ControlOptions): Promise<Server> {
       sendError(res, rid, e);
     }
   });
-  return listen(server, o.port, o.host);
+  return listen(server, o.port, o.host, o.log, "control port");
 }
 
 /** Streams the dump's stdout; a failure before the first byte → 500 `backup_failed`, after it → connection reset. */

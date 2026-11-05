@@ -18,7 +18,7 @@ import { HelperProcess, Upstream } from "./child.ts";
 import { childEnv, type ExecConfig, loadExecConfig, SDK_VERSION } from "./config.ts";
 import { type ClaimRecord, claimOrLoad, claimWith, loadServiceKey, retryable } from "./identity.ts";
 import { carriedSettings, type ExecRole, fetchRoles, rolesInForce } from "./roles.ts";
-import { startControlServer, startHelperProxy } from "./servers.ts";
+import { DEFAULT_LISTEN_HOST, startControlServer, startHelperProxy } from "./servers.ts";
 import { signalExitCode, sleep } from "./util.ts";
 import { appAssertionVerifier } from "./verify.ts";
 
@@ -178,7 +178,7 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
     // the app key accepted on the control / helper ports follows the claim record (a reclaim may bring a new one)
     let appVerify = appAssertionVerifier(rec);
     const verify: typeof appVerify = (req, body) => appVerify(req, body);
-    const host = o.host ?? "0.0.0.0";
+    const host = o.host ?? DEFAULT_LISTEN_HOST;
     const servers: Server[] = [];
     const up = new Upstream(args.command, log);
     upstream = up;
