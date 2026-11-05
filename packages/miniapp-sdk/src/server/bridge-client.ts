@@ -33,8 +33,10 @@ async function readBody(res: Response): Promise<unknown> {
 
 /** Error envelope → TbError (code passes through unchanged, CORE §8). */
 export function errorFrom(r: BridgeResponse, fallback: string): TbError {
-  const e = (r.body as { error?: { code?: unknown; message?: unknown } } | null)?.error;
-  return new TbError(typeof e?.code === "string" ? e.code : fallback, typeof e?.message === "string" ? e.message : `bridge answered ${r.status}`, r.status >= 400 ? r.status : 502);
+  const e = (r.body as { error?: { code?: unknown; message?: unknown; details?: unknown } } | null)?.error;
+  // C390: the envelope's `details` (CORE §8, e.g. a helper's `cause` label) travel with the error
+  const details = e?.details && typeof e.details === "object" && !Array.isArray(e.details) ? (e.details as Record<string, unknown>) : undefined;
+  return new TbError(typeof e?.code === "string" ? e.code : fallback, typeof e?.message === "string" ? e.message : `bridge answered ${r.status}`, r.status >= 400 ? r.status : 502, details);
 }
 
 export class BridgeClient {
