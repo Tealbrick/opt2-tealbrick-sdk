@@ -29,10 +29,14 @@ describe("A11 SDK coverage", () => {
     assert.equal(coverageOutcome().pass, true);
   });
 
-  it("modelRole maps to the real RM-17 row, and the one uncovered export is declared with a reason, not mapped to a row that does not call it", () => {
+  it("modelRole maps to the real RM-17 row, and the uncovered exports are declared with a reason, not mapped to a row that does not call them", () => {
     assert.deepEqual(SDK_COVERAGE.modelRole, ["A23.model_role_no_route"]);
     assert.ok(!("familyAllowedFor" in SDK_COVERAGE));
     assert.match(SDK_UNCOVERED.familyAllowedFor ?? "", /person-op relay lane/);
-    assert.match(coverageOutcome().asserted, /not covered yet \(declared in SDK_UNCOVERED\): familyAllowedFor/);
+    // v0.1.77: the modelFetch error codes have no row yet; the caller context summary limits map to B32.context_reaches_target
+    assert.ok(!("SDK_MODEL_ERROR_CODES" in SDK_COVERAGE));
+    assert.match(SDK_UNCOVERED.SDK_MODEL_ERROR_CODES ?? "", /modelFetch/);
+    assert.deepEqual(SDK_COVERAGE.CALLER_CONTEXT_SUMMARY_MAX_CHARS, ["B32.context_reaches_target"]);
+    assert.match(coverageOutcome().asserted, /not covered yet \(declared in SDK_UNCOVERED\): SDK_MODEL_ERROR_CODES, familyAllowedFor/);
   });
 });

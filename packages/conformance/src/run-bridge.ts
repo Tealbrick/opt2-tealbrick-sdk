@@ -17,6 +17,7 @@ import { BridgeCtx, type BridgeHarness } from "./checks/bridge-ctx.ts";
 import { eventChecks } from "./checks/bridge-events.ts";
 import { addressChecks, configChecks, keyChecks, keySetChecks, keysOriginChecks, listChangedChecks, oauthChecks, pauseChecks, portalDownChecks, reenrolChecks, scanChecks, standaloneChecks } from "./checks/bridge-flows.ts";
 import { BRIDGE_CRED_CASES, BRIDGE_GROUP_ORDER, BRIDGE_GROUPS } from "./checks/bridge-ids.ts";
+import { p3p4Checks } from "./checks/bridge-p3p4.ts";
 import { realAppChecks } from "./checks/bridge-real.ts";
 import { spine013Checks } from "./checks/bridge-spine013.ts";
 import { spawnCommand } from "./command.ts";
@@ -155,6 +156,7 @@ const RUNNERS: [string[], Group][] = [
   [["c117"], c117Checks],
   [["real_app"], realAppChecks],
   [["events"], eventChecks],
+  [["b31", "b32"], p3p4Checks],
   [["claim"], claimChecks],
   [["keys"], keyChecks],
   [["keys_origin"], keysOriginChecks],
@@ -185,6 +187,8 @@ export async function runBridgeTarget(opts: RunBridgeOptions): Promise<Report> {
   const [pub, int] = [await freePort(), await freePort()];
   // C91: the real SDK app's listen port is reserved now, so its origin is on the owner allow-list (TB_OWN_INFRA_ORIGINS)
   world.realAppPort = await freePort();
+  // C367 (B31 / B32): the ports of the generated real target (its proxy, the app itself) and real caller, likewise on the owner allow-list
+  world.capPorts = [await freePort(), await freePort(), await freePort()];
   let env: Record<string, string> = {
     TB_PORTAL_URL: world.portal.url,
     TB_ENROL_CODE: world.portal.issueEnrolCode(),

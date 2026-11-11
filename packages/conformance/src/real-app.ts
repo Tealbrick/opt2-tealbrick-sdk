@@ -32,14 +32,31 @@ export interface SdkModule {
   defineApp(def: Record<string, unknown>): unknown;
   startApp(app: unknown, env: Record<string, string>, harness?: { portalRootKeys?: unknown[]; privilegeProc?: { getuid?: () => number } }): Promise<RealRunningApp>;
 }
+/** The subset of a receipt this suite reads (SDK-API §4.1; `meta` carries the caller context since spec 0.1.77). */
+export interface RealReceipt {
+  id: string;
+  op: string;
+  status: string;
+  callId: string | null;
+  createdAt: number;
+  caller: { type: string; id: string };
+  meta: Json;
+}
 export interface RealRunningApp {
   status(): string;
-  receipts: { list(q: { op?: string; limit?: number }): Promise<{ items: { id: string; op: string; status: string; callId: string | null; createdAt: number }[] }> };
+  receipts: {
+    list(q: { op?: string; limit?: number }): Promise<{ items: RealReceipt[] }>;
+    /** conformance 0.1.31 (B32): one receipt by id (a hold's id is its receipt's) */
+    get(id: string): Promise<RealReceipt | null>;
+  };
   stop(): Promise<void>;
 }
 /** The subset of the SDK's StartContext the suite uses (C85: app-initiated companion calls, no parentCall). */
 export interface RealStartContext {
-  callApp(product: string, op: string, input: Json, opts?: { idempotencyKey?: string }): Promise<unknown>;
+  /** conformance 0.1.31 (C367 P4, SDK-API §18.6): `context` = the caller context of the call */
+  callApp(product: string, op: string, input: Json, opts?: { idempotencyKey?: string; context?: Record<string, Json> }): Promise<unknown>;
+  /** conformance 0.1.31 (spec 0.1.77): the caps of the slice (`bridge.caps`; [] when absent); an SDK before 0.1.41 has no such member */
+  bridgeCaps?(): readonly string[];
 }
 /** A started real app plus the StartContext its `onStart` received (null until the claim succeeded and onStart ran). */
 export interface RealApp extends RealRunningApp {

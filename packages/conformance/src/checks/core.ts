@@ -251,6 +251,8 @@ export function runCoreStatic(input: CoreStaticInput): CheckResult[] {
     for (const t of new Set([...tokens(r.opId), ...tokens(r.path)])) {
       // v0.1.64 (C326): `person_ops.call` is the allow-listed person-op relay, not tool execution (PORTAL-API §1.2)
       if (r.opId === "person_ops.call" && t === "call") continue;
+      // v0.1.67 (C331 D1): `licences.staff_comp` is the one named exception to "no staff routes" (PORTAL-API §6, § v0.1.67)
+      if (r.opId === "licences.staff_comp" && t === "staff") continue;
       const why = FORBIDDEN_TOKENS[t];
       if (why) forbidden.push(`${r.opId} ${r.method} ${r.path}: "${t}" (${why})`);
     }

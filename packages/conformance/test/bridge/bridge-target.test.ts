@@ -30,11 +30,50 @@ const PAUSE_INSTANCE_IDS = ["P1.instance.hook_app_paused", "P1.instance.other_ap
 const KEYS_ORIGIN_IDS = ["B11.main_origin_keys_404", "B11.keys_origin_only", "B11.keys_origin_csp", "B11.keys_origin_unset_503"];
 const GOOD_IDS = ["B1.health", "B1.mcp_requires_auth", "B1.internal_not_public", "C1.K5", "cred.p1.bridge_rejects_clerk_jwt", "cred.p1.bridge_rejects_tbo", "B7.list_exact", "B7.no_person_ops", "B8.forward", "B8.grant_and_proof", "B5.bound_outside_wf", "P1.workspace.mcp", "B9.portal_paths", "B9.no_payload"];
 
+const B31_IDS = ["B31.hold_status_own", "B31.hold_status_other_not_found", "B31.hold_status_undeclared", "B31.hold_approved_repeat_once", "B31.hold_status_old_target", "B31.hold_denied_repeat_blocked"];
+const B32_IDS = ["B32.context_reaches_target", "B32.context_foreign_key", "B32.context_tb_key", "B32.context_too_large", "B32.context_informational", "B32.sdk_local_refusal", "B32.context_tampered"];
+
 const EVENT_IDS = Array.from({ length: 17 }, (_, i) => `B-EV-${i + 1}`);
 const NO_CAP_ROW = "B-EV-18";
 const asserted = (r: Report, id: string) => r.checks.find((c) => c.id === id)?.asserted ?? "";
 
 describe("bridge target", () => {
+  it("spec 0.1.77 (B31, B32): a bridge that declares app_hold_status and app_call_context and implements BRIDGE §8.3 / §8.5 passes every row (a REAL SDK target behind it)", { timeout: 300_000 }, async () => {
+    const r = await run({ appHoldStatus: true, appCallContext: true }, ["b31", "b32"]);
+    // B31.hold_denied_repeat_blocked is not_run only when the SDK's receipt table cannot be aged; with this SDK it runs
+    for (const id of [...B31_IDS, ...B32_IDS]) assert.equal(status(r, id), "pass", `${id}: ${asserted(r, id)}`);
+  });
+
+  it("spec 0.1.77 (B31, B32): a bridge without the cap skips that group (not_applicable, noted), never fails it; the other group still runs", { timeout: 300_000 }, async () => {
+    const r = await run({}, ["b31", "b32"]);
+    for (const id of B31_IDS) assert.match(`${status(r, id)} ${asserted(r, id)}`, /^not_applicable .*does not declare the app_hold_status capability.*never by version/, id);
+    for (const id of B32_IDS) assert.match(`${status(r, id)} ${asserted(r, id)}`, /^not_applicable .*does not declare the app_call_context capability/, id);
+    const only32 = await run({ appCallContext: true }, ["b31", "b32"]);
+    for (const id of B31_IDS) assert.equal(status(only32, id), "not_applicable", id);
+    for (const id of B32_IDS) assert.equal(status(only32, id), "pass", `${id}: ${asserted(only32, id)}`);
+  });
+
+  it("spec 0.1.78 (B31): a bridge that declares ONLY app_hold_status and rejects any `context` member passes all six B31 rows (B31 sends no caller context); B32 is not_applicable (QA-SDK62-1)", { timeout: 300_000 }, async () => {
+    const r = await run({ appHoldStatus: true, rejectContext: true }, ["b31", "b32"]);
+    for (const id of B31_IDS) assert.equal(status(r, id), "pass", `${id}: ${asserted(r, id)}`);
+    for (const id of B32_IDS) assert.equal(status(r, id), "not_applicable", id);
+  });
+
+  it("fire-on-bad (B31, B32): each broken §8.3 / §8.5 rule fails its row", { timeout: 600_000 }, async () => {
+    const cases: [MiniFlags, string[]][] = [
+      [{ appHoldStatus: true, appCallContext: true, appHoldStatusFaults: { noWfCheck: true } }, ["B31.hold_status_undeclared"]],
+      [{ appHoldStatus: true, appCallContext: true, appHoldStatusFaults: { noTargetGate: true } }, ["B31.hold_status_old_target"]],
+      [{ appHoldStatus: true, appCallContext: true, appCallContextFaults: { noValidation: true } }, ["B32.context_foreign_key", "B32.context_tb_key", "B32.context_too_large"]],
+      [{ appHoldStatus: true, appCallContext: true, appCallContextFaults: { noMerge: true } }, ["B32.context_reaches_target", "B32.context_informational"]],
+      [{ appHoldStatus: true, appCallContext: true, appCallContextFaults: { productFromContext: true } }, ["B32.context_foreign_key", "B32.context_too_large"]],
+    ];
+    const reports = await Promise.all(cases.map(([flags]) => run(flags, ["b31", "b32"])));
+    cases.forEach(([flags, ids], i) => {
+      const r = reports[i] as Report;
+      for (const id of ids) assert.equal(status(r, id), "fail", `${JSON.stringify(flags)} ${id}: ${status(r, id)} ${asserted(r, id)}`);
+    });
+  });
+
   it("spec 0.1.57 (B-EV): a bridge that DECLARES events and implements BRIDGE §14 passes every B-EV row", { timeout: 300_000 }, async () => {
     const r = await run({ events: true }, ["events"]);
     for (const id of EVENT_IDS) assert.equal(status(r, id), "pass", `${id}: ${asserted(r, id)}`);
