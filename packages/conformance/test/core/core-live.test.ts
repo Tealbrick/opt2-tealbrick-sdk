@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { OPAQUE_PREFIX } from "@opt2-tealbrick/spec/credentials";
-import { ROUTES } from "@opt2-tealbrick/spec/routes";
+import { ROUTES, type RouteOp } from "@opt2-tealbrick/spec/routes";
 import { authProbeRows, CORE_LIVE_CHECKS, envelopeOnly, gatewayOrigin, LiveClient, loadSpecTypes, ProbeBlocked, runCoreLive, runCoreTarget, secretInPublicAnswer, stringUnion } from "../../src/index.ts";
 import type { CheckResult } from "../../src/report.ts";
 import { type Break, type FakeGateway, startFakeGateway } from "./fake-gateway.ts";
@@ -13,11 +13,12 @@ const FAKE_LIVE_KEY = ["sk", "live", "0123456789abcdef"].join("_");
 
 const errorCodes = stringUnion(loadSpecTypes(), "ErrorCode");
 const byStatus = (rs: CheckResult[], s: string) => rs.filter((r) => r.status === s).map((r) => r.id);
-async function live(breaks: Break[] = [], readonly = true): Promise<{ results: CheckResult[]; gw: FakeGateway; client: LiveClient }> {
-  const gw = await startFakeGateway(breaks);
+/** `routes` = the Core's route document (the gateway serves exactly it); `listed` = the table the suite is told (default the same). */
+async function live(breaks: Break[] = [], readonly = true, routes: readonly RouteOp[] = ROUTES, listed: readonly RouteOp[] = routes): Promise<{ results: CheckResult[]; gw: FakeGateway; client: LiveClient }> {
+  const gw = await startFakeGateway(breaks, routes);
   try {
     const client = new LiveClient({ origin: gw.url, readonly, minIntervalMs: 0, timeoutMs: 3000 });
-    const results = await runCoreLive({ client, errorCodes });
+    const results = await runCoreLive({ client, routes: listed, errorCodes });
     return { results, gw, client };
   } finally {
     await gw.close();
@@ -125,6 +126,96 @@ describe("core live checks", () => {
     assert.ok(byStatus(rs, "fail").includes("R1.unknown_path"));
     assert.ok(byStatus(rs, "not_run").includes("R3"));
     assert.equal(byStatus(rs, "pass").length, 0);
+  });
+});
+
+// sdk#72: R11 probes the payment webhook row(s) the Core's route document lists — a Core on Stripe (today's table,
+// spec 0.1.75 rows), a Core on Paddle only, and one serving both during the migration (the spec 0.1.94 table)
+describe("R11 payment webhook (Stripe, Paddle, both)", () => {
+  const without = (opId: string) => ROUTES.filter((r) => r.opId !== opId);
+  const onStripe = without("paddle.webhook");
+  const onPaddle = without("stripe.webhook");
+  const R11 = ["R11.webhook_bad_signature", "R11.webhook_no_signature"];
+  const hookPosts = (gw: FakeGateway, path: string) => gw.seen.filter((s) => s.method === "POST" && s.path === `/api/v1${path}`);
+  const result = (rs: CheckResult[], id: string) => rs.find((r) => r.id === id);
+
+  it("a Core on Stripe: R11 and R1.public_rows pass on stripe.webhook alone (stripe_signature_invalid); /paddle/webhook is never called", async () => {
+    const r = await live([], true, onStripe);
+    assert.deepEqual(
+      r.results.filter((x) => x.status === "fail").map((x) => `${x.id}: ${x.asserted}`),
+      [],
+    );
+    for (const id of [...R11, "R1.public_rows", "R1.status_mapping"]) assert.equal(result(r.results, id)?.status, "pass", id);
+    assert.equal(result(r.results, "R11.webhook_bad_signature")?.asserted, "stripe.webhook → 401 stripe_signature_invalid");
+    const posts = hookPosts(r.gw, "/stripe/webhook");
+    assert.equal(posts.length, 2);
+    assert.match(String(posts[0].headers["stripe-signature"]), /^t=\d+,v1=0{64}$/);
+    assert.equal(posts[1].headers["stripe-signature"], undefined);
+    assert.equal(hookPosts(r.gw, "/paddle/webhook").length, 0);
+  });
+
+  it("a Core on Paddle only: R11 and R1.public_rows pass on paddle.webhook alone (webhook_signature_invalid); /stripe/webhook is never called", async () => {
+    const r = await live([], true, onPaddle);
+    assert.deepEqual(
+      r.results.filter((x) => x.status === "fail").map((x) => `${x.id}: ${x.asserted}`),
+      [],
+    );
+    for (const id of [...R11, "R1.public_rows", "R1.status_mapping"]) assert.equal(result(r.results, id)?.status, "pass", id);
+    assert.equal(result(r.results, "R11.webhook_bad_signature")?.asserted, "paddle.webhook → 401 webhook_signature_invalid");
+    assert.equal(result(r.results, "R11.webhook_no_signature")?.asserted, "paddle.webhook → 401 webhook_signature_invalid");
+    const posts = hookPosts(r.gw, "/paddle/webhook");
+    assert.equal(posts.length, 2);
+    assert.match(String(posts[0].headers["paddle-signature"]), /^ts=\d+;h1=0{64}$/);
+    assert.equal(posts[1].headers["paddle-signature"], undefined);
+    const event = JSON.parse(posts[0].body) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(event), ["event_id", "event_type", "occurred_at", "data"]);
+    assert.equal(hookPosts(r.gw, "/stripe/webhook").length, 0);
+    assert.match(result(r.results, "R1.public_rows")?.asserted ?? "", /paddle\.webhook → 401 webhook_signature_invalid/);
+  });
+
+  it("a Core serving both (the spec 0.1.94 table): R11 probes Paddle, then Stripe, each with its own code", async () => {
+    const r = await live();
+    assert.equal(result(r.results, "R11.webhook_bad_signature")?.asserted, "paddle.webhook → 401 webhook_signature_invalid; stripe.webhook → 401 stripe_signature_invalid");
+    assert.equal(result(r.results, "R11.webhook_no_signature")?.asserted, "paddle.webhook → 401 webhook_signature_invalid; stripe.webhook → 401 stripe_signature_invalid");
+    assert.equal(hookPosts(r.gw, "/paddle/webhook").length, 2);
+    assert.equal(hookPosts(r.gw, "/stripe/webhook").length, 2);
+  });
+
+  it("a route document listing paddle.webhook against a Core that does not serve it fails R11 (row not served)", async () => {
+    const r = await live([], true, onStripe, ROUTES);
+    for (const id of R11) {
+      assert.equal(result(r.results, id)?.status, "fail", id);
+      assert.match(result(r.results, id)?.asserted ?? "", /paddle\.webhook → 404 not_found \(row not served\); stripe\.webhook → 401 stripe_signature_invalid/);
+    }
+  });
+
+  it("a route document without any payment webhook row fails R11 without a probe", async () => {
+    const r = await live([], true, ROUTES, ROUTES.filter((x) => x.opId !== "paddle.webhook" && x.opId !== "stripe.webhook"));
+    for (const id of R11) {
+      assert.equal(result(r.results, id)?.status, "fail", id);
+      assert.match(result(r.results, id)?.asserted ?? "", /no payment webhook row \(paddle\.webhook, stripe\.webhook\)/);
+    }
+    assert.equal(hookPosts(r.gw, "/paddle/webhook").length + hookPosts(r.gw, "/stripe/webhook").length, 0);
+  });
+
+  for (const [name, routes] of [
+    ["Stripe", onStripe],
+    ["Paddle", onPaddle],
+    ["both", ROUTES],
+  ] as const) {
+    it(`a Core on ${name} that acknowledges unsigned events fails R11 (forged and missing signature)`, async () => {
+      const r = await live(["webhook_accepts_unsigned"], true, routes);
+      for (const id of R11) {
+        assert.equal(result(r.results, id)?.status, "fail", id);
+        assert.match(result(r.results, id)?.asserted ?? "", /→ 200 application\/json/);
+      }
+    });
+  }
+
+  it("Paddle answering the Stripe code fails R11: the code is exact, not any 401", async () => {
+    const r = await live(["status_mismatch"], true, onPaddle);
+    for (const id of R11) assert.equal(result(r.results, id)?.status, "fail", id);
+    assert.match(result(r.results, "R11.webhook_bad_signature")?.asserted ?? "", /paddle\.webhook → 401 stripe_signature_invalid/);
   });
 });
 

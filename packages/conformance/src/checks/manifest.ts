@@ -8,9 +8,9 @@ import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { digest, HOLDS_PENDING_OP, KNOWN_HOLD_FAMILIES, manifestDigest, mcpToolName, toolNameFits, validateAppFiles, validateManifest } from "@opt2-tealbrick/manifest";
-import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 import { codeLiterals, literalNamesId } from "../code-literals.ts";
+import type { Manifest } from "../manifest-type.ts";
 import type { CheckResult } from "../report.ts";
 import { bad, na, notRun, ok, Suite, verdict } from "../suite.ts";
 

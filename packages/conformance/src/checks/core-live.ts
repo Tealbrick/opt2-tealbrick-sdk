@@ -8,11 +8,11 @@ import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { generateKeyPair, opaqueValue } from "@opt2-tealbrick/manifest";
 import { DEVICE_FLOW, OPAQUE_PREFIX } from "@opt2-tealbrick/spec/credentials";
-import { type DeviceOwnerTokenResult, type DeviceStart, type HarnessOptionId, ROUTES, type RouteOp } from "@opt2-tealbrick/spec/routes";
+import { type DeviceOwnerTokenResult, type DeviceStart, type HarnessOptionId, type PaddleEvent, ROUTES, type RouteOp } from "@opt2-tealbrick/spec/routes";
 import type { CheckResult } from "../report.ts";
 import { bad, notRun, type Outcome, Suite, verdict } from "../suite.ts";
 import { newId } from "../tokens.ts";
-import { authProbeRows, CORE_LIVE_CHECKS } from "./core-ids.ts";
+import { authProbeRows, CORE_LIVE_CHECKS, PAYMENT_WEBHOOKS, paymentWebhookRows } from "./core-ids.ts";
 
 /** F75/L1: the device.start probes send a harness option id from the spec list (Core judges the id by that list); typed, so a rename breaks the build. */
 const PROBE_HARNESS: HarnessOptionId = "generic-mcp";
@@ -246,7 +246,7 @@ export interface CoreLiveOptions {
 // transcribed here; `method_not_allowed` is in ErrorCode but not in the table (405 is the only sensible status).
 const STATUS_TABLE: [number[], string[]][] = [
   [[400], ["bad_request", "validation_failed", "idempotency_key_required", "draft_invalid", "draft_op_not_draftable", "draft_ref_invalid", "draft_ref_money", "recipe_not_portable", "policy_invalid", "authorization_pending", "slow_down", "access_denied", "expired_token"]],
-  [[401], ["unauthenticated", "bridge_key_revoked", "enrolment_code_invalid", "stripe_signature_invalid"]],
+  [[401], ["unauthenticated", "bridge_key_revoked", "enrolment_code_invalid", "stripe_signature_invalid", "webhook_signature_invalid"]],
   [[402], ["licence_required"]],
   [[403], ["forbidden"]],
   [[404], ["not_found"]],
@@ -489,25 +489,41 @@ export async function runCoreLive(o: CoreLiveOptions): Promise<CheckResult[]> {
     return verdict(refusal(p1, [400], ["authorization_pending", "slow_down"]) && refusal(p2, [400], ["slow_down"]) && !hasToken(p1) && !hasToken(p2), `${describe(p1)}; ${describe(p2)}`);
   });
 
-  // enrolment code, Stripe webhook
+  // enrolment code, payment webhook(s)
   const enrol = routes.find((r) => r.opId === "bridge_api.enrol");
   await run("C6.enrol_unknown_code", "401 enrolment_code_invalid", async () => {
     const body = { code: opaqueValue(OPAQUE_PREFIX.enrolmentCode), publicKey: await pub(), version: "0.1.0", sdkMajors: [1], form: "deployed", publicOrigin: "https://tb-conformance.invalid" };
     const a = await c.probe({ method: "POST", path: `${API_BASE}${enrol?.path ?? "/bridge/enrol"}`, headers: json, body: JSON.stringify(body), safety: "refused", label: "bridge enrol unknown code" });
     return verdict(refusal(a, [401], ["enrolment_code_invalid"]) && !/portalKeys|bridgeId/.test(a.text), describe(a));
   });
-  const hook = routes.find((r) => r.opId === "stripe.webhook");
-  const hookPath = `${API_BASE}${hook?.path ?? "/stripe/webhook"}`;
-  const event = JSON.stringify({ id: "evt_tbconformance_probe", type: "tb.conformance.probe", livemode: false, data: { object: {} } });
-  await run("R11.webhook_bad_signature", "4xx envelope stripe_signature_invalid", async () => {
-    const sig = `t=${Math.floor(Date.now() / 1000)},v1=${"0".repeat(64)}`;
-    const a = await c.probe({ method: "POST", path: hookPath, headers: { ...json, "stripe-signature": sig }, body: event, safety: "refused", label: "stripe webhook bad signature" });
-    return verdict(refusal(a, [401], ["stripe_signature_invalid"]), describe(a));
-  });
-  await run("R11.webhook_no_signature", "4xx envelope (stripe_signature_invalid|unauthenticated|bad_request)", async () => {
-    const a = await c.probe({ method: "POST", path: hookPath, headers: json, body: event, safety: "refused", label: "stripe webhook no signature" });
-    return verdict(refusal(a, [401], ["stripe_signature_invalid", "unauthenticated"]), describe(a));
-  });
+  // v0.1.94 (specs#74): every payment webhook row the route table lists (Paddle, Stripe or both during the migration);
+  // a table without one fails here and in R1.table.explicit_public
+  const hooks = paymentWebhookRows(routes);
+  const noHook = `no payment webhook row (${PAYMENT_WEBHOOKS.map((h) => h.opId).join(", ")}) in the route table`;
+  const now = Math.floor(Date.now() / 1000);
+  const hookProbe = (opId: string): { body: string; forged: string } => {
+    if (opId === "paddle.webhook") {
+      const event = { event_id: "evt_tbconformance_probe", event_type: "tb.conformance.probe", occurred_at: new Date(now * 1000).toISOString(), data: {} } satisfies PaddleEvent;
+      return { body: JSON.stringify(event), forged: `ts=${now};h1=${"0".repeat(64)}` };
+    }
+    return { body: JSON.stringify({ id: "evt_tbconformance_probe", type: "tb.conformance.probe", livemode: false, data: { object: {} } }), forged: `t=${now},v1=${"0".repeat(64)}` };
+  };
+  const hookRun = (id: string, signed: boolean) =>
+    run(id, hooks.length ? hooks.map(({ hook }) => `${hook.opId}: 401 envelope ${(signed ? hook.forged : hook.missing).join("|")}`).join("; ") : "a payment webhook row", async () => {
+      if (hooks.length === 0) return bad(noHook);
+      const seen: string[] = [];
+      let pass = true;
+      for (const { hook, row } of hooks) {
+        const p = hookProbe(hook.opId);
+        const headers = signed ? { ...json, [hook.header]: p.forged } : json;
+        const a = await c.probe({ method: "POST", path: `${API_BASE}${row.path}`, headers, body: p.body, safety: "refused", label: `${hook.opId} ${signed ? "bad" : "no"} signature` });
+        pass &&= refusal(a, [401], signed ? hook.forged : hook.missing);
+        seen.push(`${hook.opId} → ${describe(a)}${a.status === 404 ? " (row not served)" : ""}`);
+      }
+      return verdict(pass, seen.join("; "));
+    });
+  await hookRun("R11.webhook_bad_signature", true);
+  await hookRun("R11.webhook_no_signature", false);
 
   const clerk = routes.find((r) => r.opId === "clerk.webhook");
   if (clerk) {
@@ -521,7 +537,7 @@ export async function runCoreLive(o: CoreLiveOptions): Promise<CheckResult[]> {
 
   // explicit public rows: answered without a credential, never a secret in an unauthenticated answer
   await run("R1.public_rows", "each probed public row answers without a credential (no 401 unauthenticated, 404, 405, 5xx); no secret in any answer beyond the spec-defined device-flow outputs", async () => {
-    const pubRows = routes.filter((r) => r.exposure === "gateway" && r.auth.every((a) => a === "public" || a === "device" || a === "stripe-webhook"));
+    const pubRows = routes.filter((r) => r.exposure === "gateway" && r.auth.every((a) => a === "public" || a === "device" || a === "stripe-webhook" || a === "paddle-webhook"));
     const seen: string[] = [];
     let pass = true;
     for (const r of pubRows) {
@@ -532,8 +548,10 @@ export async function runCoreLive(o: CoreLiveOptions): Promise<CheckResult[]> {
       }
       for (const { answer } of hits) {
         const env = envelopeOnly(answer.body);
-        // the webhook may answer a missing signature with `unauthenticated` (R11.webhook_no_signature); other public rows never
-        const demandsAuth = answer.status === 401 && env?.code === "unauthenticated" && !r.auth.some((a) => a === "stripe-webhook") && r.opId !== "clerk.webhook";
+        // the Stripe webhook may answer a missing signature with `unauthenticated` (R11.webhook_no_signature, PAYMENT_WEBHOOKS
+        // `missing`); Paddle's and other public rows never
+        const mayDemand = r.opId === "clerk.webhook" || PAYMENT_WEBHOOKS.some((h) => h.opId === r.opId && h.missing.includes("unauthenticated"));
+        const demandsAuth = answer.status === 401 && env?.code === "unauthenticated" && !mayDemand;
         const served = !demandsAuth && answer.status !== 404 && answer.status !== 405 && answer.status < 500 && answer.status !== 0;
         const leak = secretInPublicAnswer(r.opId, answer);
         pass &&= served && !leak;

@@ -40,9 +40,10 @@ import {
 } from "@opt2-tealbrick/manifest";
 import type { InstanceSlice } from "@opt2-tealbrick/spec/bridge";
 import type { BridgeId, InstanceId, SealedBlob, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
-import type { Effect, Manifest } from "@opt2-tealbrick/spec/manifest";
+import type { Effect } from "@opt2-tealbrick/spec/manifest";
 import type { Json, OperationView, TrustContext } from "@opt2-tealbrick/spec/sdk";
 import { applyLevelCrud, LEVEL_CRUD_ENV, parseLevelCrud } from "../../src/level-crud.ts";
+import type { Manifest } from "../../src/manifest-type.ts";
 import { readTar } from "../../src/tar.ts";
 import { writeTarGz } from "./tar-write.ts";
 

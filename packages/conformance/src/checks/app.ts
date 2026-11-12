@@ -27,7 +27,7 @@ import {
 } from "@opt2-tealbrick/manifest";
 import type { AgentId } from "@opt2-tealbrick/spec/credentials";
 import { type HoldVerdictClaim, type InstanceId, TYP } from "@opt2-tealbrick/spec/credentials";
-import type { CrudAction, HoldFamily, Hook, Manifest, Operation, ProductId } from "@opt2-tealbrick/spec/manifest";
+import type { CrudAction, HoldFamily, Hook, Operation, ProductId } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 import type { AppClient, CallOptions, OpAnswer, PersonSession } from "../app-client.ts";
 import { tamperValue } from "../app-client.ts";
@@ -36,6 +36,7 @@ import { SDK_EXPORTS } from "../generated/sdk-exports.ts";
 import { errorCode } from "../http.ts";
 import { applyLevelCrud, LEVEL_CRUD_ENV, type LevelCrudChange } from "../level-crud.ts";
 import { listPersonPages } from "../list-pages.ts";
+import type { Manifest } from "../manifest-type.ts";
 import type { AppDriver } from "../multi-app.ts";
 import type { PayloadScan } from "../report.ts";
 import { sampleInput } from "../sample.ts";

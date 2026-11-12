@@ -29,11 +29,15 @@ import { closeServer, HttpError, header, listen, parseJson, readRaw, sendError, 
 import { newId, nowS } from "./tokens.ts";
 
 const API = "/api/v1";
+const UNSERVED_PREFIXES = ["bridge_api.person_op", "bridge_api.workflow_grant_", "bridge_api.owner_draft_"];
 /** The rows the fake serves: every `bridge`/`device` auth row plus the public rows that start those flows. */
 export const FAKE_PORTAL_ROUTES = ROUTES.filter(
   // v0.1.64 (C326): the person-op relay rows (`bridge_api.person_ops`, `bridge_api.person_op_result`) are not served by this fake (no relay lane here yet)
+  // v0.1.82 (C373 P1) / v0.1.89 (C380): neither are the workflow-grant and owner-draft request rows (no lane for them here yet)
   (r) =>
-    !r.opId.startsWith("bridge_api.person_op") && r.exposure === "gateway" && ((r.auth as readonly string[]).some((a) => a === "bridge" || a === "device") || r.opId === "bridge_api.enrol" || r.opId === "device.start"),
+    !UNSERVED_PREFIXES.some((p) => r.opId.startsWith(p)) &&
+    r.exposure === "gateway" &&
+    ((r.auth as readonly string[]).some((a) => a === "bridge" || a === "device") || r.opId === "bridge_api.enrol" || r.opId === "device.start"),
 );
 
 interface DeviceReq {

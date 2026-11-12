@@ -1,16 +1,44 @@
 // Portal Core target check ids (CONFORMANCE §4.6 R1–R12 + the Core cells of §4.2/§4.3). Ids are stable; per-row
 // auth probes (`R1.auth.<opId>`) are generated from the spec route table, so a new row gets a probe automatically.
-import { ROUTES, type RouteOp } from "@opt2-tealbrick/spec/routes";
+import { type AuthClass, type ErrorCode, ROUTES, type RouteOp } from "@opt2-tealbrick/spec/routes";
 import type { PendingCheck } from "./catalog.ts";
+
+/** A payment-provider webhook row: its auth class, the signature header, and the codes Core refuses a forged or missing signature with. */
+export interface PaymentWebhook {
+  opId: string;
+  auth: AuthClass;
+  header: string;
+  forged: readonly ErrorCode[];
+  missing: readonly ErrorCode[];
+}
+
+/**
+ * v0.1.94 (specs#74, portal-core#83): the Payment provider's webhook rows, Paddle first. A Core lists `stripe.webhook`
+ * (deprecated, removed in specs#75), `paddle.webhook`, or both during the migration; R1.table.explicit_public accepts
+ * any non-empty subset and R11 probes exactly the rows the route table lists. Paddle refuses with the provider-neutral
+ * `webhook_signature_invalid` only; the Stripe row keeps today's codes.
+ */
+export const PAYMENT_WEBHOOKS: readonly PaymentWebhook[] = [
+  { opId: "paddle.webhook", auth: "paddle-webhook", header: "paddle-signature", forged: ["webhook_signature_invalid"], missing: ["webhook_signature_invalid"] },
+  { opId: "stripe.webhook", auth: "stripe-webhook", header: "stripe-signature", forged: ["stripe_signature_invalid"], missing: ["stripe_signature_invalid", "unauthenticated"] },
+];
+
+/** The payment webhook rows a route table lists, in PAYMENT_WEBHOOKS order. */
+export function paymentWebhookRows(routes: readonly RouteOp[] = ROUTES): { hook: PaymentWebhook; row: RouteOp }[] {
+  return PAYMENT_WEBHOOKS.flatMap((hook) => {
+    const row = routes.find((r) => r.opId === hook.opId);
+    return row ? [{ hook, row }] : [];
+  });
+}
 
 /** Static checks: the route table (ROUTES) and the spec declaration files. */
 export const CORE_STATIC_CHECKS: readonly PendingCheck[] = [
   { id: "R1.table.unique_ops", title: "op ids are unique" },
   { id: "R1.table.unique_paths", title: "method + path are unique (parameter names ignored)" },
-  { id: "R1.table.row_fields", title: "every row: non-empty auth from the six classes, exposure gateway|internal, known transport/rate/registry/audit, input/output in SchemaMap" },
+  { id: "R1.table.row_fields", title: "every row: non-empty auth from the PORTAL-API §1.2 classes, exposure gateway|internal, known transport/rate/registry/audit, input/output in SchemaMap" },
   { id: "R1.table.internal_paths", title: "exposure internal exactly on /internal/ paths (RT4, RT5)" },
   { id: "R1.table.bindings", title: "path params and query keys bind to input fields; query keys on GET rows only" },
-  { id: "R1.table.explicit_public", title: "rows reachable without a person or bridge credential are exactly the four explicit public rows" },
+  { id: "R1.table.explicit_public", title: "rows reachable without a person or bridge credential are exactly the explicit public rows plus the payment webhook row(s) (paddle.webhook and/or stripe.webhook), each on its own auth class" },
   { id: "R1.table.p1_disjoint", title: "no row accepts a person credential and a non-person credential (P1)" },
   { id: "R1.table.rt9", title: "auth host only on host.* rows, and host.* rows only host (RT9)" },
   { id: "R2.owner_cli_rows", title: "owner-cli rows are reads, drafts.* or owner_sessions.logout (RT1)" },
@@ -57,8 +85,8 @@ export const CORE_LIVE_CHECKS: readonly PendingCheck[] = [
   { id: "R8.owner_no_key", title: "device.start scope=owner with a public key → refused" },
   { id: "R8.agent_batch_limit", title: "device.start scope=agent with 65 keys → refused" },
   { id: "C6.enrol_unknown_code", title: "bridge enrolment with an unknown code → 401 enrolment_code_invalid" },
-  { id: "R11.webhook_bad_signature", title: "Stripe webhook with an invalid signature → refused (stripe_signature_invalid)" },
-  { id: "R11.webhook_no_signature", title: "Stripe webhook without a signature → refused" },
+  { id: "R11.webhook_bad_signature", title: "each payment webhook row the route table lists, with a forged signature → 401 (paddle.webhook: webhook_signature_invalid; stripe.webhook: stripe_signature_invalid)" },
+  { id: "R11.webhook_no_signature", title: "each payment webhook row the route table lists, without a signature → 401 (paddle.webhook: webhook_signature_invalid; stripe.webhook: stripe_signature_invalid|unauthenticated)" },
   { id: "R11.clerk_webhook_bad_signature", title: "Clerk webhook with a bad svix signature → 401 clerk_signature_invalid (C49)" },
   { id: "R1.route_doc", title: "route table served at /internal/routes equals types/routes.ts" },
   { id: "R1.core_private", title: "Core has no public domain (deploy check)" },

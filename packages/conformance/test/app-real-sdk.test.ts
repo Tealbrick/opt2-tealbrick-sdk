@@ -4,8 +4,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import { applyLevelCrud, LEVEL_CRUD_ENV, parseConformanceConfig, parseLevelCrud, runApp } from "../src/index.ts";
+import type { Manifest } from "../src/manifest-type.ts";
 
 const sdk = (await import(new URL("../../miniapp-sdk/src/server/index.ts", import.meta.url).href)) as {
   defineApp(def: unknown): unknown;

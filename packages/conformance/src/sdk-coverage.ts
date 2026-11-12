@@ -65,4 +65,9 @@ export const SDK_COVERAGE: Readonly<Record<string, readonly string[]>> = {
  */
 export const SDK_UNCOVERED: Readonly<Record<string, string>> = {
   familyAllowedFor: "v0.1.64 (C332a(4)), the person-op relay lane: declared by the spec, not implemented in this repo; the lane that implements it adds the row",
+  // re-pin 0.1.64 → 0.1.94 (sdk#72): exports the spec declared in between; no row asserts them yet
+  SDK_MODEL_ERROR_CODES: "spec follow-up #49 (model-role helpers' TbError codes): A23 reads the app's status black-box, no row asserts these codes yet",
+  CALLER_CONTEXT_SUMMARY_MAX_CHARS: "v0.1.77 (C367, P4), the holds-list callerContext summary: no row reads HoldsPendingItem.callerContext yet",
+  CALLER_CONTEXT_SUMMARY_VALUE_MAX_CHARS: "v0.1.77 (C367, P4), the holds-list callerContext summary: no row reads HoldsPendingItem.callerContext yet",
+  CALLER_CONTEXT_SUMMARY_VALUE_SEGMENTS: "v0.1.77 (C367, P4), the holds-list callerContext summary: no row reads HoldsPendingItem.callerContext yet",
 };

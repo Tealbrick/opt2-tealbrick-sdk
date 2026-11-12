@@ -48,9 +48,10 @@ import {
 } from "@opt2-tealbrick/manifest";
 import type { ClaimRecord, EnrolResponse, HookEntry, WorkspaceConfig } from "@opt2-tealbrick/spec/bridge";
 import { type AgentId, BRIDGE_OP_PATH, type BridgeOp, type Ed25519PublicJwk, type HoldVerdictClaim, type PortalKeyEntry } from "@opt2-tealbrick/spec/credentials";
-import type { DynamicCatalogEntry, Manifest, Operation } from "@opt2-tealbrick/spec/manifest";
+import type { DynamicCatalogEntry, Operation } from "@opt2-tealbrick/spec/manifest";
 import type { Json, OperationView } from "@opt2-tealbrick/spec/sdk";
 import { EventLog, type EventLogFaults } from "../../src/event-log.ts";
+import type { Manifest } from "../../src/manifest-type.ts";
 
 export interface MiniFlags {
   /** pre-C98: a required op without a _meta key is refused input_invalid, a supported one is forwarded keyless (no derived key) */

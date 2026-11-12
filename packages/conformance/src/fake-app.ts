@@ -19,9 +19,10 @@ import {
 } from "@opt2-tealbrick/manifest";
 import { type AppStatus, BRIDGE_HEADERS, type CallEnvelope, type ClaimRequest, type JsonObject } from "@opt2-tealbrick/spec/bridge";
 import { BRIDGE_OP_PATH, type BridgeId, type BridgeOp, type InstanceId, type WorkspaceId } from "@opt2-tealbrick/spec/credentials";
-import type { HookPhase, Manifest } from "@opt2-tealbrick/spec/manifest";
+import type { HookPhase } from "@opt2-tealbrick/spec/manifest";
 import type { Json, KeySet, TrustContext } from "@opt2-tealbrick/spec/sdk";
 import { closeServer, type HttpAnswer, header, listen, readRaw, request, sendError, sendJson } from "./http.ts";
+import type { Manifest } from "./manifest-type.ts";
 import { newId, nowS, peek } from "./tokens.ts";
 
 /** What the fake app needs from the run: current trust material and a global event order. */

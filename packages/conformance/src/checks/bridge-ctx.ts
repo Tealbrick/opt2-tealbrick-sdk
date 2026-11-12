@@ -3,11 +3,12 @@
 // publication and the evidence other checks reuse (C1 positive paths, C7 lifetimes, scans). No product id appears
 // here: every op, tool and key is picked from manifest data by shape.
 import { dynamicToolNames, type Ed25519KeyPair, keySetFrom, mcpToolName, standardOpInputSchema, toolNameFits, ulid } from "@opt2-tealbrick/manifest";
-import type { AgentMode, DynamicCatalogEntry, Manifest, Operation } from "@opt2-tealbrick/spec/manifest";
+import type { AgentMode, DynamicCatalogEntry, Operation } from "@opt2-tealbrick/spec/manifest";
 import type { Json, KeySet } from "@opt2-tealbrick/spec/sdk";
 import type { AgentRole, BridgeWorld } from "../bridge-world.ts";
 import type { FakeApp, Received } from "../fake-app.ts";
 import { type HttpAnswer, request } from "../http.ts";
+import type { Manifest } from "../manifest-type.ts";
 import { McpSession, type ToolCallResult } from "../mcp-agent.ts";
 import { sampleInput } from "../sample.ts";
 import { bad, type Outcome, ok, type Suite } from "../suite.ts";

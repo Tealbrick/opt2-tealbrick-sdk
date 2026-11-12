@@ -5,7 +5,8 @@
 // app serves (GET /tb/v1/health). From conformance 0.1.26 the rows FAIL for an app that reports SDK >= 0.1.36 or declares proofClaims ["bd"]
 // (not_applicable only below that). Like TBCONF_PORT it is not a TB_* name and the SDK never reads it.
 
-import type { CrudAction, Manifest } from "@opt2-tealbrick/spec/manifest";
+import type { CrudAction } from "@opt2-tealbrick/spec/manifest";
+import type { Manifest } from "./manifest-type.ts";
 
 export const LEVEL_CRUD_ENV = "TBCONF_LEVEL_CRUD";
 
