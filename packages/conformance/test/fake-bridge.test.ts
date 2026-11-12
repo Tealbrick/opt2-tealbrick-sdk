@@ -19,9 +19,9 @@ import {
   verifyTicket,
 } from "@opt2-tealbrick/manifest";
 import type { InstanceSlice } from "@opt2-tealbrick/spec/bridge";
-import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { TrustContext } from "@opt2-tealbrick/spec/sdk";
 import { createFakeBridge, type FakeBridge, peek } from "../src/index.ts";
+import type { Manifest } from "../src/manifest-type.ts";
 
 const manifest = JSON.parse(readFileSync(new URL("./fixtures/sample.manifest.json", import.meta.url), "utf8")) as Manifest;
 const now = () => Math.floor(Date.now() / 1000);

@@ -5,8 +5,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import { APP_CHECK_IDS, CHECK_IDS, type ConformanceConfig, exitCode, parseConformanceConfig, type Report, renderMarkdown, runApp } from "../src/index.ts";
+import type { Manifest } from "../src/manifest-type.ts";
 import { freePort } from "./apps/free-port.ts";
 import { type MiniAppFaults, RECALL_OP, RECALL_TAG, startMiniApp } from "./apps/mini-app.ts";
 

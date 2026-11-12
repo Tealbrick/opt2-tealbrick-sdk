@@ -26,8 +26,9 @@ import {
 } from "@opt2-tealbrick/manifest";
 import { type AgentEvent, EVENT_MCP_METHODS, type EventIngestResult, type EventRefuseCode, type EventsListResult, type EventsPollResult, PLATFORM_EVENTS } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, InstanceId } from "@opt2-tealbrick/spec/credentials";
-import type { CrudAction, Manifest } from "@opt2-tealbrick/spec/manifest";
+import type { CrudAction } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
+import type { Manifest } from "./manifest-type.ts";
 
 /** Retention per agent (C274d ruling 3): 7 days or 10 000 rows, whichever first. */
 export const EVENT_RETENTION_ROWS = 10_000;

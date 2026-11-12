@@ -1,6 +1,8 @@
 // Tiny Portal gateway for the Core target's sensitivity tests, built from the spec route table: default deny, every
-// credentialed row refused without the one test credential, the four explicit public rows, /internal/* not served.
-// `breaks` switches on one defect each, so a test can prove the matching live check fails.
+// credentialed row refused without the one test credential, the explicit public rows, /internal/* not served. It serves
+// exactly the rows of the table it is given: pass a table without `paddle.webhook` for a Core on Stripe, without
+// `stripe.webhook` for a Core on Paddle only. `breaks` switches on one defect each, so a test can prove the matching
+// live check fails.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { DEVICE_FLOW, OPAQUE_PREFIX } from "@opt2-tealbrick/spec/credentials";
@@ -24,7 +26,9 @@ export type Break =
   /** the enrol refusal carries a private JWK (`d`) of a key */
   | "public_key_leak"
   /** device.start answers the spec body plus a field that is not in DeviceStart (a refresh token) */
-  | "device_start_extra_secret";
+  | "device_start_extra_secret"
+  /** the payment webhooks acknowledge an event with a forged or missing signature (200 {received: true}) */
+  | "webhook_accepts_unsigned";
 
 export interface Seen {
   method: string;
@@ -126,8 +130,13 @@ export async function startFakeGateway(breaks: readonly Break[] = [], routes: re
           if (has("public_key_leak")) return send(res, req, 401, { error: { code: "enrolment_code_invalid", message: "unknown enrolment code", requestId: `req_${++n}` }, key: { kty: "OKP", crv: "Ed25519", x: "D".repeat(43), d: "E".repeat(43) } });
           return fail(res, req, 401, "enrolment_code_invalid", "unknown enrolment code");
         case "stripe.webhook":
+          if (has("webhook_accepts_unsigned")) return send(res, req, 200, { received: true });
           if (has("status_mismatch")) return fail(res, req, 401, "webhook_bad", "signature mismatch");
           return fail(res, req, 401, "stripe_signature_invalid", "signature mismatch");
+        case "paddle.webhook":
+          if (has("webhook_accepts_unsigned")) return send(res, req, 200, { received: true });
+          if (has("status_mismatch")) return fail(res, req, 401, "stripe_signature_invalid", "signature mismatch");
+          return fail(res, req, 401, "webhook_signature_invalid", "signature mismatch");
         case "clerk.webhook":
           return fail(res, req, 401, "clerk_signature_invalid", "signature mismatch");
         default:

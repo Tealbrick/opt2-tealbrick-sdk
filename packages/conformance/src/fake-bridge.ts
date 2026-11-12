@@ -53,12 +53,13 @@ import {
   type Sha256Digest,
   type WorkspaceId,
 } from "@opt2-tealbrick/spec/credentials";
-import type { AgentMode, CrudAction, HoldFamily, Manifest } from "@opt2-tealbrick/spec/manifest";
+import type { AgentMode, CrudAction, HoldFamily } from "@opt2-tealbrick/spec/manifest";
 import { CRUD_ACTIONS } from "@opt2-tealbrick/spec/manifest";
 import type { OperationView } from "@opt2-tealbrick/spec/sdk";
 import { AppClient } from "./app-client.ts";
 import { EventLog } from "./event-log.ts";
 import { closeServer, HttpError, header, listen, parseJson, readRaw, sendError, sendJson } from "./http.ts";
+import type { Manifest } from "./manifest-type.ts";
 import { Mint, newId, nowS, peek } from "./tokens.ts";
 
 export interface FakeAgent {

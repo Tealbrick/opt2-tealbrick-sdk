@@ -5,7 +5,7 @@
 import { AUDIT_ACTIONS, RATE_CLASSES, REGISTRIES, type RouteOp, TRANSPORTS } from "@opt2-tealbrick/spec/routes";
 import type { CheckResult } from "../report.ts";
 import { type Outcome, Suite, verdict } from "../suite.ts";
-import { CORE_STATIC_CHECKS } from "./core-ids.ts";
+import { CORE_STATIC_CHECKS, PAYMENT_WEBHOOKS } from "./core-ids.ts";
 import { type FieldInfo, fieldsOf, members, normName, stringUnion, type TypeIndex } from "./core-types.ts";
 
 export interface CoreStaticInput {
@@ -15,12 +15,13 @@ export interface CoreStaticInput {
   productIds: readonly string[];
 }
 
-/** PORTAL-API §1.2 (spec 0.1.58: `host` = K13 host assertion, only on `host.*` rows) */
-const AUTH_CLASSES = ["browser", "owner-cli", "bridge", "device", "public", "stripe-webhook", "host"] as const;
+/** PORTAL-API §1.2 (spec 0.1.58: `host` = K13 host assertion, only on `host.*` rows; v0.1.94: `paddle-webhook`, only on paddle.webhook) */
+const AUTH_CLASSES = ["browser", "owner-cli", "bridge", "device", "public", "stripe-webhook", "paddle-webhook", "host"] as const;
 const PERSON = new Set(["browser", "owner-cli"]);
 /** PORTAL-API §1.1 "Explicit public rows": nothing else is reachable without a credential. */
 /** v0.1.64: + `portal.info` (PORTAL-API §D, a native client asks it before sign-in). */
-const EXPLICIT_PUBLIC = ["device.start", "device.token", "bridge_api.enrol", "stripe.webhook", "clerk.webhook", "portal.signing_keys", "portal.info"] as const;
+/** v0.1.94: the payment webhook is no longer one fixed row: PAYMENT_WEBHOOKS (paddle.webhook and/or stripe.webhook) join it. */
+const EXPLICIT_PUBLIC = ["device.start", "device.token", "bridge_api.enrol", "clerk.webhook", "portal.signing_keys", "portal.info"] as const;
 /** RFC 8628 polling codes carried as `error.code` (CORE §8, C15). */
 const DEVICE_POLL_CODES = ["authorization_pending", "slow_down", "access_denied", "expired_token"] as const;
 
@@ -108,6 +109,16 @@ const FORBIDDEN_TOKENS: Record<string, string> = {
   legacy: "legacy alias",
 };
 
+/** v0.1.82 (C373 P1): the six workflow-grant rows (PORTAL-API "v0.1.82 additions"). */
+const WORKFLOW_GRANT_OPS = new Set([
+  "companions.workflow_grants_list",
+  "companions.workflow_grant_set",
+  "companions.workflow_grant_revoke",
+  "bridge_api.workflow_grant_request",
+  "bridge_api.workflow_grant_get",
+  "bridge_api.workflow_grant_release",
+]);
+
 const tokens = (s: string): string[] => {
   const l = s.toLowerCase();
   const out = l.split(/[^a-z0-9]+/).filter(Boolean);
@@ -176,12 +187,21 @@ export function runCoreStatic(input: CoreStaticInput): CheckResult[] {
   rec("R1.table.bindings", "`{name}` and query keys bind to same-named input fields (PORTAL-API §1.3)", clean("every path param and query key binds to an input field", bindIssues));
 
   const credentialFree = routes.filter((r) => r.exposure === "gateway" && !r.auth.some((a) => PERSON.has(a) || a === "bridge" || a === "host")).map((r) => r.opId);
-  const extra = credentialFree.filter((id) => !(EXPLICIT_PUBLIC as readonly string[]).includes(id));
+  // v0.1.94 (specs#74): the payment webhook row(s) the table lists, each on exactly its own class, and that class nowhere else
+  const hookIds = PAYMENT_WEBHOOKS.map((h) => h.opId);
+  const hookIssues: string[] = [];
+  if (!PAYMENT_WEBHOOKS.some((h) => credentialFree.includes(h.opId))) hookIssues.push(`missing payment webhook row (${hookIds.join(" or ")})`);
+  for (const h of PAYMENT_WEBHOOKS) {
+    const row = routes.find((r) => r.opId === h.opId);
+    if (row && row.auth.join() !== h.auth) hookIssues.push(`${h.opId}: auth ${row.auth.join("+")} (expected ${h.auth})`);
+    for (const r of routes) if (r.opId !== h.opId && r.auth.includes(h.auth)) hookIssues.push(`${r.opId}: auth ${h.auth} off its webhook row`);
+  }
+  const extra = credentialFree.filter((id) => !(EXPLICIT_PUBLIC as readonly string[]).includes(id) && !hookIds.includes(id));
   const missing = EXPLICIT_PUBLIC.filter((id) => !credentialFree.includes(id));
   rec(
     "R1.table.explicit_public",
-    `exactly ${EXPLICIT_PUBLIC.join(", ")} (PORTAL-API §1.1)`,
-    clean(`credential-free gateway rows: ${credentialFree.join(", ")}`, [...extra.map((x) => `unexpected credential-free row ${x}`), ...missing.map((x) => `missing explicit row ${x}`)]),
+    `exactly ${EXPLICIT_PUBLIC.join(", ")} + ≥ 1 of ${hookIds.join(", ")} (PORTAL-API §1.1)`,
+    clean(`credential-free gateway rows: ${credentialFree.join(", ")}`, [...extra.map((x) => `unexpected credential-free row ${x}`), ...missing.map((x) => `missing explicit row ${x}`), ...hookIssues]),
   );
   const mixed = routes.filter((r) => r.auth.some((a) => PERSON.has(a)) && r.auth.some((a) => !PERSON.has(a))).map((r) => `${r.opId}: ${r.auth.join("+")}`);
   rec("R1.table.p1_disjoint", "person and non-person classes never on one row (PORTAL-API §1.2 P1)", clean("no row mixes person and non-person auth", mixed));
@@ -251,6 +271,11 @@ export function runCoreStatic(input: CoreStaticInput): CheckResult[] {
     for (const t of new Set([...tokens(r.opId), ...tokens(r.path)])) {
       // v0.1.64 (C326): `person_ops.call` is the allow-listed person-op relay, not tool execution (PORTAL-API §1.2)
       if (r.opId === "person_ops.call" && t === "call") continue;
+      // v0.1.67 (C331 D1): `licences.staff_comp` is the one named exception to "staff routes" (PORTAL-API §6)
+      if (r.opId === "licences.staff_comp" && t === "staff") continue;
+      // v0.1.82 (C373 P1): per-workflow companion grants are Consent Registry records, not grant introspection / check /
+      // redeem (PORTAL-API "v0.1.82 additions"); the K-grants themselves stay verified locally (CORE §6)
+      if (WORKFLOW_GRANT_OPS.has(r.opId) && (t === "grant" || t === "grants")) continue;
       const why = FORBIDDEN_TOKENS[t];
       if (why) forbidden.push(`${r.opId} ${r.method} ${r.path}: "${t}" (${why})`);
     }

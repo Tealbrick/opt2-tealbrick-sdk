@@ -5,7 +5,8 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { validateManifest } from "@opt2-tealbrick/manifest";
-import type { Manifest, Operation } from "@opt2-tealbrick/spec/manifest";
+import type { Operation } from "@opt2-tealbrick/spec/manifest";
+import type { Manifest } from "../../src/manifest-type.ts";
 
 const sample = JSON.parse(readFileSync(new URL("../fixtures/sample.manifest.json", import.meta.url), "utf8")) as Record<string, unknown>;
 const sdkUrl = new URL("../../../miniapp-sdk/src/server/index.ts", import.meta.url).href;

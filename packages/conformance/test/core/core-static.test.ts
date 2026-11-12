@@ -45,6 +45,26 @@ describe("core static checks", () => {
     assert.ok(failing(edit("workspaces.get", { path: "/workspaces/{id}" })).includes("R1.table.bindings"));
   });
 
+  it("R1 payment webhook (sdk#72): a table on Stripe (spec 0.1.75 rows), on Paddle only, or on both passes; none, a wrong class or a stray class fails", () => {
+    const without = (...ids: string[]) => ROUTES.filter((r) => !ids.includes(r.opId));
+    assert.deepEqual(failing(without("paddle.webhook")), []);
+    assert.deepEqual(failing(without("stripe.webhook")), []);
+    assert.deepEqual(failing(ROUTES), []);
+    const none = run(without("paddle.webhook", "stripe.webhook")).find((c) => c.id === "R1.table.explicit_public");
+    assert.equal(none?.status, "fail");
+    assert.match(none?.asserted ?? "", /missing payment webhook row \(paddle\.webhook or stripe\.webhook\)/);
+    assert.ok(failing(edit("paddle.webhook", { auth: ["stripe-webhook"] })).includes("R1.table.explicit_public"));
+    assert.ok(failing(edit("paddle.webhook", { auth: ["public"] })).includes("R1.table.explicit_public"));
+    assert.ok(failing(edit("clerk.webhook", { auth: ["paddle-webhook"] })).includes("R1.table.explicit_public"));
+    assert.ok(failing(extraRow({ opId: "x.hook", method: "POST", path: "/x/webhook", auth: ["paddle-webhook"] })).includes("R1.table.explicit_public"));
+  });
+
+  it("R5 named exceptions of spec 0.1.67 / 0.1.82 cover exactly their rows", () => {
+    assert.ok(!failing(ROUTES).includes("R5.forbidden_ops"));
+    assert.ok(failing(extraRow({ opId: "grants.check", method: "POST", path: "/grants/check" })).includes("R5.forbidden_ops"));
+    assert.ok(failing(extraRow({ opId: "x.staff", path: "/staff/list" })).includes("R5.forbidden_ops"));
+  });
+
   it("R1 RT9: host auth on a non-host row, a host.* row without host, or a host.* row that also takes another class", () => {
     assert.ok(failing(edit("workspaces.list", { auth: ["host"] })).includes("R1.table.rt9"));
     assert.ok(failing(edit("host.plans", { auth: ["bridge"] })).includes("R1.table.rt9"));

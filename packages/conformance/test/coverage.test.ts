@@ -29,10 +29,12 @@ describe("A11 SDK coverage", () => {
     assert.equal(coverageOutcome().pass, true);
   });
 
-  it("modelRole maps to the real RM-17 row, and the one uncovered export is declared with a reason, not mapped to a row that does not call it", () => {
+  it("modelRole maps to the real RM-17 row, and the uncovered exports are declared with a reason, not mapped to a row that does not call them", () => {
     assert.deepEqual(SDK_COVERAGE.modelRole, ["A23.model_role_no_route"]);
-    assert.ok(!("familyAllowedFor" in SDK_COVERAGE));
+    const uncovered = ["familyAllowedFor", "SDK_MODEL_ERROR_CODES", "CALLER_CONTEXT_SUMMARY_MAX_CHARS", "CALLER_CONTEXT_SUMMARY_VALUE_MAX_CHARS", "CALLER_CONTEXT_SUMMARY_VALUE_SEGMENTS"];
+    assert.deepEqual(Object.keys(SDK_UNCOVERED), uncovered);
+    for (const n of uncovered) assert.ok(!(n in SDK_COVERAGE), n);
     assert.match(SDK_UNCOVERED.familyAllowedFor ?? "", /person-op relay lane/);
-    assert.match(coverageOutcome().asserted, /not covered yet \(declared in SDK_UNCOVERED\): familyAllowedFor/);
+    assert.match(coverageOutcome().asserted, new RegExp(`not covered yet \\(declared in SDK_UNCOVERED\\): ${uncovered.join(", ")}$`));
   });
 });

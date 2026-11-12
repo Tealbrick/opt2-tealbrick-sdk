@@ -8,8 +8,9 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { validateManifest } from "@opt2-tealbrick/manifest";
-import type { DynamicCatalogEntry, Manifest, Operation } from "@opt2-tealbrick/spec/manifest";
+import type { DynamicCatalogEntry, Operation } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
+import type { Manifest } from "./manifest-type.ts";
 
 /** Op ids of the real app (generated; no product id). */
 export const REAL_OPS = { plain: "real_write", search: "real_lookup", list: "real_listing" } as const;

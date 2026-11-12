@@ -8,9 +8,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import { createFakeBridge } from "../src/fake-bridge.ts";
 import { checkStartModule, forkStart } from "../src/fork-start.ts";
+import type { Manifest } from "../src/manifest-type.ts";
 import { appEnv } from "../src/run-app.ts";
 import { freePort } from "./apps/free-port.ts";
 

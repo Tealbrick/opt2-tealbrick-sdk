@@ -7,8 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { validateManifest } from "@opt2-tealbrick/manifest";
-import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import { appEnv, createFakeBridge, freePort, loadSdk, type RealStartContext, realAppManifest, startRealApp } from "../src/index.ts";
+import type { Manifest } from "../src/manifest-type.ts";
 
 const sample = JSON.parse(readFileSync(new URL("./fixtures/sample.manifest.json", import.meta.url), "utf8")) as Manifest;
 type RoleCtx = RealStartContext & { modelRole(role: string): Promise<Record<string, unknown> | null> };

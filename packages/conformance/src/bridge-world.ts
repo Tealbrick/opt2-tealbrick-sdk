@@ -28,10 +28,11 @@ import {
 } from "@opt2-tealbrick/manifest";
 import type { AppEntry, EnrolCodeEntry, HookEntry, KeyRequirementEntry, SkillFile, WorkspaceConfig } from "@opt2-tealbrick/spec/bridge";
 import { type AgentId, type BridgeId, type ConnectionId, type Ed25519PublicJwk, type FreeCaps, type InstanceId, type PersonId, type StandaloneState, TYP } from "@opt2-tealbrick/spec/credentials";
-import type { AgentMode, CrudAction, HoldFamily, Manifest, Operation } from "@opt2-tealbrick/spec/manifest";
+import type { AgentMode, CrudAction, HoldFamily, Operation } from "@opt2-tealbrick/spec/manifest";
 import type { KeySet } from "@opt2-tealbrick/spec/sdk";
 import { FakeApp, type FakeAppWorld } from "./fake-app.ts";
 import { FakePortal } from "./fake-portal.ts";
+import type { Manifest } from "./manifest-type.ts";
 import { type AgentCapture, KeyAgent, OAuthAgent } from "./mcp-agent.ts";
 import { Mint, newId, nowS, peek, rawSign } from "./tokens.ts";
 

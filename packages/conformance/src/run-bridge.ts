@@ -9,7 +9,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import { type BridgeStart, type BridgeStartResult, BridgeWorld } from "./bridge-world.ts";
 import { authChecks, B13_VARIANTS, callChecks, claimChecks, companionChecks, dynamicChecks, enrolChecks, enrolRequests, hookChecks, mcpChecks, peerCatalog, surfaceChecks } from "./checks/bridge.ts";
 import { c117Checks } from "./checks/bridge-c117.ts";
@@ -21,6 +20,7 @@ import { realAppChecks } from "./checks/bridge-real.ts";
 import { spine013Checks } from "./checks/bridge-spine013.ts";
 import { spawnCommand } from "./command.ts";
 import { request } from "./http.ts";
+import type { Manifest } from "./manifest-type.ts";
 import { buildReport, type PayloadScan, type Report } from "./report.ts";
 import { bad, notRun, Suite, verdict } from "./suite.ts";
 

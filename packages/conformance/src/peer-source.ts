@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { keySetFrom, manifestDigest, validateManifest, verifyReleaseIndex } from "@opt2-tealbrick/manifest";
-import type { Manifest } from "@opt2-tealbrick/spec/manifest";
+import type { Manifest } from "./manifest-type.ts";
 import { readTar } from "./tar.ts";
 import type { PeerSpec } from "./waivers.ts";
 
