@@ -260,7 +260,7 @@ describe("createMiniapp", () => {
     assert.equal(Buffer.byteLength(licence), 11358 - "Copyright [yyyy] [name of copyright owner]".length + "Copyright 2026 Tealbrick".length);
     assert.equal(
       read(dir, "NOTICE"),
-      "Alpha App (opt2-tealbrick-alpha)\nCopyright 2026 Polygonface s.r.o. Tealbrick is a trademark of Polygonface s.r.o.; the Apache License 2.0 grants no right to it.\n\nThis product includes software and assets developed by third parties; see THIRD_PARTY_NOTICES.md.\n",
+      "Alpha App (opt2-tealbrick-alpha)\nCopyright 2026 Polygonface s.r.o. Tealbrick is a trademark of Wintra Ltd.; the Apache License 2.0 grants no right to it.\n\nThis product includes software and assets developed by third parties; see THIRD_PARTY_NOTICES.md.\n",
     );
     const third = read(dir, "THIRD_PARTY_NOTICES.md");
     for (const name of ["react-dom", "scheduler", "@opt2-tealbrick/ui", "Nunito", "SIL Open Font License 1.1", "OFL.txt", "not** covered by the Apache-2.0", "@opt2-tealbrick/miniapp-sdk"])
