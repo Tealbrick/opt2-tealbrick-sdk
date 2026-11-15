@@ -1,6 +1,7 @@
 // HTTP surface (SDK-API §3.2): every route is derived from the manifest; apps add none under /tb.
 import { createReadStream, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { Socket } from "node:net";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { Readable } from "node:stream";
 import type { BridgeOp } from "@opt2-tealbrick/spec/credentials";
@@ -10,10 +11,11 @@ import type { AttentionCode } from "./claim-guard.ts";
 import type { SdkPublicContext } from "./context.ts";
 import { TbError } from "./errors.ts";
 import { HOLD_PAGE_RE, handleHoldPage } from "./holds-page.ts";
-import { escapeHtml, readRaw, requestId, sendError, sendHtml, sendJson } from "./http.ts";
+import { escapeHtml, pathOf, readRaw, requestId, sendError, sendHtml, sendJson } from "./http.ts";
 import { buildOpenApi } from "./openapi.ts";
 import { handleAgentOp, handlePersonOp } from "./ops.ts";
 import type { Runtime } from "./runtime.ts";
+import { proxyUiRequest, proxyUiUpgrade } from "./ui-proxy.ts";
 import { handleViewer, isViewerPath } from "./viewer.ts";
 
 const BRIDGE_OP_ROUTES: Record<string, BridgeOp> = { catalog: "catalog", resolve: "resolve", mark: "mark", "scope-summary": "scope_summary" };
@@ -177,6 +179,8 @@ export function createHttpServer(rt: Runtime): Server {
       // v0.1.13 (G4): apps without a person UI get the SDK's minimal decision page at /holds/<id> (apps with a UI route it)
       const hold = rt.manifest.ui ? null : HOLD_PAGE_RE.exec(rest);
       if (hold?.[1] && (m === "GET" || m === "POST")) return handleHoldPage(rt, req, res, hold[1]);
+      // spec 0.1.95 (SDK-API §23): a companion serves the person UI; every non-/tb/ path and method goes there
+      if (rt.def.uiProxy && !rest.startsWith("/tb/") && rest !== "/tb") return proxyUiRequest(rt, rt.def.uiProxy, req, res);
       if (rest.startsWith("/tb/") || m !== "GET") return sendError(res, requestId(), new TbError("not_found", "not found", 404));
       if (!rt.manifest.ui) return sendError(res, requestId(), new TbError("not_found", "this app has no person UI", 404));
       try {
@@ -197,10 +201,18 @@ export function createHttpServer(rt: Runtime): Server {
     sendError(res, requestId(), new TbError("not_found", "not found", 404));
   };
 
-  return createServer((req, res) => {
+  const server = createServer((req, res) => {
     route(req, res).catch((e) => {
       rt.log.error("request failed", { error: e instanceof Error ? e.message : "unknown" });
       sendError(res, requestId(), e);
     });
   });
+  // spec 0.1.95 (SDK-API §23): WebSocket upgrades only on the proxied UI paths; every other upgrade is refused
+  server.on("upgrade", (req: IncomingMessage, socket: Socket, head: Buffer) => {
+    const path = pathOf(req.url, "http://app.internal");
+    const rest = path.startsWith(`${base}/`) ? path.slice(base.length) : null;
+    if (rt.def.uiProxy && rest !== null && !rest.startsWith("/tb/")) return proxyUiUpgrade(rt, rt.def.uiProxy, req, socket, head);
+    socket.end("HTTP/1.1 404 Not Found\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
+  });
+  return server;
 }

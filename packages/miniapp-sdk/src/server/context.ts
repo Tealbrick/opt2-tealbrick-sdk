@@ -7,6 +7,7 @@ import type { AppSecrets } from "./app-secrets.ts";
 import type { JobHandler, JobSpec, JobsView } from "./jobs.ts";
 import type { OwnerDraftsView } from "./owner-drafts.ts";
 import type { SliceTopologyView } from "./topology.ts";
+import type { UiProxy } from "./ui-proxy.ts";
 
 export interface ContextExtras {
   /** bridge public origin (`https://<bridge>`) for third-party callbacks `…/p/<product><path>`; null until the slice names it */
@@ -136,6 +137,7 @@ export interface SdkAppEvents {
 }
 /** v0.1.21 (RUL-11): the ctx of `onStop` (the DB is still open; jobs no longer start) */
 export type StopContext = SdkEventContext & { secrets: AppSecrets };
+export type { UiProxy };
 export type SdkAppDefinition<A extends string = never> = Omit<AppDefinition<A>, "onStart" | "events"> & {
   onStart?(ctx: StartContext): Promise<void>;
   events?: SdkAppEvents;
@@ -149,4 +151,6 @@ export type SdkAppDefinition<A extends string = never> = Omit<AppDefinition<A>, 
    * claiming and before running jobs are drained and the DB closes: stop the app's own timers here. 5 s timeout.
    */
   onStop?(ctx: StopContext): Promise<void>;
+  /** spec 0.1.95 (SDK-API §23): the person UI is a companion service; needs manifest `ui` */
+  uiProxy?: UiProxy;
 };

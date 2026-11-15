@@ -116,3 +116,5 @@ export { CSRF_HEADER, SESSION_COOKIE } from "./person.ts";
 export { TB_EXEC_CONTROL_PORT } from "./service-helper.ts";
 // spec 0.1.87 (C373, G-2): ctx.topology() shape (mirror until the spec pin carries it; display only)
 export { type SliceTopology, type SliceTopologyView, TOPOLOGY_MAX, type TopologyCompanion, type TopologyConnection, type TopologyEdge, type TopologyInstance } from "./topology.ts";
+// spec 0.1.95 (SDK-API §23): person UI served by a companion
+export { PERSON_ASSERTION_HEADER, PERSON_ASSERTION_TTL_S, type PersonAssertion, signPersonAssertion, UI_PROXY_MAX_BODY, type UiProxy } from "./ui-proxy.ts";
