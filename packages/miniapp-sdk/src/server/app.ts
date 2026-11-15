@@ -53,6 +53,7 @@ import {
 } from "./store.ts";
 import type { SliceTopologyView } from "./topology.ts";
 import { TrustState } from "./trust.ts";
+import { closeUiUpgrades, uiProxyProblems } from "./ui-proxy.ts";
 import { type BootFailure, type BootPhase, bootFailure, type Clock, META, MigrationLock, type PreUpdateSnapshot, readUpgradeMeta, realClock, recordBoot } from "./upgrade.ts";
 
 export const SDK_VERSION: string = (JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version: string }).version;
@@ -120,6 +121,7 @@ function checkDefinition(def: AppDefinition<string> | SdkAppDefinition<string>, 
     }
   }
   if (d.onStop !== undefined && typeof d.onStop !== "function") problems.push("onStop must be a function");
+  problems.push(...uiProxyProblems(d.uiProxy, m));
   return problems;
 }
 
@@ -762,6 +764,7 @@ export async function startApp(
       await events.stop();
       await new Promise<void>((resolve) => {
         server.close(() => resolve());
+        closeUiUpgrades(rt);
         server.closeIdleConnections();
         setTimeout(() => server.closeAllConnections(), 10_000).unref();
       });

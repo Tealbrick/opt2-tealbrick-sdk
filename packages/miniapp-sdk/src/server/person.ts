@@ -59,7 +59,7 @@ function sha256(v: string): string {
 }
 
 /** `Origin` must name the host the request was made to (the bridge sets X-Forwarded-Host when it proxies). */
-function sameOrigin(req: IncomingMessage): boolean {
+export function sameOrigin(req: IncomingMessage): boolean {
   const origin = header(req, "origin");
   if (!origin) return false;
   const host = header(req, "x-forwarded-host") ?? header(req, "host");
